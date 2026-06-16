@@ -39,6 +39,7 @@ func TestRequireAuthRejectsMissingMalformedAndInvalidTokens(t *testing.T) {
 			if err != nil {
 				t.Fatalf("app.Test returned error: %v", err)
 			}
+			defer resp.Body.Close()
 			if resp.StatusCode != fiber.StatusUnauthorized {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusUnauthorized)
 			}
@@ -68,6 +69,7 @@ func TestRequireAuthSetsUserLocals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.Test returned error: %v", err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
 	}
@@ -117,6 +119,7 @@ func TestRequireRoleAllowsOnlyConfiguredRoles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("app.Test returned error: %v", err)
 			}
+			defer resp.Body.Close()
 			if resp.StatusCode != tt.want {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
 			}

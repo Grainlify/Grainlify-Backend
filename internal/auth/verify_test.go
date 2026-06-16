@@ -28,6 +28,7 @@ func TestNormalizeWalletType(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.input, func(t *testing.T) {
 			got, err := NormalizeWalletType(tt.input)
 			if tt.ok && err != nil {
@@ -36,7 +37,7 @@ func TestNormalizeWalletType(t *testing.T) {
 			if !tt.ok && err == nil {
 				t.Fatal("NormalizeWalletType returned nil error")
 			}
-			if got != tt.want {
+			if tt.ok && got != tt.want {
 				t.Fatalf("wallet type = %q, want %q", got, tt.want)
 			}
 		})
