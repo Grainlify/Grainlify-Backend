@@ -67,6 +67,10 @@ func TestNormalizeAddress(t *testing.T) {
 	if stellar != "abcdef" {
 		t.Fatalf("normalized stellar address = %q, want abcdef", stellar)
 	}
+
+	if _, err := NormalizeAddress(WalletType("bitcoin"), "abc"); err == nil {
+		t.Fatal("unsupported wallet type returned nil error")
+	}
 }
 
 func TestVerifyEVMSignature(t *testing.T) {
@@ -155,5 +159,73 @@ func TestVerifyStellarSecp256k1Signature(t *testing.T) {
 	}
 	if err := VerifySignature(WalletTypeStellarSecp256k1, "", message, hex.EncodeToString(signature.Serialize()), "abcd"); err == nil {
 		t.Fatal("VerifySignature accepted malformed secp256k1 public key")
+	}
+}
+
+func TestVerifyStellarSecp256k1CompactSignature(t *testing.T) {
+	priv, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey returned error: %v", err)
+	}
+	message := LoginMessage("nonce-compact")
+	hash := sha256.Sum256([]byte(message))
+	signature := decredEcdsa.Sign(priv, hash[:])
+
+	r := signature.R()
+	s := signature.S()
+	compact := make([]byte, 64)
+	r.PutBytesUnchecked(compact[:32])
+	s.PutBytesUnchecked(compact[32:])
+
+	if err := VerifySignature(
+		WalletTypeStellarSecp256k1,
+		"",
+		message,
+		hex.EncodeToString(compact),
+		hex.EncodeToString(priv.PubKey().SerializeCompressed()),
+	); err != nil {
+		t.Fatalf("VerifySignature compact secp256k1 returned error: %v", err)
+	}
+}
+
+func TestVerifySignatureRejectsUnsupportedWalletType(t *testing.T) {
+	if err := VerifySignature(WalletType("bitcoin"), "", "message", "abcd", "abcd"); err == nil {
+		t.Fatal("VerifySignature accepted unsupported wallet type")
+	}
+}
+
+func TestDecodeHex(t *testing.T) {
+	got, err := decodeHex(" 0x0a ")
+	if err != nil {
+		t.Fatalf("decodeHex returned error: %v", err)
+	}
+	if len(got) != 1 || got[0] != 0x0a {
+		t.Fatalf("decodeHex = %x, want 0a", got)
+	}
+	if _, err := decodeHex(" "); err == nil {
+		t.Fatal("decodeHex accepted empty input")
+	}
+}
+
+func TestParseSecp256k1SignatureRejectsInvalidCompactScalars(t *testing.T) {
+	invalidR := make([]byte, 64)
+	for i := 0; i < 32; i++ {
+		invalidR[i] = 0xff
+	}
+	if _, err := parseSecp256k1Signature(invalidR); err == nil {
+		t.Fatal("parseSecp256k1Signature accepted overflowing r scalar")
+	}
+
+	invalidS := make([]byte, 64)
+	invalidS[31] = 1
+	for i := 32; i < 64; i++ {
+		invalidS[i] = 0xff
+	}
+	if _, err := parseSecp256k1Signature(invalidS); err == nil {
+		t.Fatal("parseSecp256k1Signature accepted overflowing s scalar")
+	}
+
+	if _, err := parseSecp256k1Signature([]byte{0x30}); err == nil {
+		t.Fatal("parseSecp256k1Signature accepted malformed DER")
 	}
 }
