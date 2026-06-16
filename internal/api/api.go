@@ -42,7 +42,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Use(func(c *fiber.Ctx) error {
 		// Log all incoming requests for debugging (especially webhooks)
 		if strings.HasPrefix(c.Path(), "/webhooks/") {
-			slog.Info("webhook request received",
+			slog.Debug("webhook request received",
 				"method", c.Method(),
 				"path", c.Path(),
 				"original_url", c.OriginalURL(),
