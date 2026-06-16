@@ -1,402 +1,250 @@
-# 📘 Patchwork — Full System Architecture (Frontend, Backend, Smart Contracts)
+# Grainlify Backend
 
-This document explains **Patchwork** at a **very low level**, covering:
+Grainlify Backend is a Go-based API server that connects open-source developers with projects through GitHub integration, ecosystem tracking, and contribution management.
 
-- Frontend architecture
-- Backend architecture
-- Async systems
-- Chat system
-- Smart contracts (Stellar / Soroban)
-- Data flow
-- Security & trust model
+## Overview
 
-This is meant for **engineering alignment**, not marketing.
+Grainlify Backend provides:
 
----
+- GitHub OAuth authentication
+- GitHub App integration for repository management
+- Project ecosystem organization (Starknet, Ethereum, etc.)
+- User profile tracking with contribution statistics
+- KYC verification via Didit integration
+- Admin endpoints for ecosystem management
+- GitHub webhooks for syncing issues and pull requests
+- PostgreSQL database with migration support
+- Optional NATS event bus for async processing
+- Optional Redis for caching
 
-## 1. What is Patchwork (System View)
+## Tech Stack
 
-**Patchwork** is a multi-ecosystem infrastructure that:
+| Component | Technology |
+|-----------|------------|
+| Language | Go 1.24+ |
+| HTTP Framework | Fiber (fasthttp) |
+| Database | PostgreSQL with pgx driver |
+| Migrations | golang-migrate |
+| Event Bus | NATS (optional) |
+| Cache | Redis (optional) |
+| Authentication | JWT + GitHub OAuth |
+| KYC Provider | Didit |
 
-- connects open-source developers with open-source projects
-- tracks verifiable contributions (PRs, issues, commits)
-- locks rewards on-chain
-- automatically pays contributors on successful merges
-- builds reputation and rankings
-- enables direct dev ↔ maintainer communication
-
-Patchwork is **not a chain**.
-
-Patchwork is a **coordination + verification layer**.
-
----
-
-## 2. High-Level Architecture Overview
+## Architecture
 
 ```mermaid
 flowchart TB
 
-    FE["Frontend<br>Next.js"]
+    FE["Frontend"]
     API["Backend API<br>Go + Fiber"]
-    BUS[NATS Event Bus]
-    WORKERS[Async Workers]
     DB[(PostgreSQL)]
-    REDIS[(Redis)]
     GH[GitHub API / Webhooks]
-    IPFS[(IPFS)]
-    CHAIN["Blockchain<br>Stellar (Soroban)"]
+    DIDIT[Didit KYC]
 
     FE --> API
     GH --> API
+    DIDIT --> API
     API --> DB
-    API --> REDIS
-    API --> BUS
-    BUS --> WORKERS
-    WORKERS --> DB
-    WORKERS --> IPFS
-    WORKERS --> CHAIN
 ```
 
-## 3. Frontend Architecture (Very Low Level)
-
-### 3.1 Tech Stack
-
-- Next.js (App Router)
-- TypeScript
-- Tailwind CSS
-- Wallet SDKs (Stellar)
-- WebSockets (chat)
-- REST + SSE
-
-### 3.2 Frontend Responsibilities
-
-The frontend is thin.
-
-All trust logic lives in the backend.
-
-Frontend handles:
-
-- wallet connection
-- GitHub OAuth flow
-- data visualization
-- chat UI
-- transaction signing
-- user interactions
-
-### 3.3 Frontend Modules
+## Project Structure
 
 ```text
-/app
- ├── auth
- ├── dashboard
- ├── projects
- ├── bounties
- ├── submissions
- ├── patchquest
- ├── leaderboard
- ├── chat
- └── admin
+Grainlify-Backend/
+├── cmd/
+│   ├── api/          # Main API server
+│   ├── migrate/      # Database migration runner
+│   └── worker/       # Background worker (optional)
+├── internal/
+│   ├── api/          # HTTP handlers and routing
+│   ├── auth/         # JWT authentication
+│   ├── bus/          # Event bus interface (NATS)
+│   ├── config/       # Configuration management
+│   ├── db/           # Database connection
+│   ├── github/       # GitHub API client
+│   ├── handlers/     # HTTP endpoint handlers
+│   ├── soroban/      # Stellar blockchain integration
+│   └── worker/       # Background job processing
+├── migrations/       # SQL migration files
+├── .env.example      # Environment variables template
+├── go.mod            # Go dependencies
+└── Makefile          # Build commands
 ```
 
-### 3.4 Wallet Flow (Frontend)
+## Core Features
 
-- User connects wallet
-- Signs nonce
-- Sends signature to backend
-- Receives JWT
-- All requests authenticated via JWT
+### Authentication
+- GitHub OAuth login/signup flow
+- JWT token-based authentication
+- Role-based access control (contributor, maintainer, admin)
 
-### 3.5 Chat (Frontend)
+### GitHub Integration
+- GitHub App for repository management
+- Webhook handling for issues and pull requests
+- Automatic repository verification
+- Project syncing with GitHub data
 
-- WebSocket connection
-- Room-based subscriptions
-- Optimistic UI updates
-- Messages persisted only after backend ACK
+### Project Management
+- Register GitHub repositories as projects
+- Organize projects by ecosystems (Starknet, Ethereum, etc.)
+- Project verification and webhook setup
+- Issue and PR tracking
 
-## 4. Backend Architecture (Very Low Level)
+### User Profiles
+- Contribution statistics
+- Activity calendar (heatmap)
+- Language and ecosystem breakdowns
+- Paginated activity feed
 
-### 4.1 Tech Stack
+### KYC Verification
+- Didit integration for identity verification
+- KYC session management
+- Verification status tracking
 
-| Layer | Technology |
-| --- | --- |
-| Language | Go 1.22+ |
-| HTTP | Fiber (fasthttp) |
-| DB | PostgreSQL |
-| DB Driver | pgx |
-| Cache | Redis |
-| Event Bus | NATS |
-| Storage | IPFS |
-| Auth | Wallet + GitHub OAuth |
+### Admin Features
+- Bootstrap first admin user
+- Manage user roles
+- Create and manage ecosystems
+- View system statistics
 
-### 4.2 Backend Philosophy
+## Getting Started
 
-- HTTP APIs must be fast and predictable
-- No external calls in request path
-- All heavy work is async
-- Database is source of truth
-- Blockchain is settlement layer
+### Prerequisites
 
-### 4.3 Backend Services
+- Go 1.24+
+- PostgreSQL 12+
+- (Optional) NATS server
+- (Optional) Redis server
 
-```text
-api-gateway
- ├── auth
- ├── projects
- ├── bounties
- ├── submissions
- ├── chat
- ├── reputation
- ├── leaderboard
- └── admin
+### Installation
 
-workers
- ├── github-sync
- ├── verifier
- ├── payout
- ├── reputation
- └── notifications
+```bash
+# Clone the repository
+git clone https://github.com/jagadeesh/grainlify/backend.git
+cd Grainlify-Backend
+
+# Install dependencies
+go mod download
+
+# Copy environment template
+cp .env.example .env
+
+# Edit .env with your configuration
+# Set DB_URL, GitHub OAuth credentials, etc.
 ```
 
-### 4.4 Database (PostgreSQL)
+### Running the Server
 
-Postgres stores truthful state only.
-
-Core tables:
-
-- users
-- projects
-- bounties
-- submissions
-- payouts
-- reputation_events
-- chat_rooms
-- chat_messages
-
-### 4.5 Redis (Coordination Layer)
-
-Redis is used for:
-
-- rate limiting
-- webhook deduplication
-- leaderboards (sorted sets)
-- hot reads (project pages)
-- chat pub/sub
-
-Redis is never the source of truth.
-
-### 4.6 Event-Driven Backend
-
-```mermaid
-flowchart LR
-    API -->|emit| NATS
-    NATS --> VERIFIER
-    NATS --> PAYOUT
-    NATS --> REPUTATION
+**Development with auto-reload (recommended):**
+```bash
+./run-dev.sh
+# or
+make dev
 ```
 
-API only emits events.
-
-Workers process events independently.
-
-## 5. GitHub Integration (Critical)
-
-### 5.1 GitHub Webhooks
-
-Subscribed events:
-
-- issues
-- pull_request
-- pull_request_review
-- push
-
-### 5.2 Webhook Handling Rules
-
-- Validate signature
-- Deduplicate via Redis
-- Emit event to NATS
-- Return 200 OK
-- Never process GitHub logic inline
-
-## 6. Contribution Flow (End-to-End)
-
-```mermaid
-sequenceDiagram
-
-    participant Dev
-    participant FE
-    participant API
-    participant GH
-    participant BUS
-    participant VER
-    participant PAY
-    participant CHAIN
-
-    Dev->>FE: Submit PR
-    GH-->>API: PR merged webhook
-    API->>BUS: PR_MERGED
-    BUS->>VER: Verify PR
-    VER->>GH: Fetch commits
-    VER->>VER: Generate proof
-    VER->>BUS: VERIFIED
-    BUS->>PAY: Release payout
-    PAY->>CHAIN: Execute tx
+**Standard run:**
+```bash
+go run ./cmd/api
 ```
 
-## 7. Smart Contracts (On-Chain Layer)
-
-### 7.1 Design Principle
-
-Smart contracts are:
-
-- minimal
-- deterministic
-- dumb by design
-
-All logic stays off-chain.
-
-### 7.2 Stellar (Soroban) Smart Contracts
-
-Escrow Contract
-
-Responsibilities:
-
-- lock funds
-- release funds to contributor
-- allow refunds on timeout
-
-Data:
-
-- project_id
-- bounty_id
-- contributor_address
-- amount
-
-### 7.3 Stellar Transaction Execution
-
-Used for:
-
-- escrow releases
-- automated settlement
-
-Flow:
-
-- backend emits payout intent
-- Soroban transaction executes
-- tx confirmation sent back
-
-## 8. Verification System
-
-Verification includes:
-
-- PR merge check
-- commit author check
-- issue mapping
-- optional test execution
-
-Proof format:
-
-- JSON
-- hashed
-- stored on IPFS
-
-## 9. Reputation System
-
-Reputation is:
-
-- calculated off-chain
-- optionally anchored on-chain
-- immutable history
-
-Factors:
-
-- bounty value
-- project reputation
-- PatchQuest weight
-
-## 10. PatchQuest (Monthly Hackathon Engine)
-
-PatchQuest is:
-
-- a time-boxed contribution window
-- leaderboard snapshot
-- reward pool allocator
-
-Backend responsibilities:
-
-- cycle start/end
-- scoring
-- ranking freeze
-- payout triggers
-
-## 11. Chat System (Dev ↔ Maintainer)
-
-Purpose
-
-- clarify requirements
-- negotiate scope
-- avoid PR rejection
-
-Backend Chat Model
-
-```mermaid
-flowchart LR
-    WS[WebSocket]
-    CHAT_API
-    REDIS
-    DB
-    WS --> CHAT_API
-    CHAT_API --> DB
-    CHAT_API --> REDIS
-    REDIS --> WS
+**Build binary:**
+```bash
+go build -o ./api ./cmd/api
+./api
 ```
 
-Features:
+### Running Migrations
 
-- wallet-authenticated messages
-- project-scoped rooms
-- bounty threads
-- moderation flags
+```bash
+go run ./cmd/migrate
+```
 
-## 12. Security Model
+Migrations run automatically on startup if `AUTO_MIGRATE=true`.
 
-- Wallet signature auth
-- Webhook signature validation
-- Idempotent workers
-- Replay protection
-- Role-based permissions
-- Audit logs
-- Optional KYC hooks (admin)
+## Configuration
 
-## 13. Why This Architecture Works
+Key environment variables (see `.env.example`):
 
-- Low latency APIs (1–5ms)
-- Massive concurrency (goroutines)
-- No RPC blocking
-- Chain-agnostic
-- Hackathon + production ready
-- Trust minimized
-- Future-proof
+```bash
+# Database
+DB_URL=postgresql://user:password@localhost/dbname
+AUTO_MIGRATE=true
 
-## 14. Future Extensions
+# Authentication
+JWT_SECRET=your-secret-key-min-32-chars
+ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token
 
-- AI PR review
-- AI contributor matching
-- milestone-based grants
-- DAO voting
-- zk-proof verification
-- cross-chain identity
+# GitHub OAuth
+GITHUB_OAUTH_CLIENT_ID=your_client_id
+GITHUB_OAUTH_CLIENT_SECRET=your_client_secret
+GITHUB_OAUTH_REDIRECT_URL=http://localhost:8080/auth/github/callback
+GITHUB_LOGIN_SUCCESS_REDIRECT_URL=http://localhost:5173
 
-## 15. Summary
+# GitHub App
+GITHUB_APP_ID=123456
+GITHUB_APP_SLUG=grainlify
+GITHUB_APP_PRIVATE_KEY=<base64-encoded-private-key>
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
 
-Patchwork is:
+# URLs
+PUBLIC_BASE_URL=http://localhost:8080
+FRONTEND_BASE_URL=http://localhost:5173
 
-- not a marketplace
-- not a DAO
-- not a chain
+# Optional Services
+NATS_URL=nats://localhost:4222
+REDIS_URL=redis://localhost:6379
 
-Patchwork is:
+# KYC (Didit)
+DIDIT_API_KEY=your_didit_api_key
+DIDIT_WORKFLOW_ID=your_workflow_id
+```
 
-an open-source contribution coordination layer with verifiable payouts.
+## API Documentation
+
+See [API_ENDPOINTS.md](API_ENDPOINTS.md) for complete API documentation.
+
+## Deployment
+
+### Railway
+
+See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed Railway deployment instructions.
+
+### Other Platforms
+
+1. Set environment variables
+2. Run migrations: `go run ./cmd/migrate`
+3. Build binary: `go build -o ./api ./cmd/api`
+4. Start server: `./api`
+
+## Development
+
+### Running Tests
+
+```bash
+go test ./...
+```
+
+### Code Style
+
+- Standard Go formatting
+- No ORM (use pgx directly)
+- Minimal external dependencies
+- Fast HTTP responses (no blocking calls in request path)
+
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
+
+## Additional Documentation
+
+- [Development Guide](DEVELOPMENT.md) - Development setup and commands
+- [GitHub App Setup](GITHUB_APP_SETUP.md) - GitHub App configuration
+- [Quick Start](QUICK_START.md) - Quick development setup
+- [API Endpoints](API_ENDPOINTS.md) - Complete API reference
+
+## License
+
+[Add your license here]
 
 
 
