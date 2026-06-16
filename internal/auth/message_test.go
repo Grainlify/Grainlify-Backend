@@ -1,0 +1,12 @@
+package auth
+
+import "testing"
+
+func TestLoginMessageFormats(t *testing.T) {
+	if got, want := LoginMessage("abc"), "Patchwork login. Nonce: abc"; got != want {
+		t.Fatalf("LoginMessage = %q, want %q", got, want)
+	}
+	if got, want := LegacyLoginMessage("abc"), "Patchwork login\nNonce: abc"; got != want {
+		t.Fatalf("LegacyLoginMessage = %q, want %q", got, want)
+	}
+}
