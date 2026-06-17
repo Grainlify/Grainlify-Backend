@@ -75,3 +75,30 @@ go run ./cmd/migrate
 # Run worker
 go run ./cmd/worker
 ```
+
+## Running Tests
+
+### Unit tests (no database required)
+
+```bash
+go test ./internal/handlers/... ./internal/ingest/...
+```
+
+The handler tests (`internal/handlers`) are pure unit tests with a mock bus — no external dependencies.
+
+### Integration tests (requires PostgreSQL)
+
+DB integration tests in `internal/ingest` are gated behind the `TEST_DB_URL` environment variable.  
+When the variable is absent the tests are **skipped automatically** — they never fail in CI unless you opt in.
+
+Set `TEST_DB_URL` to a throwaway Postgres database:
+
+```bash
+export TEST_DB_URL="postgres://user:pass@localhost:5432/grainlify_test?sslmode=disable"
+go test ./internal/ingest/...
+```
+
+The test harness calls `migrate.Up` automatically, so the target database only needs to exist (it does not need pre-created tables).  
+Each test cleans up the rows it inserts via `t.Cleanup`, so the schema stays clean between runs.
+
+> **CI**: add `TEST_DB_URL` as a secret/environment variable in your pipeline to enable DB integration tests.
