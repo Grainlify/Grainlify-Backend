@@ -51,13 +51,18 @@ func (h *ProjectDataHandler) Issues() fiber.Handler {
 			return err
 		}
 
+		p, err := ParsePagination(c, 20, 100)
+		if err != nil {
+			return err
+		}
+
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, updated_at_github, last_seen_at
 FROM github_issues
 WHERE project_id = $1
 ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
 		}
@@ -76,8 +81,7 @@ LIMIT 50
 			if err := rows.Scan(&gid, &number, &state, &title, &body, &author, &url, &assigneesJSON, &labelsJSON, &commentsCount, &commentsJSON, &updated, &lastSeen); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
 			}
-			
-			// Parse JSONB fields
+
 			var assignees []any
 			var labels []any
 			var comments []any
@@ -90,24 +94,32 @@ LIMIT 50
 			if len(commentsJSON) > 0 {
 				_ = json.Unmarshal(commentsJSON, &comments)
 			}
-			
+
 			out = append(out, fiber.Map{
 				"github_issue_id": gid,
 				"number":          number,
 				"state":           state,
 				"title":           title,
-				"description":     body, // GitHub issue body/description
+				"description":     body,
 				"author_login":    author,
 				"assignees":       assignees,
 				"labels":          labels,
-				"comments_count": commentsCount,
-				"comments":        comments, // Actual comments array
+				"comments_count":  commentsCount,
+				"comments":        comments,
 				"url":             url,
 				"updated_at":      updated,
 				"last_seen_at":    lastSeen,
 			})
 		}
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"issues": out})
+
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM github_issues WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("issues", out, p, total))
 	}
 }
 
@@ -118,14 +130,19 @@ func (h *ProjectDataHandler) PRs() fiber.Handler {
 			return err
 		}
 
+		p, err := ParsePagination(c, 20, 100)
+		if err != nil {
+			return err
+		}
+
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT github_pr_id, number, state, title, author_login, url, merged, 
        created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at
 FROM github_pull_requests
 WHERE project_id = $1
 ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
 		}
@@ -143,21 +160,29 @@ LIMIT 50
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
 			}
 			out = append(out, fiber.Map{
-				"github_pr_id":    gid,
-				"number":          number,
-				"state":           state,
-				"title":           title,
-				"author_login":    author,
-				"url":             url,
-				"merged":          merged,
-				"created_at":       createdAt,
-				"updated_at":      updated,
-				"closed_at":       closedAt,
-				"merged_at":       mergedAt,
-				"last_seen_at":    lastSeen,
+				"github_pr_id": gid,
+				"number":       number,
+				"state":        state,
+				"title":        title,
+				"author_login": author,
+				"url":          url,
+				"merged":       merged,
+				"created_at":   createdAt,
+				"updated_at":   updated,
+				"closed_at":    closedAt,
+				"merged_at":    mergedAt,
+				"last_seen_at": lastSeen,
 			})
 		}
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"prs": out})
+
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM github_pull_requests WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("prs", out, p, total))
 	}
 }
 
@@ -168,13 +193,18 @@ func (h *ProjectDataHandler) Events() fiber.Handler {
 			return err
 		}
 
+		p, err := ParsePagination(c, 20, 100)
+		if err != nil {
+			return err
+		}
+
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT delivery_id, event, action, received_at
 FROM github_events
 WHERE project_id = $1
 ORDER BY received_at DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
 		}
@@ -190,13 +220,21 @@ LIMIT 50
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
 			}
 			out = append(out, fiber.Map{
-				"delivery_id":  deliveryID,
-				"event":        event,
-				"action":       action,
-				"received_at":  receivedAt,
+				"delivery_id": deliveryID,
+				"event":       event,
+				"action":      action,
+				"received_at": receivedAt,
 			})
 		}
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"events": out})
+
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM github_events WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("events", out, p, total))
 	}
 }
 

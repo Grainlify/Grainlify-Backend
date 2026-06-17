@@ -319,13 +319,18 @@ SELECT EXISTS(
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
 		}
 
+		p, err := ParsePagination(c, 20, 100)
+		if err != nil {
+			return err
+		}
+
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT github_issue_id, number, state, title, body, author_login, url, labels, updated_at_github, last_seen_at
 FROM github_issues
 WHERE project_id = $1
 ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
 		}
@@ -344,7 +349,6 @@ LIMIT 50
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
 			}
 
-			// labels JSONB (stored as array of objects) -> surface as-is
 			var labels []any
 			if len(labelsJSON) > 0 {
 				_ = json.Unmarshal(labelsJSON, &labels)
@@ -364,7 +368,15 @@ LIMIT 50
 			})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"issues": out})
+		// Get total count for pagination
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM github_issues WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("issues", out, p, total))
 	}
 }
 
@@ -388,14 +400,19 @@ SELECT EXISTS(
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
 		}
 
+		p, err := ParsePagination(c, 20, 100)
+		if err != nil {
+			return err
+		}
+
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT github_pr_id, number, state, title, author_login, url, merged, 
        created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at
 FROM github_pull_requests
 WHERE project_id = $1
 ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
 		}
@@ -428,7 +445,15 @@ LIMIT 50
 			})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"prs": out})
+		// Get total count for pagination
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM github_pull_requests WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("prs", out, p, total))
 	}
 }
 
@@ -452,14 +477,11 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 		category := strings.TrimSpace(c.Query("category"))
 		tagsParam := strings.TrimSpace(c.Query("tags"))
 
-		limit := 50
-		if l := c.QueryInt("limit", 50); l > 0 && l <= 200 {
-			limit = l
+		p, err := ParsePagination(c, 50, 200)
+		if err != nil {
+			return err
 		}
-		offset := c.QueryInt("offset", 0)
-		if offset < 0 {
-			offset = 0
-		}
+		limit, offset := p.Limit, p.Offset
 
 		// Build WHERE clause and args
 		var conditions []string
@@ -637,27 +659,23 @@ WHERE %s
 			total = len(out)
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"projects": out,
-			"total":    total,
-			"limit":    limit,
-			"offset":   offset,
-		})
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("projects", out, p, total))
 	}
 }
 
 // Recommended returns top projects ordered by contributors count, enriched with GitHub data.
 // Query parameters:
 //   - limit: max results (default 8, max 20)
+//   - offset: pagination offset (default 0)
 func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
 
-		limit := 8
-		if l := c.QueryInt("limit", 8); l > 0 && l <= 20 {
-			limit = l
+		p, err := ParsePagination(c, 8, 20)
+		if err != nil {
+			return err
 		}
 
 		// Query top projects by contributors count
@@ -697,9 +715,9 @@ FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false AND split_part(p.github_full_name, '/', 2) != '.github'
 ORDER BY contributors_count DESC, p.stars_count DESC, p.created_at DESC
-LIMIT $1
+LIMIT $1 OFFSET $2
 `
-		rows, err := h.db.Pool.Query(c.Context(), query, limit)
+		rows, err := h.db.Pool.Query(c.Context(), query, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "recommended_projects_failed"})
 		}
@@ -721,13 +739,11 @@ LIMIT $1
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "recommended_projects_scan_failed"})
 			}
 
-			// Parse tags JSONB
 			var tags []string
 			if len(tagsJSON) > 0 {
 				_ = json.Unmarshal(tagsJSON, &tags)
 			}
 
-			// Default to 0 if nil
 			stars := 0
 			if starsCount != nil {
 				stars = *starsCount
@@ -737,9 +753,6 @@ LIMIT $1
 				forks = *forksCount
 			}
 
-			// Skip per-project GitHub enrichment here to keep /projects/recommended fast.
-			// Description and live star/fork counts can be refreshed via background jobs
-			// or on the project detail endpoint instead.
 			description := ""
 
 			out = append(out, fiber.Map{
@@ -761,9 +774,16 @@ LIMIT $1
 			})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"projects": out,
-		})
+		// Get total count for pagination
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM projects p
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false AND split_part(p.github_full_name, '/', 2) != '.github'
+`).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("projects", out, p, total))
 	}
 }
 
