@@ -54,8 +54,8 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 		hookInstallationTargetID := strings.TrimSpace(c.Get("X-GitHub-Hook-Installation-Target-ID"))
 		hookInstallationTargetType := strings.TrimSpace(c.Get("X-GitHub-Hook-Installation-Target-Type"))
 
-		// Detailed logging of incoming webhook request
-		slog.Info("=== GitHub Webhook POST Request Received ===",
+		// Detailed logging of incoming webhook request (debug only)
+		slog.Debug("=== GitHub Webhook POST Request Received ===",
 			"method", c.Method(),
 			"path", c.Path(),
 			"original_url", c.OriginalURL(),
@@ -74,12 +74,19 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 			"accept_header", c.Get("Accept"),
 		)
 
+		// Concise info logging
+		slog.Info("GitHub Webhook Request Received",
+			"delivery_id", delivery,
+			"event", event,
+			"body_size_bytes", bodySize,
+		)
+
 		// Log first 500 chars of body for debugging (truncate if too long)
 		bodyPreview := string(body)
 		if len(bodyPreview) > 500 {
 			bodyPreview = bodyPreview[:500] + "... (truncated)"
 		}
-		slog.Info("GitHub webhook request body preview",
+		slog.Debug("GitHub webhook request body preview",
 			"delivery_id", delivery,
 			"body_preview", bodyPreview,
 			"body_size", bodySize,

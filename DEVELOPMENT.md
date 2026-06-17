@@ -1,5 +1,21 @@
 # Development Guide
 
+## Logging Guidelines
+
+To maintain security and reduce noise in production, follow these logging guidelines:
+1. **Never log secrets or PII at INFO level.** This includes tokens (`SOROBAN_SOURCE_SECRET`, OAuth tokens, JWT secrets), emails, and KYC decision data.
+2. **Use `slog.Debug` for verbose data.** Large payloads (like webhook bodies) and full header dumps must be logged at `Debug` level, not `Info`.
+3. **Redact sensitive fields.** When logging maps or structs that contain addresses or amounts, use the `logger.RedactMap` helper to sanitize the output before logging at `Info`.
+
+Example:
+```go
+import "github.com/jagadeesh/grainlify/backend/internal/logger"
+
+redactedArgs := logger.RedactMap(args)
+slog.Info("interaction occurred", "args", redactedArgs) // Safe for INFO
+slog.Debug("interaction detailed", "args", args)        // Safe for DEBUG
+```
+
 ## Running the Backend Server
 
 ### Option 1: Auto-reload with Air (Recommended for Development) ⚡

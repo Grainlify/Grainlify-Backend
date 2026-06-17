@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jagadeesh/grainlify/backend/internal/logger"
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/network"
 )
@@ -92,7 +93,17 @@ func (c *Client) GetRPCURL() string {
 
 // LogContractInteraction logs a contract interaction for debugging
 func (c *Client) LogContractInteraction(contractID, function string, args map[string]interface{}) {
+	redactedArgs := logger.RedactMap(args)
+
 	slog.Info("contract interaction",
+		"contract_id", contractID,
+		"function", function,
+		"network", c.network,
+		"args", redactedArgs,
+	)
+
+	// Detailed debugging includes unredacted args
+	slog.Debug("contract interaction detailed",
 		"contract_id", contractID,
 		"function", function,
 		"network", c.network,
