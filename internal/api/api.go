@@ -145,6 +145,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	authHandler := handlers.NewAuthHandler(cfg, deps.DB)
 	authGroup := app.Group("/auth")
+	authGroup.Post("/nonce", authHandler.Nonce())
+	authGroup.Post("/verify", authHandler.Verify())
 	app.Get("/me", auth.RequireAuth(cfg.JWTSecret), authHandler.Me())
 	app.Post("/me/github/resync", auth.RequireAuth(cfg.JWTSecret), authHandler.ResyncGitHubProfile())
 

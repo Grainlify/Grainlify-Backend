@@ -77,6 +77,65 @@ Check if the API is ready (database connectivity check).
 
 ## Authentication Endpoints
 
+### POST /auth/nonce
+
+Generate a nonce for wallet signature login.
+
+**Authentication:** None required
+
+**Request Body:**
+```json
+{
+  "wallet_type": "evm",
+  "address": "0x123..."
+}
+```
+
+**Response:**
+```json
+{
+  "nonce": "base64-encoded-nonce",
+  "message": "Patchwork login. Nonce: base64-encoded-nonce",
+  "expires_at": "2026-01-01T00:00:00Z"
+}
+```
+
+---
+
+### POST /auth/verify
+
+Verify a wallet signature and obtain a JWT.
+
+**Authentication:** None required
+
+**Request Body:**
+```json
+{
+  "wallet_type": "evm",
+  "address": "0x123...",
+  "nonce": "base64-encoded-nonce",
+  "signature": "0xabc...",
+  "public_key": "optional-public-key"
+}
+```
+
+**Response:**
+```json
+{
+  "token": "jwt-token-string",
+  "user": {
+    "id": "user-uuid",
+    "role": "contributor"
+  },
+  "wallet": {
+    "wallet_type": "evm",
+    "address": "0x123..."
+  }
+}
+```
+
+---
+
 ### GET /me
 
 Get current authenticated user information.
