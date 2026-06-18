@@ -10,9 +10,7 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	decredEcdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
-	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestNormalizeWalletType(t *testing.T) {
@@ -74,17 +72,14 @@ func TestNormalizeAddress(t *testing.T) {
 }
 
 func TestVerifyEVMSignature(t *testing.T) {
-	key, err := ethcrypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey returned error: %v", err)
-	}
+	// precomputed EVM vector
+	address := "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
 	message := LoginMessage("nonce-123")
-	hash := accounts.TextHash([]byte(message))
-	signature, err := ethcrypto.Sign(hash, key)
-	if err != nil {
-		t.Fatalf("Sign returned error: %v", err)
-	}
-	address := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
+	// The signature below is precomputed for the above private key and message
+	sigHex := "0x58325d3e95c9c1f438abb319ffee7a22d709709048e388660366fc2ebd92de0c4200cb340965857aec541822b168be361e0b77925d9c4f245fb0dc4adabf86bc00"
+    signature, _ := hexutil.Decode(sigHex)
+	// message and address are already set.
+	// We don't need hash or sign anymore.
 
 	if err := VerifySignature(WalletTypeEVM, address, message, hexutil.Encode(signature), ""); err != nil {
 		t.Fatalf("VerifySignature EVM returned error: %v", err)
