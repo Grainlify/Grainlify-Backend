@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -161,7 +162,7 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 			&openIssuesCount, &openPRsCount, &contributorsCount,
 			&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
 		}
 		if err != nil {
