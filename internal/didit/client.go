@@ -22,7 +22,7 @@ func NewClient(apiKey string) *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 30 * time.Second},
 		APIKey:    apiKey,
-		UserAgent: "patchwork-backend",
+		UserAgent: "grainlify-backend",
 	}
 }
 
@@ -42,7 +42,7 @@ type CreateSessionResponse struct {
 // CreateSession creates a new KYC verification session
 func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (CreateSessionResponse, error) {
 	url := BaseURL + "/session/"
-	
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return CreateSessionResponse{}, fmt.Errorf("marshal request: %w", err)
@@ -79,7 +79,7 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (C
 			Detail  string `json:"detail"`
 		}
 		_ = json.Unmarshal(bodyBytes, &errBody)
-		
+
 		// Build error message with all available information
 		errMsg := errBody.Error
 		if errMsg == "" {
@@ -94,7 +94,7 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (C
 		if errMsg == "" {
 			errMsg = "unknown error"
 		}
-		
+
 		return CreateSessionResponse{}, fmt.Errorf("didit create session failed: status %d, error: %s, body: %s", resp.StatusCode, errMsg, string(bodyBytes))
 	}
 
@@ -181,4 +181,3 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 
 	return result, nil
 }
-

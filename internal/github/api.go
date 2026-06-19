@@ -16,7 +16,7 @@ type Client struct {
 func NewClient() *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
-		UserAgent: "patchwork-backend",
+		UserAgent: "grainlify-backend",
 	}
 }
 
@@ -105,26 +105,25 @@ func (c *Client) GetPrimaryEmail(ctx context.Context, accessToken string) (strin
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Find primary email
 	for _, email := range emails {
 		if email.Primary && email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no primary verified email, return first verified email
 	for _, email := range emails {
 		if email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no verified email, return first email
 	if len(emails) > 0 {
 		return emails[0].Email, nil
 	}
-	
+
 	return "", fmt.Errorf("no email found")
 }
-
