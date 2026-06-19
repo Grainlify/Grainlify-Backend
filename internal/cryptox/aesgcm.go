@@ -9,6 +9,8 @@ import (
 	"io"
 )
 
+var randomReader io.Reader = rand.Reader
+
 func KeyFromB64(b64 string) ([]byte, error) {
 	if b64 == "" {
 		return nil, fmt.Errorf("TOKEN_ENC_KEY_B64 is required")
@@ -23,18 +25,24 @@ func KeyFromB64(b64 string) ([]byte, error) {
 	return key, nil
 }
 
-// EncryptAESGCM returns nonce||ciphertext (ciphertext includes GCM tag).
-func EncryptAESGCM(key []byte, plaintext []byte) ([]byte, error) {
+func newAESGCM(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
+	// AES always has a GCM-compatible 16-byte block size.
+	gcm, _ := cipher.NewGCM(block)
+	return gcm, nil
+}
+
+// EncryptAESGCM returns nonce||ciphertext (ciphertext includes GCM tag).
+func EncryptAESGCM(key []byte, plaintext []byte) ([]byte, error) {
+	gcm, err := newAESGCM(key)
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err := io.ReadFull(randomReader, nonce); err != nil {
 		return nil, err
 	}
 	ct := gcm.Seal(nil, nonce, plaintext, nil)
@@ -45,11 +53,7 @@ func EncryptAESGCM(key []byte, plaintext []byte) ([]byte, error) {
 }
 
 func DecryptAESGCM(key []byte, blob []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
+	gcm, err := newAESGCM(key)
 	if err != nil {
 		return nil, err
 	}
@@ -60,24 +64,3 @@ func DecryptAESGCM(key []byte, blob []byte) ([]byte, error) {
 	ct := blob[gcm.NonceSize():]
 	return gcm.Open(nil, nonce, ct, nil)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
