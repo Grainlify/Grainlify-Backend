@@ -1,6 +1,6 @@
-# Patchwork Backend API Documentation
+# Grainlify Backend API Documentation
 
-This document describes all available API endpoints for the Patchwork backend. Use this as a reference when integrating the frontend.
+This document describes all available API endpoints for the Grainlify backend. Use this as a reference when integrating the frontend.
 
 
 ## Authentication
@@ -45,7 +45,7 @@ Check if the API server is running.
 ```json
 {
   "ok": true,
-  "service": "patchwork-api"
+  "service": "grainlify-api"
 }
 ```
 
@@ -1252,7 +1252,7 @@ All IDs are UUIDs (version 4) returned as strings:
 ### Making Authenticated Requests
 
 ```typescript
-const token = localStorage.getItem('patchwork_jwt');
+const token = localStorage.getItem('grainlify_jwt');
 
 const response = await fetch('http://localhost:8080/profile', {
   headers: {
@@ -1270,7 +1270,7 @@ const data = await response.json();
 if (!response.ok) {
   if (response.status === 401) {
     // Token expired, redirect to login
-    localStorage.removeItem('patchwork_jwt');
+    localStorage.removeItem('grainlify_jwt');
     window.location.href = '/login';
   } else {
     const error = await response.json();
@@ -1309,8 +1309,6 @@ async function fetchActivities(page: number = 0) {
 For questions or issues, refer to the backend codebase or contact the backend team.
 
 **Last Updated:** 2025-12-31
-
-
 
 
 

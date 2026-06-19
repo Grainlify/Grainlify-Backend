@@ -1,6 +1,6 @@
-# Railway Deployment Guide for Patchwork Backend
+# Railway Deployment Guide for Grainlify Backend
 
-This guide walks you through deploying the Patchwork Go backend to Railway.
+This guide walks you through deploying the Grainlify Go backend to Railway.
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@ This guide walks you through deploying the Patchwork Go backend to Railway.
 1. Go to [railway.app](https://railway.app) and sign in
 2. Click **"New Project"**
 3. Select **"Deploy from GitHub repo"**
-4. Choose your repository (`patchwork`)
+4. Choose your repository (`Grainlify-Backend`)
 5. Railway will detect it's a Go project
 
 ---
@@ -211,7 +211,7 @@ To run manually (if needed):
    ```bash
    curl https://your-railway-app.railway.app/health
    ```
-   Should return: `{"ok":true,"service":"patchwork-api"}`
+   Should return: `{"ok":true,"service":"grainlify-api"}`
 
 2. **Readiness Check**:
    ```bash
@@ -434,4 +434,3 @@ railway variables
 ---
 
 **Last Updated**: 2025-12-31
-

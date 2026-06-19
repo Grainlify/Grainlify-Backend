@@ -22,7 +22,7 @@ func NewClient(apiKey string) *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 30 * time.Second},
 		APIKey:    apiKey,
-		UserAgent: "patchwork-backend",
+		UserAgent: "grainlify-backend",
 	}
 }
 
@@ -181,4 +181,3 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 
 	return result, nil
 }
-

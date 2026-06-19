@@ -16,7 +16,7 @@ type Client struct {
 func NewClient() *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
-		UserAgent: "patchwork-backend",
+		UserAgent: "grainlify-backend",
 	}
 }
 
@@ -127,4 +127,3 @@ func (c *Client) GetPrimaryEmail(ctx context.Context, accessToken string) (strin
 	
 	return "", fmt.Errorf("no email found")
 }
-

@@ -16,12 +16,14 @@ type GitHubWebhookConsumer struct {
 	Ingest *ingest.GitHubWebhookIngestor
 }
 
+const DefaultQueueGroup = "grainlify-workers"
+
 func (c *GitHubWebhookConsumer) Subscribe(ctx context.Context, nc *nats.Conn, queue string) error {
 	if nc == nil {
 		return nil
 	}
 	if queue == "" {
-		queue = "patchwork-workers"
+		queue = DefaultQueueGroup
 	}
 
 	sub, err := nc.QueueSubscribe(events.SubjectGitHubWebhookReceived, queue, func(msg *nats.Msg) {
@@ -48,7 +50,6 @@ func (c *GitHubWebhookConsumer) Subscribe(ctx context.Context, nc *nats.Conn, qu
 
 	return nil
 }
-
 
 
 
