@@ -118,3 +118,23 @@ The test harness calls `migrate.Up` automatically, so the target database only n
 Each test cleans up the rows it inserts via `t.Cleanup`, so the schema stays clean between runs.
 
 > **CI**: add `TEST_DB_URL` as a secret/environment variable in your pipeline to enable DB integration tests.
+
+## Running Lint
+
+CI runs `golangci-lint` with the pinned version in `.github/workflows/ci.yml`.
+
+Install the same version locally:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+```
+
+Then run:
+
+```bash
+golangci-lint run ./...
+# or
+make lint
+```
+
+The lint configuration is in `.golangci.yml`. Existing legacy findings are explicitly excluded there so new changes can be checked without forcing a broad cleanup in the first linting PR.
