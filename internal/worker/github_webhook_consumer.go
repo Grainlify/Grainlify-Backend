@@ -16,13 +16,21 @@ type GitHubWebhookConsumer struct {
 	Ingest *ingest.GitHubWebhookIngestor
 }
 
+// GitHubWebhookQueueGroup is the shared NATS queue group for webhook workers.
+const GitHubWebhookQueueGroup = "grainlify-workers"
+
+func githubWebhookQueueGroup(queue string) string {
+	if queue == "" {
+		return GitHubWebhookQueueGroup
+	}
+	return queue
+}
+
 func (c *GitHubWebhookConsumer) Subscribe(ctx context.Context, nc *nats.Conn, queue string) error {
 	if nc == nil {
 		return nil
 	}
-	if queue == "" {
-		queue = "patchwork-workers"
-	}
+	queue = githubWebhookQueueGroup(queue)
 
 	sub, err := nc.QueueSubscribe(events.SubjectGitHubWebhookReceived, queue, func(msg *nats.Msg) {
 		var e events.GitHubWebhookReceived
@@ -48,24 +56,3 @@ func (c *GitHubWebhookConsumer) Subscribe(ctx context.Context, nc *nats.Conn, qu
 
 	return nil
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,6 +1,6 @@
-# 📘 Patchwork – Backend Architecture & System Flow
+# 📘 Grainlify - Backend Architecture & System Flow
 
-Patchwork is an infrastructure-grade platform that connects open-source developers with open-source projects through verifiable contributions, automated rewards, and reputation — within the Stellar ecosystem.
+Grainlify is an infrastructure-grade platform that connects open-source developers with open-source projects through verifiable contributions, automated rewards, and reputation — within the Stellar ecosystem.
 
 ## 1. High-Level System Architecture
 
@@ -95,6 +95,11 @@ Redis
 ### Eventing / Async
 
 NATS
+
+Deployment note: the GitHub webhook consumer now uses the `grainlify-workers`
+NATS queue group. During rollout, old `patchwork-workers` subscribers and new
+`grainlify-workers` subscribers can briefly coexist, so deploy workers together
+and drain old consumers after the new group is receiving messages.
 
 ### Blockchain
 

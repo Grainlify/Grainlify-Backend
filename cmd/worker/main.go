@@ -59,8 +59,7 @@ func main() {
 
     // ---------- GitHub webhook consumer ----------
     consumer := &worker.GitHubWebhookConsumer{Ingest: &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool}}
-    const queueGroup = "grainlify-worker"
-    if err := consumer.Subscribe(context.Background(), nbus.Conn(), queueGroup); err != nil {
+    if err := consumer.Subscribe(context.Background(), nbus.Conn(), worker.GitHubWebhookQueueGroup); err != nil {
         slog.Error("failed to subscribe to webhook events", "error", err)
         os.Exit(1)
     }
