@@ -2,7 +2,7 @@
 
 ## Using Existing PostgreSQL Container
 
-If you already have a PostgreSQL container running (like `patchwork-postgres`), use this connection URL:
+If you already have a PostgreSQL container running (like `grainlify-postgres`), use this connection URL:
 
 ```bash
 DB_URL=postgresql://grainlify:grainlify_dev_password@localhost:5432/grainlify?sslmode=disable
@@ -14,31 +14,31 @@ Run these commands to create the database and user:
 
 ```bash
 # Create database
-docker exec patchwork-postgres psql -U postgres -c "CREATE DATABASE grainlify;"
+docker exec grainlify-postgres psql -U postgres -c "CREATE DATABASE grainlify;"
 
 # Create user
-docker exec patchwork-postgres psql -U postgres -c "CREATE USER grainlify WITH PASSWORD 'grainlify_dev_password';"
+docker exec grainlify-postgres psql -U postgres -c "CREATE USER grainlify WITH PASSWORD 'grainlify_dev_password';"
 
 # Grant privileges
-docker exec patchwork-postgres psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE grainlify TO grainlify;"
+docker exec grainlify-postgres psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE grainlify TO grainlify;"
 
 # Set owner
-docker exec patchwork-postgres psql -U postgres -c "ALTER DATABASE grainlify OWNER TO grainlify;"
+docker exec grainlify-postgres psql -U postgres -c "ALTER DATABASE grainlify OWNER TO grainlify;"
 ```
 
 ## Alternative: Use Existing Database
 
-If you want to use the existing `patchwork` database:
+If you want to use an existing local Grainlify database:
 
 ```bash
-DB_URL=postgresql://postgres:postgres@localhost:5432/patchwork?sslmode=disable
+DB_URL=postgresql://postgres:postgres@localhost:5432/grainlify?sslmode=disable
 ```
 
 ## Verify Connection
 
 ```bash
 # Test connection
-docker exec patchwork-postgres psql -U grainlify -d grainlify -c "SELECT version();"
+docker exec grainlify-postgres psql -U grainlify -d grainlify -c "SELECT version();"
 ```
 
 ---
