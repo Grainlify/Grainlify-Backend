@@ -134,7 +134,7 @@ func (h *ProjectsHandler) Mine() fiber.Handler {
 			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		
+
 		userID, err := uuid.Parse(sub)
 		if err != nil {
 			slog.Warn("projects/mine: failed to parse user_id as UUID",
@@ -245,7 +245,7 @@ WHERE id = $1
 			// Parse tags JSONB
 			var tags []string
 			if len(tagsJSON) > 0 {
-				json.Unmarshal(tagsJSON, &tags)
+				_ = json.Unmarshal(tagsJSON, &tags)
 			}
 
 			projectMap := fiber.Map{
@@ -335,7 +335,7 @@ ORDER BY p.created_at ASC
 
 			var tags []string
 			if len(tagsJSON) > 0 {
-				json.Unmarshal(tagsJSON, &tags)
+				_ = json.Unmarshal(tagsJSON, &tags)
 			}
 
 			ecoID := ""

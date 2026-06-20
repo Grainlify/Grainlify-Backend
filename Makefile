@@ -1,4 +1,4 @@
-.PHONY: run dev install-air
+.PHONY: run dev install-air lint
 
 # Install air for live reload
 install-air:
@@ -24,6 +24,10 @@ run:
 # Build the binary
 build:
 	@go build -o ./api ./cmd/api
+
+# Run static analysis with the pinned golangci-lint configuration.
+lint:
+	@golangci-lint run ./...
 
 
 

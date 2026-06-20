@@ -17,7 +17,7 @@ func Connect(url string) (*Bus, error) {
 	if url == "" {
 		return nil, fmt.Errorf("NATS_URL is required")
 	}
-	
+
 	// Mask URL for logging (don't expose credentials)
 	maskedURL := maskNATSURL(url)
 	slog.Info("connecting to NATS",
@@ -25,7 +25,7 @@ func Connect(url string) (*Bus, error) {
 		"timeout", "5s",
 		"max_reconnects", 5,
 	)
-	
+
 	nc, err := nats.Connect(url,
 		nats.Name("grainlify-api"),
 		nats.Timeout(5*time.Second),
@@ -40,12 +40,12 @@ func Connect(url string) (*Bus, error) {
 		)
 		return nil, err
 	}
-	
+
 	slog.Info("NATS connection established",
 		"status", nc.Status().String(),
 		"connected_url", nc.ConnectedUrl(),
 	)
-	
+
 	return &Bus{nc: nc}, nil
 }
 
@@ -91,13 +91,9 @@ func (b *Bus) Close() {
 		return
 	}
 	slog.Info("closing NATS connection")
-	b.nc.Drain()
+	_ = b.nc.Drain()
 	b.nc.Close()
 	slog.Info("NATS connection closed")
 }
 
 func (b *Bus) Conn() *nats.Conn { return b.nc }
-
-
-
-
