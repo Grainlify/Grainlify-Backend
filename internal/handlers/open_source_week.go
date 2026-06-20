@@ -12,6 +12,12 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
+const (
+	maxTitleLen       = 200
+	maxDescriptionLen = 2000
+	maxLocationLen    = 500
+)
+
 type OpenSourceWeekHandler struct {
 	db *db.DB
 }
@@ -165,6 +171,40 @@ type oswCreateRequest struct {
 	EndAt       string `json:"end_at"`   // RFC3339
 }
 
+// validateCreate validates an OSW create request and returns an error code on failure.
+// An empty string means validation passed.
+func validateCreate(req oswCreateRequest) string {
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return "title_required"
+	}
+	if len(title) > maxTitleLen {
+		return "title_too_long"
+	}
+	if len(strings.TrimSpace(req.Description)) > maxDescriptionLen {
+		return "description_too_long"
+	}
+	if len(strings.TrimSpace(req.Location)) > maxLocationLen {
+		return "location_too_long"
+	}
+	status := strings.TrimSpace(req.Status)
+	if status != "upcoming" && status != "running" && status != "completed" && status != "draft" {
+		return "invalid_status"
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt)); err != nil {
+		return "invalid_start_at"
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt)); err != nil {
+		return "invalid_end_at"
+	}
+	startAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt))
+	endAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt))
+	if !endAt.After(startAt) {
+		return "end_at_must_be_after_start_at"
+	}
+	return ""
+}
+
 func (h *OpenSourceWeekAdminHandler) Create() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -175,32 +215,20 @@ func (h *OpenSourceWeekAdminHandler) Create() fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
 		}
 
-		title := strings.TrimSpace(req.Title)
-		if title == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "title_required"})
+		if errCode := validateCreate(req); errCode != "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": errCode})
 		}
+
+		title := strings.TrimSpace(req.Title)
 		status := strings.TrimSpace(req.Status)
 		if status == "" {
 			status = "upcoming"
 		}
-		if status != "upcoming" && status != "running" && status != "completed" && status != "draft" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_status"})
-		}
-
-		startAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt))
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_start_at"})
-		}
-		endAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt))
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_end_at"})
-		}
-		if !endAt.After(startAt) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "end_at_must_be_after_start_at"})
-		}
+		startAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt))
+		endAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt))
 
 		var id uuid.UUID
-		err = h.db.Pool.QueryRow(c.Context(), `
+		err := h.db.Pool.QueryRow(c.Context(), `
 INSERT INTO open_source_week_events (title, description, location, status, start_at, end_at)
 VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4, $5, $6)
 RETURNING id
@@ -232,5 +260,3 @@ func (h *OpenSourceWeekAdminHandler) Delete() fiber.Handler {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
-
-
