@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -14,6 +15,15 @@ type Config struct {
 
 	DBURL       string
 	AutoMigrate bool
+
+	// DBMaxConns is the maximum number of connections in the pool (DB_MAX_CONNS, default 10).
+	DBMaxConns int32
+	// DBMinConns is the minimum number of idle connections kept open (DB_MIN_CONNS, default 0).
+	DBMinConns int32
+	// DBMaxConnLifetime is the maximum time a connection may be reused (DB_MAX_CONN_LIFETIME, default 30m).
+	DBMaxConnLifetime time.Duration
+	// DBMaxConnIdleTime is the maximum idle time before a connection is closed (DB_MAX_CONN_IDLE_TIME, default 5m).
+	DBMaxConnIdleTime time.Duration
 
 	JWTSecret string
 
@@ -85,6 +95,11 @@ func Load() Config {
 		DBURL:       getEnv("DB_URL", ""),
 		AutoMigrate: getEnvBool("AUTO_MIGRATE", false),
 
+		DBMaxConns:        getEnvInt32("DB_MAX_CONNS", 10),
+		DBMinConns:        getEnvInt32("DB_MIN_CONNS", 0),
+		DBMaxConnLifetime: getEnvDuration("DB_MAX_CONN_LIFETIME", 30*time.Minute),
+		DBMaxConnIdleTime: getEnvDuration("DB_MAX_CONN_IDLE_TIME", 5*time.Minute),
+
 		JWTSecret: getEnv("JWT_SECRET", ""),
 
 		NATSURL: getEnv("NATS_URL", ""),
@@ -151,6 +166,30 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func getEnvInt32(key string, fallback int32) int32 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return int32(n)
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func getEnvBool(key string, fallback bool) bool {
