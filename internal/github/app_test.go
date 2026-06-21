@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,8 +37,8 @@ func generateTestRSAKey(t *testing.T) (*rsa.PrivateKey, *rsa.PublicKey) {
 // TestGenerateJWT_Success tests that GenerateJWT produces a valid RS256 token
 func TestGenerateJWT_Success(t *testing.T) {
 	privateKey, publicKey := generateTestRSAKey(t)
-	
-	testTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	testTime := time.Now().UTC()
 	client := &GitHubAppClient{
 		AppID:      "test-app-id",
 		PrivateKey: privateKey,
@@ -157,7 +159,7 @@ func TestGenerateJWT_VerifyWithPublicKey(t *testing.T) {
 
 // TestGenerateJWT_RejectWrongSigningMethod tests that tokens with wrong signing method are rejected
 func TestGenerateJWT_RejectWrongSigningMethod(t *testing.T) {
-	privateKey, publicKey := generateTestRSAKey(t)
+	privateKey, _ := generateTestRSAKey(t)
 	
 	client := &GitHubAppClient{
 		AppID:      "test-app-id",
