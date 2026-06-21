@@ -83,14 +83,8 @@ func TestEncryptAESGCMRejectsInvalidKey(t *testing.T) {
 }
 
 func TestEncryptAESGCMReturnsRandomReaderError(t *testing.T) {
-	originalReader := randomReader
-	randomReader = errReader{}
-	defer func() {
-		randomReader = originalReader
-	}()
-
-	if _, err := EncryptAESGCM(testKey(0x99), []byte("plaintext")); err == nil {
-		t.Fatalf("EncryptAESGCM succeeded with failing random reader, want error")
+	if _, err := encryptAESGCM(testKey(0x99), []byte("plaintext"), errReader{}); err == nil {
+		t.Fatalf("encryptAESGCM succeeded with failing random reader, want error")
 	}
 }
 

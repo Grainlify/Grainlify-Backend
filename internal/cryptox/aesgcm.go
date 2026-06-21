@@ -1,3 +1,4 @@
+// Package cryptox provides encryption helpers for protecting sensitive values at rest.
 package cryptox
 
 import (
@@ -8,8 +9,6 @@ import (
 	"fmt"
 	"io"
 )
-
-var randomReader io.Reader = rand.Reader
 
 func KeyFromB64(b64 string) ([]byte, error) {
 	if b64 == "" {
@@ -30,19 +29,21 @@ func newAESGCM(key []byte) (cipher.AEAD, error) {
 	if err != nil {
 		return nil, err
 	}
-	// AES always has a GCM-compatible 16-byte block size.
-	gcm, _ := cipher.NewGCM(block)
-	return gcm, nil
+	return cipher.NewGCM(block)
 }
 
 // EncryptAESGCM returns nonce||ciphertext (ciphertext includes GCM tag).
 func EncryptAESGCM(key []byte, plaintext []byte) ([]byte, error) {
+	return encryptAESGCM(key, plaintext, rand.Reader)
+}
+
+func encryptAESGCM(key []byte, plaintext []byte, random io.Reader) ([]byte, error) {
 	gcm, err := newAESGCM(key)
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(randomReader, nonce); err != nil {
+	if _, err := io.ReadFull(random, nonce); err != nil {
 		return nil, err
 	}
 	ct := gcm.Seal(nil, nonce, plaintext, nil)
