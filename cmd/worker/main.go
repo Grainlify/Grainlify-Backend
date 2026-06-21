@@ -1,3 +1,35 @@
+// Package main is the entry point for the Grainlify background worker process.
+//
+// The worker connects to PostgreSQL and NATS, then runs two long-lived jobs
+// concurrently:
+//
+//   - [worker.GitHubWebhookConsumer] — dequeues GitHub webhook events from NATS
+//     and ingests them into the database via a queue-group subscription so that
+//     multiple worker replicas share the load without duplicate processing.
+//
+//   - [syncjobs.Worker] — polls the sync_jobs table and executes scheduled
+//     repository synchronisation tasks (sync_issues, sync_prs).
+//
+// # Configuration
+//
+// All configuration is read from environment variables (see .env.example).
+// The two required variables for this binary are:
+//
+//   - DB_URL   — PostgreSQL connection string
+//   - NATS_URL — NATS server URL
+//
+// In non-dev environments (APP_ENV != "dev") the process exits with status 1
+// when either variable is absent.
+//
+// # Graceful shutdown
+//
+// SIGINT or SIGTERM cancels the root context, which:
+//  1. Unsubscribes the NATS subscription (GitHubWebhookConsumer.Subscribe
+//     returns when ctx.Done() fires).
+//  2. Stops the syncjobs ticker loop (syncjobs.Worker.Run returns on ctx.Done()).
+//
+// The process then waits up to 10 s for in-flight work to finish before
+// closing the NATS and database connections and exiting cleanly.
 package main
 
 import (
