@@ -41,3 +41,14 @@ func TestEcosystemLookupFailureMapsOtherErrorsToInternalServerError(t *testing.T
 		t.Fatalf("code = %q, want %q", code, "ecosystem_lookup_failed")
 	}
 }
+
+func TestEcosystemLookupFailureDoesNotMapNilToNotFound(t *testing.T) {
+	status, code := ecosystemLookupFailure(nil)
+
+	if status != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", status, fiber.StatusInternalServerError)
+	}
+	if code != "ecosystem_lookup_failed" {
+		t.Fatalf("code = %q, want %q", code, "ecosystem_lookup_failed")
+	}
+}
