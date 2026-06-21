@@ -235,20 +235,75 @@ To run manually (if needed):
 
 ---
 
-## Step 13: Worker Service (Optional)
+## Step 13: Worker Service {#worker-service}
 
-If you have a separate worker service (`cmd/worker`):
+The background worker is a **separate Railway service** built from the same
+repository. It handles GitHub webhook ingestion (via NATS) and the periodic
+sync-jobs loop.
 
-1. Create a new service in Railway
-2. Use the same environment variables
-3. Set **Start Command** to:
-   ```bash
-   ./bin/worker
-   ```
-4. Set **Build Command** to:
-   ```bash
-   go build -o bin/worker ./cmd/worker
-   ```
+### Why a separate service?
+
+- The API server does **not** run background jobs when `NATS_URL` is set —
+  it logs "NATS configured (use external worker)" and skips the in-process
+  runner.
+- A separate service can be scaled, restarted, and monitored independently.
+- Multiple worker replicas share NATS queue-group load without duplicate
+  processing.
+
+### Create the worker service
+
+1. In your Railway project, click **"+ New"** → **"GitHub Repo"** → select the
+   same repository.
+2. In the new service's **"Settings" → "Build & Deploy"**:
+   - **Build Command**: `go build -o ./worker ./cmd/worker`
+   - **Start Command**: `./worker`
+3. Go to **"Variables"** and add at minimum:
+
+```bash
+# Required
+DB_URL=<same PostgreSQL URL as the API service>
+NATS_URL=<your NATS URL>
+APP_ENV=production
+LOG_LEVEL=info
+
+# Needed by syncjobs to decrypt GitHub OAuth tokens
+TOKEN_ENC_KEY_B64=<same value as API service>
+
+# Needed by the GitHub API client used inside syncjobs
+GITHUB_APP_ID=<same as API service>
+GITHUB_APP_SLUG=<same as API service>
+GITHUB_APP_PRIVATE_KEY=<same as API service>
+GITHUB_WEBHOOK_SECRET=<same as API service>
+```
+
+4. Click **"Deploy"**.
+
+> **Tip**: Use Railway's [shared variables](https://docs.railway.app/guides/variables#shared-variables)
+> or a reference variable (`${{api.DB_URL}}`) to avoid duplicating secrets
+> across services.
+
+### Verify the worker is running
+
+Check the service logs for:
+
+```
+=== Grainlify Worker Starting ===
+github webhook consumer subscribed
+starting syncjobs worker
+=== Grainlify Worker Running ===
+```
+
+### Scaling
+
+To run multiple replicas, increase the service's instance count in
+**Settings → Replicas**. Workers use NATS queue groups and PostgreSQL
+`FOR UPDATE SKIP LOCKED`, so replicas are safe to run concurrently.
+
+### Graceful shutdown
+
+Railway sends `SIGTERM` before terminating a container. The worker drains
+in-flight jobs for up to 10 seconds, then exits cleanly. No additional
+configuration is required.
 
 ---
 
