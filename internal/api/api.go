@@ -32,6 +32,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		IdleTimeout:  60 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		ErrorHandler: JSONErrorHandler(),
 	})
 	slog.Info("Fiber app created")
 
@@ -55,7 +56,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		return c.Next()
 	})
 
-	app.Use(recover.New())
+	app.Use(recover.New(recover.Config{
+		EnableStackTrace:  true,
+		StackTraceHandler: PanicStackTraceHandler,
+	}))
 
 	// Configure CORS from environment variables
 	corsPolicy := BuildCORSOriginPolicy(cfg)
@@ -233,9 +237,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 			"remote_ip", c.IP(),
 			"user_agent", c.Get("User-Agent"),
 		)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "not_found",
-			"path":  c.Path(),
+		return WriteErrorEnvelope(c, fiber.StatusNotFound, "not_found", "", fiber.Map{
+			"path": c.Path(),
 		})
 	})
 
