@@ -1142,40 +1142,70 @@ Didit KYC webhook receiver (for Didit to send status updates).
 
 ## Error Responses
 
-All endpoints may return the following error responses:
+All endpoints return errors in a consistent JSON envelope. Every error response includes a `request_id` (from the `X-Request-Id` response header) for support and debugging.
+
+### Standard envelope
+
+```json
+{
+  "error": "error_code",
+  "message": "Human-readable error message (optional)",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+Handler-returned errors and recovered panics are mapped through the global Fiber `ErrorHandler`:
+
+- **4xx** — status code is preserved; `error` is a stable machine-readable code.
+- **5xx** — clients receive `error: "internal_server_error"` and an opaque message; internal details and stack traces are logged server-side only (never in the response body).
+
+Unmatched routes return **404** with the same envelope plus the requested path:
+
+```json
+{
+  "error": "not_found",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "path": "/unknown-route"
+}
+```
 
 ### 400 Bad Request
 ```json
 {
   "error": "error_code",
-  "message": "Human-readable error message (optional)"
+  "message": "Human-readable error message (optional)",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 ### 401 Unauthorized
 ```json
 {
-  "error": "invalid_user"
+  "error": "invalid_user",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 or
 ```json
 {
-  "error": "invalid_token"
+  "error": "invalid_token",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 ### 403 Forbidden
 ```json
 {
-  "error": "insufficient_permissions"
+  "error": "insufficient_permissions",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 ### 404 Not Found
 ```json
 {
-  "error": "resource_not_found"
+  "error": "resource_not_found",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -1183,7 +1213,20 @@ or
 ```json
 {
   "error": "resource_exists",
-  "message": "Detailed message"
+  "message": "Detailed message",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+### 500 Internal Server Error
+
+Unexpected errors and panics return an opaque response (no stack traces or internal error text):
+
+```json
+{
+  "error": "internal_server_error",
+  "message": "An unexpected error occurred",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -1191,7 +1234,8 @@ or
 ```json
 {
   "error": "service_not_configured",
-  "message": "Service configuration missing"
+  "message": "Service configuration missing",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
