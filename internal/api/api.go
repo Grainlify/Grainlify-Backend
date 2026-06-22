@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"log/slog"
@@ -292,6 +292,9 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		"db_configured", deps.DB != nil,
 		"nats_configured", deps.Bus != nil,
 	)
+	// Docs routes
+	RegisterDocsRoutes(app)
+
 
 	return app
 }

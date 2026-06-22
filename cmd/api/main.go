@@ -62,7 +62,12 @@ func main() {
 		slog.Info("parsing db url", "step", "4.1", "action", "parsing_db_url", "db_url_length", len(cfg.DBURL))
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		slog.Info("attempting db connection", "step", "4.2", "action", "attempting_db_connection", "timeout", "10s")
-		d, err := db.Connect(ctx, cfg.DBURL)
+		d, err := db.Connect(ctx, cfg.DBURL, db.PoolConfig{
+			MaxConns:        cfg.DBMaxConns,
+			MinConns:        cfg.DBMinConns,
+			MaxConnLifetime: cfg.DBMaxConnLifetime,
+			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+		})
 		cancel()
 		if err != nil {
 			slog.Error("db connection failed", "step", "4", "action", "db_connection_failed",
@@ -72,7 +77,7 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("db connection successful", "step", "4.3", "action", "db_connection_successful",
-			"max_conns", 10,
+			"max_conns", cfg.DBMaxConns,
 		)
 		database = d
 		defer func() {

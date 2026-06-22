@@ -50,6 +50,12 @@ docker exec -it grainlify-postgres psql -U grainlify -d grainlify
 DB_URL=postgresql://grainlify:grainlify_dev_password@localhost:5432/grainlify?sslmode=disable
 AUTO_MIGRATE=true
 
+# Connection pool tuning (optional — defaults shown)
+# DB_MAX_CONNS=10          # Maximum connections in the pool
+# DB_MIN_CONNS=0           # Minimum idle connections kept open
+# DB_MAX_CONN_LIFETIME=30m # Max time a connection may be reused (Go duration: 30m, 1h, …)
+# DB_MAX_CONN_IDLE_TIME=5m # Max idle time before a connection is closed
+
 # Other required variables
 JWT_SECRET=your-jwt-secret-here
 TOKEN_ENC_KEY_B64=your-32-byte-base64-key-here
