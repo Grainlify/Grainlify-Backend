@@ -9,11 +9,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// PoolConfig holds the tuneable pgxpool parameters.
+type PoolConfig struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
 type DB struct {
 	Pool *pgxpool.Pool
 }
 
-func Connect(ctx context.Context, dbURL string) (*DB, error) {
+// parsePgxConfig wraps pgxpool.ParseConfig for testability.
+func parsePgxConfig(dbURL string) (*pgxpool.Config, error) {
+	return pgxpool.ParseConfig(dbURL)
+}
+
+func Connect(ctx context.Context, dbURL string, pc PoolConfig) (*DB, error) {
 	if dbURL == "" {
 		return nil, fmt.Errorf("DB_URL is required")
 	}
@@ -38,10 +51,10 @@ func Connect(ctx context.Context, dbURL string) (*DB, error) {
 		"user", cfg.ConnConfig.User,
 	)
 
-	cfg.MaxConns = 10
-	cfg.MinConns = 0
-	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConns = pc.MaxConns
+	cfg.MinConns = pc.MinConns
+	cfg.MaxConnLifetime = pc.MaxConnLifetime
+	cfg.MaxConnIdleTime = pc.MaxConnIdleTime
 	cfg.HealthCheckPeriod = 30 * time.Second
 
 	slog.Info("creating database connection pool",
