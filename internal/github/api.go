@@ -13,9 +13,15 @@ type Client struct {
 	UserAgent string
 }
 
+// NewClient returns a GitHub API client with automatic rate-limit backoff.
+// Requests that receive a 403/429 rate-limit response are retried up to
+// DefaultMaxRetries times, sleeping at most DefaultMaxWait per attempt.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 10 * time.Second},
+		HTTP: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: NewRateLimitTransport(nil),
+		},
 		UserAgent: "grainlify-backend",
 	}
 }
