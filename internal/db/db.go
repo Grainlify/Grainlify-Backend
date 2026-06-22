@@ -110,6 +110,13 @@ func maskDBURL(dbURL string) string {
 	return "***"
 }
 
+func (d *DB) Ping(ctx context.Context) error {
+	if d == nil || d.Pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	return d.Pool.Ping(ctx)
+}
+
 func (d *DB) Close() {
 	if d == nil || d.Pool == nil {
 		return
