@@ -1,9 +1,19 @@
 package handlers
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -13,14 +23,26 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 )
 
+const (
+	diditWebhookSignatureHeader  = "X-Signature"
+	diditWebhookTimestampHeader  = "X-Timestamp"
+	diditWebhookMaxTimestampSkew = 5 * time.Minute
+)
+
+type diditDecisionClient interface {
+	GetSessionDecision(ctx context.Context, sessionID string) (didit.SessionDecisionResponse, error)
+}
+
+var errDiditAPIClientNotConfigured = errors.New("didit api client not configured")
+
 type DiditWebhookHandler struct {
 	cfg   config.Config
 	db    *db.DB
-	didit *didit.Client
+	didit diditDecisionClient
 }
 
 func NewDiditWebhookHandler(cfg config.Config, d *db.DB) *DiditWebhookHandler {
-	var diditClient *didit.Client
+	var diditClient diditDecisionClient
 	if cfg.DiditAPIKey != "" {
 		diditClient = didit.NewClient(cfg.DiditAPIKey)
 	}
@@ -31,91 +53,187 @@ func NewDiditWebhookHandler(cfg config.Config, d *db.DB) *DiditWebhookHandler {
 	}
 }
 
-// WebhookEvent represents a Didit webhook event
+// WebhookEvent represents a Didit webhook event.
 type WebhookEvent struct {
-	Event     string                 `json:"event"` // e.g., "status.updated", "data.updated"
-	SessionID string                 `json:"session_id"`
-	Data      map[string]interface{} `json:"data,omitempty"`
-	Status    string                 `json:"status,omitempty"`
+	EventID     string                 `json:"event_id"`
+	Event       string                 `json:"event"`
+	WebhookType string                 `json:"webhook_type"`
+	SessionID   string                 `json:"session_id"`
+	Status      string                 `json:"status,omitempty"`
+	Timestamp   int64                  `json:"timestamp,omitempty"`
+	Data        map[string]interface{} `json:"data,omitempty"`
+	Decision    map[string]interface{} `json:"decision,omitempty"`
 }
 
-// Receive handles incoming Didit webhook events and callback redirects
-// Supports both:
-// - GET requests with query params (callback redirect from Didit)
-// - POST requests with JSON body (webhook events from Didit)
+// Receive handles incoming Didit webhook events and callback redirects.
 func (h *DiditWebhookHandler) Receive() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
-		}
-
-		var sessionID string
-		var status string
-
-		// Handle GET request (callback redirect from Didit)
-		if c.Method() == "GET" {
-			sessionID = c.Query("verificationSessionId")
-			status = c.Query("status")
-			
-			if sessionID == "" {
-				// Try alternative query param name
-				sessionID = c.Query("session_id")
+		switch c.Method() {
+		case fiber.MethodPost:
+			return h.handleWebhook(c)
+		case fiber.MethodGet:
+			if h.db == nil || h.db.Pool == nil {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 			}
-		} else {
-			// Handle POST request (webhook event from Didit)
-			var event WebhookEvent
-			if err := c.BodyParser(&event); err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
-			}
-			sessionID = event.SessionID
-			status = event.Status
+			return h.handleCallback(c)
+		default:
+			return c.Status(fiber.StatusMethodNotAllowed).JSON(fiber.Map{"error": "method_not_allowed"})
 		}
+	}
+}
 
-		if sessionID == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
-		}
+func (h *DiditWebhookHandler) handleWebhook(c *fiber.Ctx) error {
+	body := c.Body()
+	signature := strings.TrimSpace(c.Get(diditWebhookSignatureHeader))
+	timestamp := strings.TrimSpace(c.Get(diditWebhookTimestampHeader))
 
-		// Find user by session ID
-		var userID uuid.UUID
-		err := h.db.Pool.QueryRow(c.Context(), `
+	slog.Info("Didit webhook request received",
+		"path", c.Path(),
+		"remote_ip", c.IP(),
+		"body_size_bytes", len(body),
+		"signature_present", signature != "",
+		"timestamp_present", timestamp != "",
+	)
+
+	if strings.TrimSpace(h.cfg.DiditWebhookSecret) == "" {
+		slog.Error("Didit webhook secret not configured - rejecting request",
+			"path", c.Path(),
+			"remote_ip", c.IP(),
+		)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook_secret_not_configured"})
+	}
+
+	if !verifyDiditSignature(h.cfg.DiditWebhookSecret, body, signature, timestamp) {
+		slog.Warn("Didit webhook signature verification failed",
+			"path", c.Path(),
+			"remote_ip", c.IP(),
+			"body_size", len(body),
+			"signature_present", signature != "",
+			"timestamp_present", timestamp != "",
+		)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
+	}
+
+	slog.Info("Didit webhook signature verification succeeded",
+		"path", c.Path(),
+		"remote_ip", c.IP(),
+	)
+
+	var event WebhookEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+	}
+
+	slog.Info("Didit webhook event parsed",
+		"event_id", event.EventID,
+		"event", event.Event,
+		"webhook_type", event.WebhookType,
+		"session_id", event.SessionID,
+		"status", event.Status,
+		"timestamp", event.Timestamp,
+	)
+
+	if event.SessionID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
+	}
+	if h.db == nil || h.db.Pool == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+	}
+
+	userID, err := h.lookupUserByKYCSessionID(c.Context(), event.SessionID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
+	}
+
+	kycStatus, decisionJSON, err := h.resolveDiditStatus(c.Context(), event.SessionID, event.Status, false)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "didit_decision_fetch_failed"})
+	}
+
+	if err := h.updateUserKYCStatus(c.Context(), userID, kycStatus, decisionJSON); err != nil {
+		slog.Error("failed to update kyc status", "error", err, "user_id", userID, "status", kycStatus)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
+}
+
+func (h *DiditWebhookHandler) handleCallback(c *fiber.Ctx) error {
+	sessionID := strings.TrimSpace(c.Query("verificationSessionId"))
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(c.Query("session_id"))
+	}
+	if sessionID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
+	}
+
+	slog.Info("Didit callback received", "session_id", sessionID)
+
+	kycStatus, decisionJSON, err := h.resolveDiditStatus(c.Context(), sessionID, "", true)
+	if err != nil {
+		slog.Error("didit callback decision fetch failed", "session_id", sessionID, "error", err.Error())
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "didit_decision_fetch_failed"})
+	}
+
+	userID, err := h.lookupUserByKYCSessionID(c.Context(), sessionID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
+	}
+
+	if err := h.updateUserKYCStatus(c.Context(), userID, kycStatus, decisionJSON); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+	}
+
+	redirectURL := h.diditCallbackRedirectURL(kycStatus, sessionID)
+	if redirectURL != "" {
+		return c.Redirect(redirectURL, fiber.StatusFound)
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
+}
+
+func (h *DiditWebhookHandler) lookupUserByKYCSessionID(ctx context.Context, sessionID string) (uuid.UUID, error) {
+	var userID uuid.UUID
+	err := h.db.Pool.QueryRow(ctx, `
 SELECT id
 FROM users
 WHERE kyc_session_id = $1
 `, sessionID).Scan(&userID)
-		if err != nil {
-			// Session not found - might be from another system or invalid
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
+	return userID, err
+}
+
+func (h *DiditWebhookHandler) resolveDiditStatus(ctx context.Context, sessionID, fallbackStatus string, requireAPI bool) (string, []byte, error) {
+	if h.didit == nil {
+		if requireAPI {
+			return "", nil, errDiditAPIClientNotConfigured
 		}
+		return mapDiditStatus(fallbackStatus), nil, nil
+	}
 
-		// Process status update
-		// Fetch latest decision from Didit API if available
-		var kycStatus string
-		var decisionData map[string]interface{}
-		
-		if h.didit != nil {
-			decision, err := h.didit.GetSessionDecision(c.Context(), sessionID)
-			if err != nil {
-				// If API call fails, use status from query/body
-				kycStatus = mapDiditStatus(status)
-			} else {
-				// Map Didit status to our KYC status
-				kycStatus = mapDiditStatus(decision.Status)
-				// Store both Decision and Data from Didit response
-				decisionData = map[string]interface{}{
-					"decision": decision.Decision,
-					"data":     decision.Data,
-				}
-			}
-		} else {
-			// If no Didit client, use status from query/body
-			kycStatus = mapDiditStatus(status)
+	decision, err := h.didit.GetSessionDecision(ctx, sessionID)
+	if err != nil {
+		if requireAPI {
+			return "", nil, err
 		}
+		slog.Warn("didit api call failed; using signed webhook status",
+			"session_id", sessionID,
+			"error", err.Error(),
+			"fallback_status", fallbackStatus,
+		)
+		return mapDiditStatus(fallbackStatus), nil, nil
+	}
 
-		// Store decision data as JSONB (includes both Decision and Data)
-		decisionJSON, _ := json.Marshal(decisionData)
+	decisionData := diditDecisionData(decision)
+	decisionJSON, _ := json.Marshal(decisionData)
+	return mapDiditStatus(decision.Status), decisionJSON, nil
+}
 
-		// Update user KYC status
-		_, err = h.db.Pool.Exec(c.Context(), `
+func (h *DiditWebhookHandler) updateUserKYCStatus(ctx context.Context, userID uuid.UUID, kycStatus string, decisionJSON []byte) error {
+	if len(decisionJSON) == 0 {
+		decisionJSON = []byte("{}")
+	}
+
+	_, err := h.db.Pool.Exec(ctx, `
 UPDATE users
 SET kyc_status = $1,
     kyc_data = $2,
@@ -123,26 +241,73 @@ SET kyc_status = $1,
     updated_at = now()
 WHERE id = $3
 `, kycStatus, decisionJSON, userID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
-		}
-
-		// For GET requests (callback redirect), redirect to success page
-		if c.Method() == "GET" {
-			// Redirect to frontend with success message
-			successURL := h.cfg.GitHubOAuthSuccessRedirectURL
-			if successURL == "" && h.cfg.FrontendBaseURL != "" {
-				successURL = strings.TrimSuffix(h.cfg.FrontendBaseURL, "/")
-			}
-			if successURL != "" {
-				// Add query params to indicate success
-				redirectURL := fmt.Sprintf("%s?kyc=verified&session_id=%s", successURL, sessionID)
-				return c.Redirect(redirectURL, fiber.StatusFound)
-			}
-		}
-
-		// For POST requests (webhook), return JSON
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
-	}
+	return err
 }
 
+func (h *DiditWebhookHandler) diditCallbackRedirectURL(kycStatus, sessionID string) string {
+	successURL := h.cfg.GitHubOAuthSuccessRedirectURL
+	if successURL == "" && h.cfg.FrontendBaseURL != "" {
+		successURL = strings.TrimSuffix(h.cfg.FrontendBaseURL, "/")
+	}
+	if successURL == "" {
+		return ""
+	}
+
+	separator := "?"
+	if strings.Contains(successURL, "?") {
+		separator = "&"
+	}
+	return fmt.Sprintf(
+		"%s%skyc=%s&session_id=%s",
+		successURL,
+		separator,
+		url.QueryEscape(kycStatus),
+		url.QueryEscape(sessionID),
+	)
+}
+
+func diditDecisionData(decision didit.SessionDecisionResponse) map[string]interface{} {
+	combinedData := make(map[string]interface{})
+	if decision.Decision != nil {
+		combinedData["decision"] = decision.Decision
+	}
+	if decision.Data != nil {
+		combinedData["data"] = decision.Data
+	}
+	for k, v := range decision.ExtraFields {
+		combinedData[k] = v
+	}
+	return combinedData
+}
+
+// verifyDiditSignature validates Didit's HMAC-SHA256 signature over the raw body.
+func verifyDiditSignature(secret string, body []byte, signatureHeader string, timestampHeader string) bool {
+	if strings.TrimSpace(secret) == "" || strings.TrimSpace(signatureHeader) == "" {
+		return false
+	}
+	if !diditTimestampFresh(timestampHeader) {
+		return false
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	wantHex := hex.EncodeToString(mac.Sum(nil))
+
+	gotHex := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(signatureHeader), "sha256="))
+
+	return subtle.ConstantTimeCompare([]byte(gotHex), []byte(wantHex)) == 1
+}
+
+func diditTimestampFresh(timestampHeader string) bool {
+	if strings.TrimSpace(timestampHeader) == "" {
+		return false
+	}
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(timestampHeader), 10, 64)
+	if err != nil {
+		return false
+	}
+
+	now := time.Now().Unix()
+	maxSkew := int64(diditWebhookMaxTimestampSkew.Seconds())
+	return timestamp >= now-maxSkew && timestamp <= now+maxSkew
+}
