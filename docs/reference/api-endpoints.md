@@ -2,6 +2,26 @@
 
 This document describes all available API endpoints for the Grainlify backend. Use this as a reference when integrating the frontend.
 
+## Request Body Size Limit
+
+To protect the services from denial-of-service (DoS) attacks and memory exhaustion, the API enforces strict limits on request body sizes:
+
+*   **Global Limit:** Configurable via `MAX_BODY_BYTES` (defaulting to 1 MB). Any standard endpoint will reject request bodies exceeding this limit.
+*   **GitHub Webhook Limit:** Allowed up to 10 MB to accommodate larger GitHub webhook payloads.
+
+### Error Envelope (413 Request Entity Too Large)
+
+When a request body exceeds the allowed size limit, the API returns a `413 Request Entity Too Large` status with the standard error shape:
+
+```json
+{
+  "error": "request_entity_too_large",
+  "message": "Request Entity Too Large",
+  "request_id": "req_..."
+}
+```
+
+---
 
 ## Authentication
 

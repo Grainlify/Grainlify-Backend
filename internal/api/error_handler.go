@@ -111,6 +111,8 @@ func defaultErrorCodeForStatus(status int) string {
 		return "unprocessable_entity"
 	case fiber.StatusTooManyRequests:
 		return "too_many_requests"
+	case fiber.StatusRequestEntityTooLarge:
+		return "request_entity_too_large"
 	default:
 		return "request_failed"
 	}
