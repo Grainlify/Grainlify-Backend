@@ -55,6 +55,10 @@ type Config struct {
 	// Example: "http://localhost:5173,https://grainlify.figma.site"
 	CORSOrigins string
 
+	// CORSAllowPreview enables wildcard matching for *.vercel.app and *.0xo.in origins.
+	// Off by default; only enable when preview deployments need credentialed CORS access.
+	CORSAllowPreview bool
+
 	// Used to encrypt stored OAuth access tokens at rest. Must be 32 bytes base64 (AES-256-GCM key).
 	TokenEncKeyB64 string
 
@@ -121,6 +125,7 @@ func Load() Config {
 
 		FrontendBaseURL: getEnv("FRONTEND_BASE_URL", ""),
 		CORSOrigins:     getEnv("CORS_ORIGINS", ""),
+		CORSAllowPreview: getEnvBool("CORS_ALLOW_PREVIEW", false),
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
 
@@ -139,6 +144,11 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 	}
+}
+
+// IsDev reports whether the app runs in local development mode.
+func (c Config) IsDev() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Env), "dev")
 }
 
 func (c Config) LogLevel() slog.Leveler {
