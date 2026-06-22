@@ -1,4 +1,4 @@
-# Grainlify Backend
+﻿# Grainlify Backend
 
 Grainlify Backend is a Go-based API server that connects open-source developers with projects through GitHub integration, ecosystem tracking, and contribution management.
 
@@ -51,24 +51,24 @@ flowchart TB
 
 ```text
 Grainlify-Backend/
-├── cmd/
-│   ├── api/          # Main API server
-│   ├── migrate/      # Database migration runner
-│   └── worker/       # Background worker (optional)
-├── internal/
-│   ├── api/          # HTTP handlers and routing
-│   ├── auth/         # JWT authentication
-│   ├── bus/          # Event bus interface (NATS)
-│   ├── config/       # Configuration management
-│   ├── db/           # Database connection
-│   ├── github/       # GitHub API client
-│   ├── handlers/     # HTTP endpoint handlers
-│   ├── soroban/      # Stellar blockchain integration
-│   └── worker/       # Background job processing
-├── migrations/       # SQL migration files
-├── .env.example      # Environment variables template
-├── go.mod            # Go dependencies
-└── Makefile          # Build commands
+â”œâ”€â”€ cmd/
+â”‚   â”œâ”€â”€ api/          # Main API server
+â”‚   â”œâ”€â”€ migrate/      # Database migration runner
+â”‚   â””â”€â”€ worker/       # Background worker (optional)
+â”œâ”€â”€ internal/
+â”‚   â”œâ”€â”€ api/          # HTTP handlers and routing
+â”‚   â”œâ”€â”€ auth/         # JWT authentication
+â”‚   â”œâ”€â”€ bus/          # Event bus interface (NATS)
+â”‚   â”œâ”€â”€ config/       # Configuration management
+â”‚   â”œâ”€â”€ db/           # Database connection
+â”‚   â”œâ”€â”€ github/       # GitHub API client
+â”‚   â”œâ”€â”€ handlers/     # HTTP endpoint handlers
+â”‚   â”œâ”€â”€ soroban/      # Stellar blockchain integration
+â”‚   â””â”€â”€ worker/       # Background job processing
+â”œâ”€â”€ migrations/       # SQL migration files
+â”œâ”€â”€ .env.example      # Environment variables template
+â”œâ”€â”€ go.mod            # Go dependencies
+â””â”€â”€ Makefile          # Build commands
 ```
 
 ## Core Features
@@ -268,3 +268,12 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
 
 
 
+
+## API Documentation
+
+Interactive API docs are served at `/docs` (Swagger UI) and the raw OpenAPI 3.1 spec at `/openapi.yaml`.
+
+- Local: http://localhost:8080/docs
+- Spec: http://localhost:8080/openapi.yaml
+
+The spec documents all public, authenticated, admin, and webhook routes with request/response schemas and auth requirements.
