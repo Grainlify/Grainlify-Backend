@@ -201,13 +201,18 @@ DIDIT_WORKFLOW_ID=your_workflow_id
 
 ## API Documentation
 
-See [API_ENDPOINTS.md](API_ENDPOINTS.md) for complete API documentation.
+See [API Endpoints](docs/reference/api-endpoints.md) for the complete REST reference.
+
+Interactive API docs are served at `/docs` (Swagger UI) and the raw OpenAPI 3.1 spec at `/openapi.yaml`.
+
+- Local: http://localhost:8080/docs
+- Spec: http://localhost:8080/openapi.yaml
 
 ## Deployment
 
 ### Railway
 
-See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed Railway deployment instructions.
+See [Railway Deployment](docs/deployment/railway.md) for detailed Railway deployment instructions.
 
 ### Other Platforms
 
@@ -233,47 +238,17 @@ go test ./...
 
 ## Troubleshooting
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
+See [Troubleshooting Guide](docs/troubleshooting/index.md) for common issues and solutions.
 
 ## Additional Documentation
 
-- [Development Guide](DEVELOPMENT.md) - Development setup and commands
-- [GitHub App Setup](GITHUB_APP_SETUP.md) - GitHub App configuration
-- [Quick Start](QUICK_START.md) - Quick development setup
-- [API Endpoints](API_ENDPOINTS.md) - Complete API reference
+Full documentation index: **[docs/README.md](docs/README.md)**
+
+- [Quick Start](docs/setup/quick-start.md) — Auto-reload development setup
+- [Development Guide](docs/setup/development.md) — Dev commands and logging
+- [GitHub App Setup](docs/github-app/setup.md) — GitHub App configuration
+- [API Endpoints](docs/reference/api-endpoints.md) — Complete API reference
 
 ## License
 
 [Add your license here]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## API Documentation
-
-Interactive API docs are served at `/docs` (Swagger UI) and the raw OpenAPI 3.1 spec at `/openapi.yaml`.
-
-- Local: http://localhost:8080/docs
-- Spec: http://localhost:8080/openapi.yaml
-
-The spec documents all public, authenticated, admin, and webhook routes with request/response schemas and auth requirements.
