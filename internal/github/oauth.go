@@ -10,18 +10,16 @@ import (
 	"time"
 )
 
+// OAuthConfig holds the configuration for GitHub OAuth authentication.
+// ClientID and ClientSecret are obtained from GitHub OAuth app settings.
+// RedirectURL must match the callback URL configured in the GitHub OAuth app.
 type OAuthConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
 }
 
-func AuthorizeURL(clientID string, redirectURL string, state string, scopes []string) (string, error) {
-	if clientID == "" || redirectURL == "" {
-		return "", fmt.Errorf("github oauth not configured")
-	}
-	u, _ := url.Parse("https://github.com/login/oauth/authorize")
-	q := u.Query()
+tq := u.Query()
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", redirectURL)
 	q.Set("state", state)
@@ -38,12 +36,13 @@ func joinScopes(scopes []string) string {
 	for i, s := range scopes {
 		if i > 0 {
 			out += " "
-		}
-		out += s
-	}
-	return out
+eturn out
 }
 
+// TokenResponse represents the response from GitHub's OAuth token endpoint.
+// AccessToken is the OAuth bearer token used to authenticate API requests.
+// TokenType is typically "bearer".
+// Scope indicates the granted OAuth scopes.
 type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
@@ -53,7 +52,12 @@ type TokenResponse struct {
 func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenResponse, error) {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return TokenResponse{}, fmt.Errorf("github oauth not configured")
-	}
+
+// ExchangeCode exchanges an OAuth authorization code for an access token.
+// It makes a POST request to GitHub's token endpoint with the code and client credentials.
+// The context can be used to set a deadline for the HTTP request (default timeout is 10s).
+// Returns an error if the configuration is incomplete, code is empty, or the request fails.
+// The access token in the response must be non-empty.	}
 	if code == "" {
 		return TokenResponse{}, fmt.Errorf("code is required")
 	}
@@ -66,7 +70,7 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 	}
 	b, _ := json.Marshal(body)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, bytes.NewReader(b))
 	if err != nil {
 		return TokenResponse{}, err
 	}
