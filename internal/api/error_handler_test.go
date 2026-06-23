@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/jagadeesh/grainlify/backend/internal/api"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -142,7 +143,7 @@ func TestJSONErrorHandler_CustomFiberStatusPreserved(t *testing.T) {
 }
 
 func TestAppNotFoundUsesErrorEnvelope(t *testing.T) {
-	app := api.New(config.Config{}, api.Deps{})
+	app := api.New(config.Config{}, api.Deps{}, handlers.BuildInfo{})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/definitely-missing-route", nil))
 	require.NoError(t, err)
