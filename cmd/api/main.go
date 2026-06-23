@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,13 +17,14 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
+	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
 )
 
 func main() {
 	slog.Info("=== Grainlify API Starting ===")
 	slog.Info("loading environment variables", "step", "1", "action", "loading_environment_variables")
-	
+
 	config.LoadDotenv()
 	slog.Info("loading configuration", "step", "2", "action", "loading_configuration")
 	cfg := config.Load()
@@ -143,14 +146,22 @@ func main() {
 	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus})
 	slog.Info("api initialized", "step", "7", "action", "api_initialized")
 
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	defer stopWorkers()
+	var workerWG sync.WaitGroup
+
 	// Background workers (dev convenience). In production we run `cmd/worker` instead.
 	// If NATS is configured, prefer the external worker process.
 	if cfg.NATSURL == "" && database != nil && database.Pool != nil {
 		slog.Info("starting background worker", "step", "8", "action", "starting_background_worker")
 		worker := syncjobs.New(cfg, database.Pool)
+		workerWG.Add(1)
 		go func() {
+			defer workerWG.Done()
 			slog.Info("background worker started")
-			_ = worker.Run(context.Background())
+			if err := worker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("background worker exited", "error", err)
+			}
 		}()
 
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)
@@ -210,6 +221,10 @@ func main() {
 			"error_type", fmt.Sprintf("%T", err),
 		)
 		os.Exit(1)
+	}
+	stopWorkers()
+	if err := shutdownwait.Wait(ctx, &workerWG); err != nil {
+		slog.Warn("worker shutdown exceeded deadline", "error", err)
 	}
 
 	slog.Info("shutdown complete")
