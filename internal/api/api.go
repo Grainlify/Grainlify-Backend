@@ -85,6 +85,12 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 
 	// Enforce MAX_BODY_BYTES request body size limit for all routes except the GitHub webhook route
 	app.Use(func(c *fiber.Ctx) error {
+		// A non-positive limit means "no per-route limit configured"; skip the
+		// check so an unset MaxBodyBytes does not reject every request.
+		if cfg.MaxBodyBytes <= 0 {
+			return c.Next()
+		}
+
 		path := c.Path()
 		// Allow larger payloads on the GitHub webhook route
 		if strings.HasPrefix(path, "/webhooks/github") {

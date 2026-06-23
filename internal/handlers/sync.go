@@ -60,8 +60,22 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 	}
 }
 
+// JobsForProject returns sync jobs for a project, newest first.
+//
+// Query parameters:
+//   - limit: max results (default 50, max 200)
+//   - offset: pagination offset (default 0)
+//
+// The response keeps the backward-compatible "jobs" array and adds
+// limit/offset/total metadata consistent with the other paginated endpoints.
 func (h *SyncHandler) JobsForProject() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		p, err := ParsePagination(c, 50, 200)
+		if err != nil {
+			// response already written by ParsePagination on error
+			return nil
+		}
+
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
@@ -95,8 +109,8 @@ SELECT id, job_type, status, run_at, attempts, last_error, created_at, updated_a
 FROM sync_jobs
 WHERE project_id = $1
 ORDER BY created_at DESC
-LIMIT 50
-`, projectID)
+LIMIT $2 OFFSET $3
+`, projectID, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "jobs_list_failed"})
 		}
@@ -124,7 +138,14 @@ LIMIT 50
 			})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"jobs": out})
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT COUNT(*) FROM sync_jobs WHERE project_id = $1
+`, projectID).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("jobs", out, p, total))
 	}
 }
 

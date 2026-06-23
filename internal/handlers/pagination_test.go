@@ -94,10 +94,13 @@ func TestParsePagination_RejectsNegativeOffset(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(c *fiber.Ctx) error {
 		_, err := handlers.ParsePagination(c, 20, 100)
-		// ParsePagination sends the 400 response and returns nil error
-		// (since c.JSON() returns nil on success). The response is already
-		// written with the 400 status.
-		return err
+		// ParsePagination writes the 400 response itself and returns a
+		// non-nil sentinel so callers stop processing. The response is
+		// already committed, so return nil to avoid overwriting it.
+		if err != nil {
+			return nil
+		}
+		return nil
 	})
 
 	req := httptest.NewRequest("GET", "/test?offset=-1", nil)

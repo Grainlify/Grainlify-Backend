@@ -14,6 +14,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/api"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/stretchr/testify/assert"
 )
@@ -49,7 +50,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 
 func TestAuthRoutesRegistered(t *testing.T) {
 	cfg := config.Config{JWTSecret: "secret"}
-	app := api.New(cfg, api.Deps{DB: &db.DB{}})
+	app := api.New(cfg, api.Deps{DB: &db.DB{}}, handlers.BuildInfo{})
 
 	routes := app.GetRoutes()
 	hasNonce := false
@@ -69,7 +70,7 @@ func TestAuthRoutesRegistered(t *testing.T) {
 func TestNonceValidation(t *testing.T) {
 	pool := getTestPool(t)
 	cfg := config.Config{JWTSecret: "secret"}
-	app := api.New(cfg, api.Deps{DB: &db.DB{Pool: pool}})
+	app := api.New(cfg, api.Deps{DB: &db.DB{Pool: pool}}, handlers.BuildInfo{})
 
 	tests := []struct {
 		name       string
@@ -204,7 +205,7 @@ func TestNonceValidation(t *testing.T) {
 func TestVerifyValidation(t *testing.T) {
 	pool := getTestPool(t)
 	cfg := config.Config{JWTSecret: "secret"}
-	app := api.New(cfg, api.Deps{DB: &db.DB{Pool: pool}})
+	app := api.New(cfg, api.Deps{DB: &db.DB{Pool: pool}}, handlers.BuildInfo{})
 
 	tests := []struct {
 		name       string

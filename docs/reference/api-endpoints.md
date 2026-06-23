@@ -332,6 +332,46 @@ GET /profile/activity?limit=50&offset=0
 
 ---
 
+### GET /profile/projects
+
+Get projects the user has contributed to (via issues or PRs).
+
+**Authentication:** Required (JWT)
+
+**Query Parameters:**
+- `user_id` (optional) - View another user's contributed projects by UUID
+- `login` (optional) - View another user's contributed projects by GitHub login
+- `limit` (optional, default: 10, max: 100) - Number of results per page
+- `offset` (optional, default: 0) - Pagination offset
+
+**Example Request:**
+```
+GET /profile/projects?limit=10&offset=0
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "79caaf9a-f1e6-4da0-be79-52c5bee169e1",
+    "github_full_name": "owner/repo",
+    "status": "verified",
+    "ecosystem_name": "Starknet",
+    "language": "Cairo",
+    "owner_avatar_url": "https://avatars.githubusercontent.com/u/123?s=128"
+  }
+]
+```
+
+**Notes:**
+- Ordered by repository full name (ascending)
+- Response is a bare JSON array for backward compatibility; `limit`/`offset`
+  page the underlying query so contributions beyond the first slice are reachable
+- `limit` is clamped to the max and a negative `offset` returns `400`
+- Returns an empty array if the user has no GitHub account
+
+---
+
 ## GitHub OAuth
 
 ### GET /auth/github/login/start
@@ -672,21 +712,40 @@ Get sync jobs for a project.
 **URL Parameters:**
 - `id` - Project UUID
 
+**Query Parameters:**
+- `limit` (optional, default: 50, max: 200) - Number of results per page
+- `offset` (optional, default: 0) - Pagination offset
+
+**Example Request:**
+```
+GET /projects/:id/sync/jobs?limit=50&offset=0
+```
+
 **Response:**
 ```json
-[
-  {
-    "id": "job-uuid",
-    "job_type": "sync_issues",
-    "status": "completed",
-    "run_at": "2025-12-30T22:56:03.058032+05:30",
-    "attempts": 1,
-    "last_error": null,
-    "created_at": "2025-12-30T22:56:03.058032+05:30",
-    "updated_at": "2025-12-30T22:56:03.058032+05:30"
-  }
-]
+{
+  "jobs": [
+    {
+      "id": "job-uuid",
+      "job_type": "sync_issues",
+      "status": "completed",
+      "run_at": "2025-12-30T22:56:03.058032+05:30",
+      "attempts": 1,
+      "last_error": null,
+      "created_at": "2025-12-30T22:56:03.058032+05:30",
+      "updated_at": "2025-12-30T22:56:03.058032+05:30"
+    }
+  ],
+  "total": 12,
+  "limit": 50,
+  "offset": 0
+}
 ```
+
+**Notes:**
+- Ordered by creation date (newest first)
+- `total` is the job count for the project; use it with `limit`/`offset` to page
+- `limit` is clamped to the max and a negative `offset` returns `400`
 
 **Status Values:**
 - `"pending"` - Job queued, not started
@@ -966,6 +1025,15 @@ Get list of users (admin only).
 
 **Authentication:** Required (JWT, admin role)
 
+**Query Parameters:**
+- `limit` (optional, default: 50, max: 200) - Number of results per page
+- `offset` (optional, default: 0) - Pagination offset
+
+**Example Request:**
+```
+GET /admin/users?limit=50&offset=0
+```
+
 **Response:**
 ```json
 {
@@ -977,13 +1045,17 @@ Get list of users (admin only).
       "created_at": "2025-12-30T21:25:50.85241+05:30",
       "updated_at": "2025-12-30T22:52:00.3484+05:30"
     }
-  ]
+  ],
+  "total": 165,
+  "limit": 50,
+  "offset": 0
 }
 ```
 
 **Notes:**
-- Returns latest 50 users
 - Ordered by creation date (newest first)
+- `total` is the unfiltered user count; use it with `limit`/`offset` to page
+- `limit` is clamped to the max and a negative `offset` returns `400`
 
 ---
 
