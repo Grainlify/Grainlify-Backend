@@ -625,7 +625,8 @@ func (h *UserProfileHandler) ProjectsContributed() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		p, err := ParsePagination(c, 10, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		if h.db == nil || h.db.Pool == nil {

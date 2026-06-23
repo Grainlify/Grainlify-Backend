@@ -72,7 +72,8 @@ func (h *SyncHandler) JobsForProject() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		p, err := ParsePagination(c, 50, 200)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		if h.db == nil || h.db.Pool == nil {

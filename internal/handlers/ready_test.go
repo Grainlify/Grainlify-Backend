@@ -4,14 +4,35 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jagadeesh/grainlify/backend/internal/bus"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
+
+// readyTestDB returns a db.DB backed by a live pool from TEST_DB_URL. The
+// readiness handler reports the database as ready only when it can ping a real
+// pool, so tests that assert a healthy database are skipped when no database is
+// available (matching the convention used elsewhere in this package).
+func readyTestDB(t *testing.T) *db.DB {
+	t.Helper()
+	dsn := os.Getenv("TEST_DB_URL")
+	if dsn == "" {
+		t.Skip("TEST_DB_URL not set; skipping readiness test that needs a live database")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return &db.DB{Pool: pool}
+}
 
 // mockBusReady is a controllable mock bus.Bus for readiness testing.
 type mockBusReady struct {
@@ -38,7 +59,7 @@ func (b *mockBusReady) setStatus(s string) {
 }
 
 func TestReadyBothHealthy(t *testing.T) {
-	d := &db.DB{}
+	d := readyTestDB(t)
 	bus := &mockBusReady{status: "CONNECTED"}
 	app := fiber.New()
 	app.Get("/ready", handlers.NewReady(d, bus))
@@ -110,9 +131,9 @@ func TestReadyDBNotConfigured(t *testing.T) {
 	}
 
 	var dbDep, natsDep *struct {
-		Name   string
-		Ready  bool
-		Status string
+		Name   string `json:"name"`
+		Ready  bool   `json:"ready"`
+		Status string `json:"status"`
 	}
 	for i := range body.Deps {
 		switch body.Deps[i].Name {
@@ -186,7 +207,7 @@ func TestReadyNATSDisconnected(t *testing.T) {
 }
 
 func TestReadyNATSNotConfigured(t *testing.T) {
-	d := &db.DB{}
+	d := readyTestDB(t)
 	app := fiber.New()
 	app.Get("/ready", handlers.NewReady(d, nil))
 
@@ -217,9 +238,9 @@ func TestReadyNATSNotConfigured(t *testing.T) {
 	}
 
 	var natsDep *struct {
-		Name   string
-		Ready  bool
-		Status string
+		Name   string `json:"name"`
+		Ready  bool   `json:"ready"`
+		Status string `json:"status"`
 	}
 	for i := range body.Deps {
 		if body.Deps[i].Name == "nats" {
