@@ -221,6 +221,20 @@ See [Railway Deployment](docs/deployment/railway.md) for detailed Railway deploy
 3. Build binary: `go build -o ./api ./cmd/api`
 4. Start server: `./api`
 
+## Operations
+
+### Graceful Shutdown
+
+Both `cmd/api` and `cmd/worker` use a cancelable root context for background
+workers. On `SIGINT` or `SIGTERM`, the API process first stops accepting HTTP
+requests, then cancels the sync worker context, waits for in-flight worker work
+within the shutdown deadline, and only then lets deferred DB/NATS cleanup run.
+
+The standalone worker process passes the same root context to the NATS webhook
+consumer and sync worker. Canceling that context unsubscribes the consumer and
+lets the sync worker finish or safely requeue work before `Close()` drains NATS
+and closes the database pool.
+
 ## Development
 
 ### Running Tests
