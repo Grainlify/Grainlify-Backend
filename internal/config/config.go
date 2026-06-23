@@ -78,6 +78,9 @@ type Config struct {
 	EscrowContractID         string
 	ProgramEscrowContractID  string
 	TokenContractID          string
+
+	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
+	MaxBodyBytes             int
 }
 
 func Load() Config {
@@ -143,6 +146,8 @@ func Load() Config {
 		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
+
+		MaxBodyBytes:             getEnvInt("MAX_BODY_BYTES", 1048576),
 	}
 }
 
@@ -215,4 +220,16 @@ func getEnvBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }

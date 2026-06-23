@@ -254,6 +254,68 @@ go test ./...
 
 See [Troubleshooting Guide](docs/troubleshooting/index.md) for common issues and solutions.
 
+## Operations
+
+### Health and Readiness Endpoints
+
+The API exposes two standard observability endpoints:
+
+- `GET /health` — Liveness probe. Always returns 200 with build metadata and uptime. Never reflects dependency state (safe for load-balancer health checks).
+- `GET /ready` — Readiness probe. Returns 200 only when **all configured dependencies** (PostgreSQL, NATS) are healthy; returns 503 with a per-dependency breakdown otherwise.
+
+**Example `/health` response:**
+
+```json
+{
+  "ok": true,
+  "service": "grainlify-api",
+  "version": "1.2.3",
+  "commit": "abc1234",
+  "build_time": "2025-06-22T12:00:00Z",
+  "uptime": "3h12m45s"
+}
+```
+
+**Example `/ready` response (healthy):**
+
+```json
+{
+  "ok": true,
+  "deps": [
+    { "name": "database", "ready": true, "status": "ok" },
+    { "name": "nats", "ready": true, "status": "CONNECTED" }
+  ]
+}
+```
+
+**Example `/ready` response (degraded):**
+
+```json
+{
+  "ok": false,
+  "deps": [
+    { "name": "database", "ready": true, "status": "ok" },
+    { "name": "nats", "ready": false, "status": "DISCONNECTED" }
+  ]
+}
+```
+
+> **Security:** Neither endpoint leaks DB URLs, NATS credentials, JWT secrets, or internal hostnames. The health endpoint only returns build-time metadata and uptime.
+
+### Build Metadata
+
+Build metadata is injected at compile time via `-ldflags`. Example build command:
+
+```sh
+go build -ldflags="\
+  -X main.Version=$(git describe --tags --always 2>/dev/null || echo dev) \
+  -X main.Commit=$(git rev-parse --short HEAD) \
+  -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o bin/grainlify-api ./cmd/api
+```
+
+When these flags are omitted, the defaults (`dev`, `none`, `unknown`) are used.
+
 ## Additional Documentation
 
 Full documentation index: **[docs/README.md](docs/README.md)**
