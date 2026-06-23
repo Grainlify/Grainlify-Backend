@@ -4,6 +4,7 @@ import "context"
 
 type Bus interface {
 	Publish(ctx context.Context, subject string, data []byte) error
+	Status() string
 	Close()
 }
 

@@ -23,7 +23,7 @@ type Deps struct {
 	Bus bus.Bus
 }
 
-func New(cfg config.Config, deps Deps) *fiber.App {
+func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	slog.Info("initializing Fiber app",
 		"app_name", "grainlify-api",
 	)
@@ -128,8 +128,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 			"correct_url": "/webhooks/github",
 		})
 	})
-	app.Get("/health", handlers.Health())
-	app.Get("/ready", handlers.Ready(deps.DB))
+	app.Get("/health", handlers.NewHealth(build))
+	app.Get("/ready", handlers.NewReady(deps.DB, deps.Bus))
 
 	authHandler := handlers.NewAuthHandler(cfg, deps.DB)
 	authGroup := app.Group("/auth")
