@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"encoding/hex"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -12,6 +14,191 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
+
+const (
+	// MaxWalletTypeLength defines the maximum allowed length of the wallet_type string.
+	MaxWalletTypeLength = 50
+
+	// MaxAddressLength defines the maximum allowed length of the address string.
+	MaxAddressLength = 128
+
+	// MaxNonceLength defines the maximum allowed length of the nonce string.
+	MaxNonceLength = 128
+
+	// MaxSignatureLength defines the maximum allowed length of the signature string.
+	MaxSignatureLength = 256
+
+	// MaxPublicKeyLength defines the maximum allowed length of the public_key string.
+	MaxPublicKeyLength = 256
+)
+
+// isValidHex checks if a string is a valid hexadecimal representation.
+// It allows an optional "0x" or "0X" prefix.
+func isValidHex(s string) bool {
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	if len(s) == 0 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// isValidBase64 checks if a string contains only valid base64 or base64url characters.
+func isValidBase64(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '+' || c == '/' || c == '-' || c == '_' || c == '=') {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidNonce checks if a nonce is within valid length bounds and contains only valid base64url/alphanumeric characters.
+func isValidNonce(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) == 0 || len(trimmed) > MaxNonceLength {
+		return false
+	}
+	return isValidBase64(trimmed)
+}
+
+// isValidAddress checks if a wallet address is valid and bounds its length/format per wallet type.
+func isValidAddress(wType auth.WalletType, addr string) bool {
+	trimmed := strings.TrimSpace(addr)
+	if len(trimmed) == 0 || len(trimmed) > MaxAddressLength {
+		return false
+	}
+
+	switch wType {
+	case auth.WalletTypeEVM:
+		// EVM address must be hex-encoded. Standard length is 40 hex characters,
+		// plus optional 0x/0X prefix (so total 40 or 42 characters).
+		hasPrefix := strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X")
+		expectedLen := 40
+		if hasPrefix {
+			expectedLen = 42
+		}
+		if len(trimmed) != expectedLen {
+			return false
+		}
+		return isValidHex(trimmed)
+
+	case auth.WalletTypeStellarEd25519, auth.WalletTypeStellarSecp256k1:
+		// For Stellar, address can be a base32 address (starts with G, M, etc., length 56),
+		// or a public key hex. We check that it contains only alphanumeric characters
+		// after an optional 0x/0X prefix, and has length between 5 and 128 characters.
+		val := trimmed
+		if strings.HasPrefix(strings.ToLower(val), "0x") {
+			val = val[2:]
+		}
+		if len(val) < 5 {
+			return false
+		}
+		for i := 0; i < len(val); i++ {
+			c := val[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+				return false
+			}
+		}
+		return true
+
+	default:
+		return false
+	}
+}
+
+// isValidSignature checks if a signature has a valid hex shape and size for the wallet type.
+func isValidSignature(wType auth.WalletType, signature string) bool {
+	trimmed := strings.TrimSpace(signature)
+	if len(trimmed) == 0 || len(trimmed) > MaxSignatureLength {
+		return false
+	}
+
+	switch wType {
+	case auth.WalletTypeEVM:
+		// EVM signature must be valid hex. Standard length is 65 bytes (130 hex chars + optional 0x).
+		hasPrefix := strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X")
+		expectedLen := 130
+		if hasPrefix {
+			expectedLen = 132
+		}
+		if len(trimmed) != expectedLen {
+			return false
+		}
+		return isValidHex(trimmed)
+
+	case auth.WalletTypeStellarEd25519:
+		// Ed25519 signature is 64 bytes. In hex, that is 128 characters (optional 0x).
+		hasPrefix := strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X")
+		expectedLen := 128
+		if hasPrefix {
+			expectedLen = 130
+		}
+		if len(trimmed) != expectedLen {
+			return false
+		}
+		return isValidHex(trimmed)
+
+	case auth.WalletTypeStellarSecp256k1:
+		// Secp256k1 signature can be compact (64 bytes / 128 hex chars) or DER (typically 70-72 bytes / 140-144 hex chars).
+		// We validate it is hex and length is within a reasonable range (120 to 160 chars).
+		if !isValidHex(trimmed) {
+			return false
+		}
+		hexPart := strings.TrimPrefix(trimmed, "0x")
+		hexPart = strings.TrimPrefix(hexPart, "0X")
+		l := len(hexPart)
+		return l == 128 || (l >= 120 && l <= 160)
+
+	default:
+		return false
+	}
+}
+
+// isValidPublicKey checks if a public key is non-empty, within bounds, and has a valid format.
+func isValidPublicKey(wType auth.WalletType, pubKey string) bool {
+	trimmed := strings.TrimSpace(pubKey)
+	if len(trimmed) == 0 || len(trimmed) > MaxPublicKeyLength {
+		return false
+	}
+
+	switch wType {
+	case auth.WalletTypeEVM:
+		// Public key is ignored for EVM, but if provided, it should be a valid hex or base64 string
+		// within length bounds.
+		return isValidHex(trimmed) || isValidBase64(trimmed)
+
+	case auth.WalletTypeStellarEd25519:
+		// Stellar Ed25519 public key is 32 bytes (64 hex characters + optional 0x).
+		hasPrefix := strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X")
+		expectedLen := 64
+		if hasPrefix {
+			expectedLen = 66
+		}
+		if len(trimmed) != expectedLen {
+			return false
+		}
+		return isValidHex(trimmed)
+
+	case auth.WalletTypeStellarSecp256k1:
+		// Secp256k1 public key can be compressed (33 bytes / 66 hex chars) or uncompressed (65 bytes / 130 hex chars).
+		hexPart := strings.TrimPrefix(trimmed, "0x")
+		hexPart = strings.TrimPrefix(hexPart, "0X")
+		if !isValidHex(trimmed) {
+			return false
+		}
+		l := len(hexPart)
+		return l == 66 || l == 130
+
+	default:
+		return false
+	}
+}
 
 type AuthHandler struct {
 	cfg config.Config
@@ -38,10 +225,19 @@ func (h *AuthHandler) Nonce() fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
 		}
 
+		if len(req.WalletType) > MaxWalletTypeLength {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+		}
+
 		wType, err := auth.NormalizeWalletType(req.WalletType)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
 		}
+
+		if !isValidAddress(wType, req.Address) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+		}
+
 		addr, err := auth.NormalizeAddress(wType, req.Address)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
@@ -82,16 +278,44 @@ func (h *AuthHandler) Verify() fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
 		}
 
+		if len(req.WalletType) > MaxWalletTypeLength {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+		}
+
 		wType, err := auth.NormalizeWalletType(req.WalletType)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
 		}
+
+		if !isValidAddress(wType, req.Address) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+		}
+
 		addr, err := auth.NormalizeAddress(wType, req.Address)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
 		}
+
 		if req.Nonce == "" || req.Signature == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_nonce_or_signature"})
+		}
+
+		if !isValidNonce(req.Nonce) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_nonce"})
+		}
+
+		if !isValidSignature(wType, req.Signature) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_signature"})
+		}
+
+		if wType == auth.WalletTypeStellarEd25519 || wType == auth.WalletTypeStellarSecp256k1 {
+			if !isValidPublicKey(wType, req.PublicKey) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_public_key"})
+			}
+		} else {
+			if req.PublicKey != "" && !isValidPublicKey(wType, req.PublicKey) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_public_key"})
+			}
 		}
 
 		// Be tolerant during early dev: accept both the current canonical message and the

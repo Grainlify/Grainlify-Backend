@@ -10,6 +10,7 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/api"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +22,7 @@ func TestRequestBodySizeLimit(t *testing.T) {
 		GitHubWebhookSecret: "", // leaves webhook unconfigured to trigger 503 on handler success
 	}
 
-	app := api.New(cfg, api.Deps{})
+	app := api.New(cfg, api.Deps{}, handlers.BuildInfo{})
 
 	t.Run("StandardRoute_UnderLimit_Succeeds", func(t *testing.T) {
 		body := []byte(strings.Repeat("a", 50))
