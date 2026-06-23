@@ -27,11 +27,21 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	slog.Info("initializing Fiber app",
 		"app_name", "grainlify-api",
 	)
+	// Since Fiber/fasthttp enforces BodyLimit at the server level before routing,
+	// the global BodyLimit must accommodate the larger webhook payload size (e.g. 10 MB).
+	// We then enforce the tighter MaxBodyBytes on all other routes via middleware.
+	webhookBodyLimit := 10 * 1024 * 1024 // 10 MB for GitHub webhooks
+	globalBodyLimit := cfg.MaxBodyBytes
+	if globalBodyLimit < webhookBodyLimit {
+		globalBodyLimit = webhookBodyLimit
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName:      "grainlify-api",
 		IdleTimeout:  60 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		BodyLimit:    globalBodyLimit,
 		ErrorHandler: JSONErrorHandler(),
 	})
 	slog.Info("Fiber app created")
@@ -72,6 +82,28 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 
 	app.Use(cors.New(corsConfig))
 	app.Use(logger.New())
+
+	// Enforce MAX_BODY_BYTES request body size limit for all routes except the GitHub webhook route
+	app.Use(func(c *fiber.Ctx) error {
+		path := c.Path()
+		// Allow larger payloads on the GitHub webhook route
+		if strings.HasPrefix(path, "/webhooks/github") {
+			return c.Next()
+		}
+
+		// Enforce MaxBodyBytes limit by checking Content-Length header first
+		contentLength := c.Request().Header.ContentLength()
+		if contentLength > cfg.MaxBodyBytes {
+			return fiber.ErrRequestEntityTooLarge
+		}
+
+		// Also check the actual read body size in case of chunked encoding or forged headers
+		if len(c.Body()) > cfg.MaxBodyBytes {
+			return fiber.ErrRequestEntityTooLarge
+		}
+
+		return c.Next()
+	})
 
 	// Routes.
 	// Root handler - also handle POST requests to catch misconfigured webhooks

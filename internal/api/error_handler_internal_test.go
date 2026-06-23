@@ -61,6 +61,7 @@ func TestDefaultErrorCodeForStatus(t *testing.T) {
 		fiber.StatusConflict:            "conflict",
 		fiber.StatusUnprocessableEntity: "unprocessable_entity",
 		fiber.StatusTooManyRequests:     "too_many_requests",
+		fiber.StatusRequestEntityTooLarge: "request_entity_too_large",
 		fiber.StatusTeapot:              "request_failed",
 	}
 	for status, want := range cases {
