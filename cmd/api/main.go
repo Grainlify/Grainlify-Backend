@@ -14,8 +14,21 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
+)
+
+// Build metadata populated via -ldflags at build time.
+// Example:
+//
+//	go build -ldflags="-X main.Version=$(git describe --tags --always) \
+//	                   -X main.Commit=$(git rev-parse --short HEAD) \
+//	                   -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/api
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildTime = "unknown"
 )
 
 func main() {
@@ -140,8 +153,10 @@ func main() {
 	}
 
 	slog.Info("initializing api", "step", "7", "action", "initializing_api")
-	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus})
-	slog.Info("api initialized", "step", "7", "action", "api_initialized")
+	buildInfo := handlers.BuildInfo{Version: Version, Commit: Commit, BuildTime: BuildTime}
+	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus}, buildInfo)
+	slog.Info("api initialized", "step", "7", "action", "api_initialized",
+		"version", Version, "commit", Commit, "build_time", BuildTime)
 
 	// Background workers (dev convenience). In production we run `cmd/worker` instead.
 	// If NATS is configured, prefer the external worker process.
