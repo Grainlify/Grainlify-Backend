@@ -1,4 +1,4 @@
-.PHONY: run dev install-air lint build build-worker run-worker
+.PHONY: run dev install-air lint build build-worker run-worker test
 
 # Install air for live reload
 install-air:
@@ -36,6 +36,10 @@ run-worker:
 # Run static analysis with the pinned golangci-lint configuration.
 lint:
 	@golangci-lint run ./...
+
+# Run unit tests with race detection; skips tests that require live network/DB.
+test:
+	@go test -race -short ./...
 
 
 
