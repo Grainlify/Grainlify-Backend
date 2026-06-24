@@ -321,7 +321,8 @@ SELECT EXISTS(
 
 		p, err := ParsePagination(c, 20, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -402,7 +403,8 @@ SELECT EXISTS(
 
 		p, err := ParsePagination(c, 20, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -479,7 +481,8 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 
 		p, err := ParsePagination(c, 50, 200)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 		limit, offset := p.Limit, p.Offset
 
@@ -675,7 +678,8 @@ func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 
 		p, err := ParsePagination(c, 8, 20)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		// Query top projects by contributors count

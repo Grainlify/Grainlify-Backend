@@ -86,6 +86,13 @@ func (b *Bus) Publish(ctx context.Context, subject string, data []byte) error {
 	return b.nc.Publish(subject, data)
 }
 
+func (b *Bus) Status() string {
+	if b == nil || b.nc == nil {
+		return "DISCONNECTED"
+	}
+	return b.nc.Status().String()
+}
+
 func (b *Bus) Close() {
 	if b == nil || b.nc == nil {
 		return

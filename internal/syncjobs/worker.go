@@ -19,11 +19,17 @@ import (
 )
 
 type Worker struct {
-	cfg     config.Config
-	pool    *pgxpool.Pool
-	limiter *rate.Limiter
-	gh      *github.Client
+	cfg      config.Config
+	pool     *pgxpool.Pool
+	limiter  *rate.Limiter
+	gh       *github.Client
 	workerID string
+}
+
+type jobState struct {
+	status            string
+	lastErr           string
+	incrementAttempts bool
 }
 
 func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
@@ -33,6 +39,30 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
 		limiter:  rate.NewLimiter(rate.Every(250*time.Millisecond), 2), // ~4 req/s, burst 2
 		gh:       github.NewClient(),
 		workerID: fmt.Sprintf("%s:%d", hostname(), os.Getpid()),
+	}
+}
+
+// jobCompletionContext gives final status updates a short, non-canceled window
+// after the worker root context is canceled during graceful shutdown.
+func jobCompletionContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), timeout)
+}
+
+func jobFinalState(runErr error) jobState {
+	if runErr == nil {
+		return jobState{status: "completed", incrementAttempts: true}
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return jobState{
+			status:            "pending",
+			lastErr:           "worker_shutdown_requeued",
+			incrementAttempts: false,
+		}
+	}
+	return jobState{
+		status:            "failed",
+		lastErr:           runErr.Error(),
+		incrementAttempts: true,
 	}
 }
 
@@ -92,19 +122,27 @@ WHERE id = $1
 	}
 
 	runErr := w.runJob(ctx, jobID, projectID, jobType)
-
-	status := "completed"
-	lastErr := ""
-	if runErr != nil {
-		status = "failed"
-		lastErr = runErr.Error()
+	state := jobFinalState(runErr)
+	attemptDelta := 0
+	if state.incrementAttempts {
+		attemptDelta = 1
 	}
 
-	_, _ = w.pool.Exec(ctx, `
+	completeCtx, cancel := jobCompletionContext(ctx, 5*time.Second)
+	defer cancel()
+	_, err = w.pool.Exec(completeCtx, `
 UPDATE sync_jobs
-SET status = $2, attempts = attempts + 1, last_error = NULLIF($3, ''), updated_at = now()
+SET status = $2,
+    attempts = attempts + $3,
+    last_error = NULLIF($4, ''),
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
 WHERE id = $1
-`, jobID, status, lastErr)
+`, jobID, state.status, attemptDelta, state.lastErr)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -202,7 +240,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			assigneesJSON, _ := json.Marshal(it.Assignees)
 			// Convert labels to JSONB (array of {name, color} objects)
 			labelsJSON, _ := json.Marshal(it.Labels)
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -244,7 +282,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					)
 				}
 			}
-			
+
 			// Fetch comments for this issue (if comments_count > 0)
 			var commentsJSON []byte = []byte("[]")
 			if it.Comments > 0 {
@@ -255,7 +293,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					}
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
@@ -277,7 +315,7 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 `, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt)
 		}
 	}
-	
+
 	slog.Info("sync issues completed",
 		"project_id", projectID,
 		"repo", fullName,
@@ -313,7 +351,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 
 		for _, it := range items {
 			totalPRs++
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt, mergedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -336,7 +374,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 					mergedAt = &t
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -366,7 +404,3 @@ func hostname() string {
 	}
 	return h
 }
-
-
-
-

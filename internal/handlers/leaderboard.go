@@ -99,7 +99,8 @@ func (h *LeaderboardHandler) Leaderboard() fiber.Handler {
 
 		p, err := ParsePagination(c, 10, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		// Query top contributors by contribution count in verified projects

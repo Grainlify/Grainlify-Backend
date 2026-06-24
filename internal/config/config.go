@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -14,6 +15,15 @@ type Config struct {
 
 	DBURL       string
 	AutoMigrate bool
+
+	// DBMaxConns is the maximum number of connections in the pool (DB_MAX_CONNS, default 10).
+	DBMaxConns int32
+	// DBMinConns is the minimum number of idle connections kept open (DB_MIN_CONNS, default 0).
+	DBMinConns int32
+	// DBMaxConnLifetime is the maximum time a connection may be reused (DB_MAX_CONN_LIFETIME, default 30m).
+	DBMaxConnLifetime time.Duration
+	// DBMaxConnIdleTime is the maximum idle time before a connection is closed (DB_MAX_CONN_IDLE_TIME, default 5m).
+	DBMaxConnIdleTime time.Duration
 
 	JWTSecret string
 
@@ -45,6 +55,10 @@ type Config struct {
 	// Example: "http://localhost:5173,https://grainlify.figma.site"
 	CORSOrigins string
 
+	// CORSAllowPreview enables wildcard matching for *.vercel.app and *.0xo.in origins.
+	// Off by default; only enable when preview deployments need credentialed CORS access.
+	CORSAllowPreview bool
+
 	// Used to encrypt stored OAuth access tokens at rest. Must be 32 bytes base64 (AES-256-GCM key).
 	TokenEncKeyB64 string
 
@@ -64,6 +78,9 @@ type Config struct {
 	EscrowContractID         string
 	ProgramEscrowContractID  string
 	TokenContractID          string
+
+	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
+	MaxBodyBytes             int
 }
 
 func Load() Config {
@@ -84,6 +101,11 @@ func Load() Config {
 
 		DBURL:       getEnv("DB_URL", ""),
 		AutoMigrate: getEnvBool("AUTO_MIGRATE", false),
+
+		DBMaxConns:        getEnvInt32("DB_MAX_CONNS", 10),
+		DBMinConns:        getEnvInt32("DB_MIN_CONNS", 0),
+		DBMaxConnLifetime: getEnvDuration("DB_MAX_CONN_LIFETIME", 30*time.Minute),
+		DBMaxConnIdleTime: getEnvDuration("DB_MAX_CONN_IDLE_TIME", 5*time.Minute),
 
 		JWTSecret: getEnv("JWT_SECRET", ""),
 
@@ -106,6 +128,7 @@ func Load() Config {
 
 		FrontendBaseURL: getEnv("FRONTEND_BASE_URL", ""),
 		CORSOrigins:     getEnv("CORS_ORIGINS", ""),
+		CORSAllowPreview: getEnvBool("CORS_ALLOW_PREVIEW", false),
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
 
@@ -123,7 +146,14 @@ func Load() Config {
 		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
+
+		MaxBodyBytes:             getEnvInt("MAX_BODY_BYTES", 1048576),
 	}
+}
+
+// IsDev reports whether the app runs in local development mode.
+func (c Config) IsDev() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Env), "dev")
 }
 
 func (c Config) LogLevel() slog.Leveler {
@@ -153,6 +183,30 @@ func getEnv(key, fallback string) string {
 	return v
 }
 
+func getEnvInt32(key string, fallback int32) int32 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return int32(n)
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
 func getEnvBool(key string, fallback bool) bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if v == "" {
@@ -166,4 +220,16 @@ func getEnvBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }
