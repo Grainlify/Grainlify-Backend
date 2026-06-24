@@ -80,7 +80,17 @@ type Config struct {
 	TokenContractID          string
 
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
-	MaxBodyBytes             int
+	MaxBodyBytes int
+
+	// RateLimitAuthPerMin is the per-minute limit for auth and webhook endpoints.
+	// Controlled by RATE_LIMIT_AUTH_PER_MIN, default 60 requests/minute.
+	RateLimitAuthPerMin int
+	// RateLimitPublicPerMin is the per-minute limit for public read endpoints.
+	// Controlled by RATE_LIMIT_PUBLIC_PER_MIN, default 300 requests/minute.
+	RateLimitPublicPerMin int
+	// TrustedProxies contains the IPs or CIDRs that are allowed to supply
+	// X-Forwarded-For values. Controlled by TRUSTED_PROXIES.
+	TrustedProxies []string
 }
 
 func Load() Config {
@@ -126,8 +136,8 @@ func Load() Config {
 
 		PublicBaseURL: getEnv("PUBLIC_BASE_URL", ""),
 
-		FrontendBaseURL: getEnv("FRONTEND_BASE_URL", ""),
-		CORSOrigins:     getEnv("CORS_ORIGINS", ""),
+		FrontendBaseURL:  getEnv("FRONTEND_BASE_URL", ""),
+		CORSOrigins:      getEnv("CORS_ORIGINS", ""),
 		CORSAllowPreview: getEnvBool("CORS_ALLOW_PREVIEW", false),
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
@@ -147,7 +157,10 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
-		MaxBodyBytes:             getEnvInt("MAX_BODY_BYTES", 1048576),
+		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
+		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
+		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
+		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
 	}
 }
 
@@ -232,4 +245,16 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func parseTrustedProxies(value string) []string {
+	parts := strings.Split(value, ",")
+	proxies := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			proxies = append(proxies, part)
+		}
+	}
+	return proxies
 }
