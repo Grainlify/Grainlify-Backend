@@ -1,5 +1,7 @@
 ﻿# Grainlify Backend
 
+[![CI](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml/badge.svg)](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml)
+
 Grainlify Backend is a Go-based API server that connects open-source developers with projects through GitHub integration, ecosystem tracking, and contribution management.
 
 ## Overview
@@ -240,7 +242,9 @@ and closes the database pool.
 ### Running Tests
 
 ```bash
-go test ./...
+make test
+# or directly:
+go test -race -short ./...
 ```
 
 ### Code Style
