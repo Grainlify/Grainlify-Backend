@@ -37,17 +37,21 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	}
 
 	app := fiber.New(fiber.Config{
-		AppName:      "grainlify-api",
-		IdleTimeout:  60 * time.Second,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		BodyLimit:    globalBodyLimit,
-		ErrorHandler: JSONErrorHandler(),
+		AppName:                 "grainlify-api",
+		IdleTimeout:             60 * time.Second,
+		ReadTimeout:             10 * time.Second,
+		WriteTimeout:            10 * time.Second,
+		BodyLimit:               globalBodyLimit,
+		ErrorHandler:            JSONErrorHandler(),
+		ProxyHeader:             fiber.HeaderXForwardedFor,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
 	})
 	slog.Info("Fiber app created")
 
 	// Baseline middleware.
 	app.Use(requestid.New())
+	app.Use(NewRateLimitMiddleware(cfg))
 
 	// Add request logging middleware BEFORE recover to catch all requests
 	app.Use(func(c *fiber.Ctx) error {
@@ -287,7 +291,6 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	)
 	// Docs routes
 	RegisterDocsRoutes(app)
-
 
 	return app
 }
