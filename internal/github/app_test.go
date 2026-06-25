@@ -57,7 +57,7 @@ func TestGenerateJWT_Success(t *testing.T) {
 			return nil, jwt.ErrSignatureInvalid
 		}
 		return publicKey, nil
-	})
+	}, jwt.WithTimeFunc(func() time.Time { return testTime }))
 
 	if err != nil {
 		t.Fatalf("Failed to parse token: %v", err)
