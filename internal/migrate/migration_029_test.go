@@ -20,7 +20,7 @@ func TestMigration029SQL(t *testing.T) {
 
 	// ── up: expected new indexes ──────────────────────────────────────────────
 	newIndexes := []string{
-		"idx_sync_jobs_status_run_at",
+		"idx_sync_jobs_claim",
 		"idx_github_issues_author_login_lower",
 		"idx_github_prs_author_login_lower",
 		"idx_github_accounts_login_lower",
@@ -39,6 +39,12 @@ func TestMigration029SQL(t *testing.T) {
 	// ── up: the old index must NOT be re-created ──────────────────────────────
 	if containsCI(upSQL, "CREATE INDEX IF NOT EXISTS idx_sync_jobs_pending") {
 		t.Error("up migration: must not re-create idx_sync_jobs_pending")
+	}
+
+	// ── up: idx_sync_jobs_claim must be partial (WHERE status = 'pending') ───
+	claimBlock := extractIndexBlock(upSQL, "idx_sync_jobs_claim")
+	if !containsCI(claimBlock, "WHERE status = 'pending'") {
+		t.Error("up migration: idx_sync_jobs_claim must be a partial index WHERE status = 'pending'")
 	}
 
 	// ── up: LOWER() functional indexes must reference LOWER( ─────────────────

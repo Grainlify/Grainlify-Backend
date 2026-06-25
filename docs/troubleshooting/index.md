@@ -360,10 +360,11 @@ If you're still stuck:
 2. **Verify configuration:** Double-check all environment variables
 3. **Test locally:** Reproduce the issue in local development
 4. **Check documentation:** Refer to specific setup guides:
-   - [GitHub App Setup](GITHUB_APP_SETUP.md)
-   - [Railway Deployment](RAILWAY_DEPLOYMENT.md)
-   - [API Endpoints](API_ENDPOINTS.md)
-   - [Development Guide](DEVELOPMENT.md)
+   - [Documentation Index](../README.md)
+   - [GitHub App Setup](../github-app/setup.md)
+   - [Railway Deployment](../deployment/railway.md)
+   - [API Endpoints](../reference/api-endpoints.md)
+   - [Development Guide](../setup/development.md)
 
 ---
 

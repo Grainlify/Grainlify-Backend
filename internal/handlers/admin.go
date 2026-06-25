@@ -23,8 +23,22 @@ func NewAdminHandler(cfg config.Config, d *db.DB) *AdminHandler {
 	return &AdminHandler{cfg: cfg, db: d}
 }
 
+// ListUsers returns users ordered by creation date, newest first.
+//
+// Query parameters:
+//   - limit: max results (default 50, max 200)
+//   - offset: pagination offset (default 0)
+//
+// The response keeps the backward-compatible "users" array and adds
+// limit/offset/total metadata consistent with the other paginated endpoints.
 func (h *AdminHandler) ListUsers() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		p, err := ParsePagination(c, 50, 200)
+		if err != nil {
+			// response already written by ParsePagination on error
+			return nil
+		}
+
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
@@ -33,8 +47,8 @@ func (h *AdminHandler) ListUsers() fiber.Handler {
 SELECT id, role, github_user_id, created_at, updated_at
 FROM users
 ORDER BY created_at DESC
-LIMIT 50
-`)
+LIMIT $1 OFFSET $2
+`, p.Limit, p.Offset)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "users_list_failed"})
 		}
@@ -58,7 +72,12 @@ LIMIT 50
 			})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"users": out})
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
+			total = len(out)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("users", out, p, total))
 	}
 }
 

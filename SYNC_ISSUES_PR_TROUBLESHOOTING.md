@@ -12,8 +12,9 @@ Two hot query paths cause sequential scans as data grows:
    ORDER BY run_at ASC
    FOR UPDATE SKIP LOCKED LIMIT 1
    ```
-   Migration 000003 created `idx_sync_jobs_pending ON sync_jobs(status, run_at)`.
-   To avoid duplicate/redundant indexes on `(status, run_at)`, migration 000029 replaces it with the dedicated `idx_sync_jobs_status_run_at` composite index.
+   Migration 000003 created `idx_sync_jobs_pending ON sync_jobs(status, run_at)` –
+   a full-table btree that grows with every completed/failed row even though the
+   query only ever touches `pending` rows.
 
 2. **Leaderboard / profile aggregation** (`internal/handlers/leaderboard.go`,
    `internal/handlers/user_profile.go`):
@@ -29,12 +30,14 @@ Two hot query paths cause sequential scans as data grows:
 
 | Index | Table | Definition | Replaces |
 |---|---|---|---|
-| `idx_sync_jobs_status_run_at` | `sync_jobs` | `(status, run_at)` | `idx_sync_jobs_pending` (dropped) |
+| `idx_sync_jobs_claim` | `sync_jobs` | `(run_at ASC) WHERE status = 'pending'` | `idx_sync_jobs_pending` (dropped) |
 | `idx_github_issues_author_login_lower` | `github_issues` | `(LOWER(author_login)) WHERE author_login IS NOT NULL` | — additive |
 | `idx_github_prs_author_login_lower` | `github_pull_requests` | `(LOWER(author_login)) WHERE author_login IS NOT NULL` | — additive |
 | `idx_github_accounts_login_lower` | `github_accounts` | `(LOWER(login)) WHERE login IS NOT NULL` | — additive |
 
-The composite index `idx_sync_jobs_status_run_at` covers the `status` and `run_at` columns, allowing PostgreSQL to quickly search for pending jobs scheduled to run in the past.
+The partial index on `sync_jobs` contains only pending rows, so it stays small
+regardless of how many completed/failed rows accumulate. The btree is already
+ordered by `run_at`, eliminating the sort step in `ORDER BY run_at ASC LIMIT 1`.
 
 ## Reconciliation with 000014 / 000015
 
@@ -50,8 +53,8 @@ No indexes from 000015 (date-range indexes) overlap.
 
 ```
 -- Claim query
-Index Scan using idx_sync_jobs_status_run_at on sync_jobs
-  Index Cond: ((status = 'pending'::text) AND (run_at <= now()))
+Index Scan using idx_sync_jobs_claim on sync_jobs
+  Index Cond: (run_at <= now())   -- partial predicate already filters status
 
 -- Leaderboard sub-select
 Index Scan using idx_github_issues_author_login_lower on github_issues

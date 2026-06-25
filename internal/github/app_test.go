@@ -37,8 +37,8 @@ func generateTestRSAKey(t *testing.T) (*rsa.PrivateKey, *rsa.PublicKey) {
 // TestGenerateJWT_Success tests that GenerateJWT produces a valid RS256 token
 func TestGenerateJWT_Success(t *testing.T) {
 	privateKey, publicKey := generateTestRSAKey(t)
-	
-	testTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	testTime := time.Now().UTC()
 	client := &GitHubAppClient{
 		AppID:      "test-app-id",
 		PrivateKey: privateKey,
