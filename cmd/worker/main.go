@@ -57,18 +57,31 @@ func main() {
 	cfg := config.Load()
 
 	// Set up logger
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
-	slog.SetDefault(logger)
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: cfg.LogLevel(),
+	})))
 
-	workerCtx, stopWorkers := context.WithCancel(context.Background())
-	defer stopWorkers()
-	var workerWG sync.WaitGroup
+	slog.Info("=== Grainlify Worker Starting ===", "env", cfg.Env)
 
-	// ---------- Database connection ----------
+	// Fail fast on missing required config.
 	if cfg.DBURL == "" {
-		slog.Error("DB_URL not set")
+		if cfg.Env != "dev" {
+			slog.Error("DB_URL is required in non-dev environments")
+			os.Exit(1)
+		}
+		slog.Warn("DB_URL not set; worker has nothing to do — exiting")
 		os.Exit(1)
 	}
+	if cfg.NATSURL == "" {
+		if cfg.Env != "dev" {
+			slog.Error("NATS_URL is required in non-dev environments")
+			os.Exit(1)
+		}
+		slog.Warn("NATS_URL not set; worker has nothing to do — exiting")
+		os.Exit(1)
+	}
+
+	// ---------- Database connection ----------
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	dbConn, err := db.Connect(ctx, cfg.DBURL, db.PoolConfig{
 		MaxConns:        cfg.DBMaxConns,
@@ -87,10 +100,6 @@ func main() {
 	}()
 
 	// ---------- NATS connection ----------
-	if cfg.NATSURL == "" {
-		slog.Error("NATS_URL not set")
-		os.Exit(1)
-	}
 	nbus, err := natsbus.Connect(cfg.NATSURL)
 	if err != nil {
 		slog.Error("failed to connect to NATS", "error", err)
@@ -101,8 +110,16 @@ func main() {
 		nbus.Close()
 	}()
 
+	// Root context — cancelled on shutdown signal.
+	workerCtx, stopWorkers := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopWorkers()
+
+	var workerWG sync.WaitGroup
+
 	// ---------- GitHub webhook consumer ----------
-	consumer := &worker.GitHubWebhookConsumer{Ingest: &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool}}
+	consumer := &worker.GitHubWebhookConsumer{
+		Ingest: &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool},
+	}
 	if err := consumer.Subscribe(workerCtx, nbus.Conn(), worker.GitHubWebhookQueueGroup); err != nil {
 		slog.Error("failed to subscribe to webhook events", "error", err)
 		os.Exit(1)
@@ -112,6 +129,7 @@ func main() {
 			_ = consumer.Sub.Unsubscribe()
 		}
 	}()
+	slog.Info("github webhook consumer subscribed")
 
 	// ---------- Sync jobs runner (concurrent) ----------
 	syncWorker := syncjobs.New(cfg, dbConn.Pool)
@@ -120,20 +138,24 @@ func main() {
 		defer workerWG.Done()
 		slog.Info("starting syncjobs worker")
 		if err := syncWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("syncjobs worker exited", "error", err)
+			slog.Error("syncjobs worker exited with error", "error", err)
 		}
 	}()
 
-	// ---------- Graceful shutdown ----------
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	slog.Info("=== Grainlify Worker Running ===")
+
+	// Block until signal.
+	<-workerCtx.Done()
 	slog.Info("shutdown signal received, draining workers")
+
+	// Give goroutines up to 10 s to finish in-flight work.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	stopWorkers()
+
 	if err := shutdownwait.Wait(shutdownCtx, &workerWG); err != nil {
 		slog.Warn("worker shutdown exceeded deadline", "error", err)
+	} else {
+		slog.Info("all workers drained cleanly")
 	}
 	slog.Info("worker shutdown complete")
 }

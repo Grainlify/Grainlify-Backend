@@ -1,4 +1,4 @@
-.PHONY: run dev install-air lint build build-worker run-worker test
+.PHONY: run dev install-air lint build build-worker run-worker build-prod test
 
 # Install air for live reload
 install-air:
