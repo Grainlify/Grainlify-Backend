@@ -5,12 +5,10 @@
 --   SELECT ... FROM sync_jobs WHERE status = 'pending' AND run_at <= now()
 --   ORDER BY run_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
 --
---   Migration 000003 created idx_sync_jobs_pending ON sync_jobs(status, run_at)
---   as a full-table btree.  A partial index that pre-filters status = 'pending'
---   is smaller (only pending rows), avoids re-checking the status predicate at
---   runtime, and keeps the btree ordered by run_at so the ORDER BY + LIMIT 1
---   becomes an index scan on a tiny set.  We drop the old full index and replace
---   it with the narrower partial index.
+--   Migration 000003 created idx_sync_jobs_pending ON sync_jobs(status, run_at).
+--   To ensure the query uses the composite index correctly and avoid redundancy/duplication,
+--   we drop the original idx_sync_jobs_pending and create the dedicated composite index
+--   idx_sync_jobs_status_run_at on sync_jobs(status, run_at).
 --
 -- Problem 2 – leaderboard & profile queries use LOWER(author_login):
 --   WHERE LOWER(i.author_login) = LOWER(ac.login)
@@ -29,11 +27,10 @@
 -- idx_sync_jobs_project index in 000003 still covers project-based lookups.
 DROP INDEX IF EXISTS idx_sync_jobs_pending;
 
--- Partial index: only pending rows, ordered by run_at so ORDER BY run_at ASC
--- LIMIT 1 resolves without a sort step.
-CREATE INDEX IF NOT EXISTS idx_sync_jobs_claim
-    ON sync_jobs (run_at ASC)
-    WHERE status = 'pending';
+-- Composite index on (status, run_at) for efficient worker claim queries.
+-- Supports WHERE status = 'pending' AND run_at <= now() ORDER BY run_at ASC.
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_status_run_at
+    ON sync_jobs (status, run_at);
 
 -- ── leaderboard / profile – functional LOWER() indexes ───────────────────────
 
