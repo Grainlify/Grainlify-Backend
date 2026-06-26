@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/xdr"
 )
 
@@ -16,7 +17,7 @@ import (
 // whose results[0].xdr contains the base64-encoded ScVal v.
 func buildSimulateResponse(t *testing.T, v xdr.ScVal) []byte {
 	t.Helper()
-	b, err := xdr.SafeMarshal(v)
+	b, err := v.MarshalBinary()
 	if err != nil {
 		t.Fatalf("marshal ScVal: %v", err)
 	}
@@ -79,7 +80,11 @@ func escrowScVal(depositorAddress string, amount, deadline int64, status string)
 }
 
 func TestGetEscrowInfo_Success(t *testing.T) {
-	const depositor = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN"
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	depositor := kp.Address()
 	const amount = int64(500_000_000)
 	const deadline = int64(1_700_000_000)
 	const status = "Locked"
@@ -281,3 +286,24 @@ func TestGetBalance_ContextCancelled(t *testing.T) {
 		t.Fatal("expected error for cancelled context, got nil")
 	}
 }
+
+func TestGetEscrowInfo_InvalidContract(t *testing.T) {
+	ec := &EscrowContract{
+		contractAddress: "invalid_contract_addr",
+	}
+	_, err := ec.GetEscrowInfo(context.Background(), 1)
+	if err == nil {
+		t.Fatal("expected error for invalid contract, got nil")
+	}
+}
+
+func TestGetBalance_InvalidContract(t *testing.T) {
+	ec := &EscrowContract{
+		contractAddress: "invalid_contract_addr",
+	}
+	_, err := ec.GetBalance(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid contract, got nil")
+	}
+}
+

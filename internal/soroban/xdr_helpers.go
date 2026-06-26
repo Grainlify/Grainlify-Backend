@@ -112,7 +112,7 @@ func DecodeScValAddress(v xdr.ScVal) (string, error) {
 		if v.Address.AccountId == nil {
 			return "", fmt.Errorf("account address is nil")
 		}
-		return v.Address.AccountId.GetAccountID().Address(), nil
+		return v.Address.AccountId.Address(), nil
 	case xdr.ScAddressTypeScAddressTypeContract:
 		if v.Address.ContractId == nil {
 			return "", fmt.Errorf("contract address is nil")

@@ -200,11 +200,7 @@ func (c *Client) SimulateAndDecode(ctx context.Context, contractAddress xdr.ScAd
 		return xdr.ScVal{}, fmt.Errorf("build tx: %w", err)
 	}
 
-	txXDR, err := tx.ToXDR()
-	if err != nil {
-		return xdr.ScVal{}, fmt.Errorf("serialize tx: %w", err)
-	}
-
+	txXDR := tx.ToXDR()
 	txBase64, err := txXDR.MarshalBinary()
 	if err != nil {
 		return xdr.ScVal{}, fmt.Errorf("marshal tx: %w", err)

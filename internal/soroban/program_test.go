@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/xdr"
 )
 
@@ -51,7 +52,7 @@ func programScVal(programID string, totalFunds, remainingBalance int64, authKey,
 
 func newProgramTestServer(t *testing.T, scVal xdr.ScVal) *httptest.Server {
 	t.Helper()
-	b, err := xdr.SafeMarshal(scVal)
+	b, err := scVal.MarshalBinary()
 	if err != nil {
 		t.Fatalf("marshal ScVal: %v", err)
 	}
@@ -88,11 +89,16 @@ func newProgramContract(t *testing.T, srv *httptest.Server) *ProgramEscrowContra
 }
 
 func TestGetProgramInfo_Success(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	authKey := kp.Address()
+
 	const (
 		programID        = "prog-123"
 		totalFunds       = int64(10_000_000_000)
 		remainingBalance = int64(7_500_000_000)
-		authKey          = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN"
 		// Use a contract hex address for tokenAddr to exercise contract branch.
 		tokenAddr = "0000000000000000000000000000000000000000000000000000000000000099"
 	)
@@ -213,5 +219,25 @@ func TestGetRemainingBalance_ContextCancelled(t *testing.T) {
 	_, err := pec.GetRemainingBalance(ctx)
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+func TestGetProgramInfo_InvalidContract(t *testing.T) {
+	pec := &ProgramEscrowContract{
+		contractAddress: "invalid_contract_addr",
+	}
+	_, err := pec.GetProgramInfo(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid contract, got nil")
+	}
+}
+
+func TestGetRemainingBalance_InvalidContract(t *testing.T) {
+	pec := &ProgramEscrowContract{
+		contractAddress: "invalid_contract_addr",
+	}
+	_, err := pec.GetRemainingBalance(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid contract, got nil")
 	}
 }
