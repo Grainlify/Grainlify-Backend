@@ -61,6 +61,11 @@ func main() {
 		Level: cfg.LogLevel(),
 	})))
 
+	if err := cfg.Validate(); err != nil {
+		slog.Error("Configuration validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("=== Grainlify Worker Starting ===", "env", cfg.Env)
 
 	// Fail fast on missing required config.

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -258,3 +260,53 @@ func parseTrustedProxies(value string) []string {
 	}
 	return proxies
 }
+
+// Validate checks that all required configuration values are set and semantically valid.
+func (c Config) Validate() error {
+	if strings.TrimSpace(c.JWTSecret) == "" {
+		return fmt.Errorf("JWT_SECRET is missing or empty")
+	}
+
+	if strings.TrimSpace(c.TokenEncKeyB64) == "" {
+		return fmt.Errorf("TOKEN_ENC_KEY_B64 is missing or empty")
+	}
+
+	// TokenEncKeyB64 must be a valid base64 key that decodes to 32 bytes
+	decodedKey, err := base64.StdEncoding.DecodeString(c.TokenEncKeyB64)
+	if err != nil {
+		return fmt.Errorf("TOKEN_ENC_KEY_B64 is not valid base64: %w", err)
+	}
+	if len(decodedKey) != 32 {
+		return fmt.Errorf("TOKEN_ENC_KEY_B64 must decode to exactly 32 bytes (AES-256 key), got %d bytes", len(decodedKey))
+	}
+
+	// Soroban secrets check
+	if strings.TrimSpace(c.SorobanRPCURL) == "" {
+		return fmt.Errorf("SOROBAN_RPC_URL is missing or empty")
+	}
+	if strings.TrimSpace(c.SorobanNetworkPassphrase) == "" {
+		return fmt.Errorf("SOROBAN_NETWORK_PASSPHRASE is missing or empty")
+	}
+	if strings.TrimSpace(c.SorobanSourceSecret) == "" {
+		return fmt.Errorf("SOROBAN_SOURCE_SECRET is missing or empty")
+	}
+
+	// SOROBAN_SOURCE_SECRET must start with 'S' and be 56 characters long (Stellar secret key)
+	sec := strings.TrimSpace(c.SorobanSourceSecret)
+	if !strings.HasPrefix(sec, "S") || len(sec) != 56 {
+		return fmt.Errorf("SOROBAN_SOURCE_SECRET must be a valid Stellar secret key (starts with 'S', length 56)")
+	}
+
+	if strings.TrimSpace(c.EscrowContractID) == "" {
+		return fmt.Errorf("ESCROW_CONTRACT_ID is missing or empty")
+	}
+	if strings.TrimSpace(c.TokenContractID) == "" {
+		return fmt.Errorf("TOKEN_CONTRACT_ID is missing or empty")
+	}
+	if strings.TrimSpace(c.ProgramEscrowContractID) == "" {
+		return fmt.Errorf("PROGRAM_ESCROW_CONTRACT_ID is missing or empty")
+	}
+
+	return nil
+}
+

@@ -42,6 +42,11 @@ func main() {
 	slog.Info("loading configuration", "step", "2", "action", "loading_configuration")
 	cfg := config.Load()
 
+	if err := cfg.Validate(); err != nil {
+		slog.Error("Configuration validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: cfg.LogLevel(),
 	}))
