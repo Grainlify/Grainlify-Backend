@@ -104,6 +104,11 @@ func Load() Config {
 		httpAddr = ":" + port
 	}
 
+	token := strings.TrimSpace(getEnv("ADMIN_BOOTSTRAP_TOKEN", ""))
+	if token != "" && len(token) < 32 {
+		slog.Warn("ADMIN_BOOTSTRAP_TOKEN is configured but is shorter than the minimum safe length of 32 characters. Admin bootstrap endpoint will be disabled.")
+	}
+
 	return Config{
 		Env:      env,
 		HTTPAddr: httpAddr,
@@ -142,7 +147,7 @@ func Load() Config {
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
 
-		AdminBootstrapToken: strings.TrimSpace(getEnv("ADMIN_BOOTSTRAP_TOKEN", "")),
+		AdminBootstrapToken: token,
 
 		DiditAPIKey:        getEnv("DIDIT_API_KEY", ""),
 		DiditWorkflowID:    getEnv("DIDIT_WORKFLOW_ID", ""),
