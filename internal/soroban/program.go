@@ -241,12 +241,68 @@ func (pec *ProgramEscrowContract) GetProgramInfo(ctx context.Context) (*ProgramE
 	return pec.getProgramInfoRPC(ctx)
 }
 
-// getProgramInfoRPC uses Soroban RPC to simulate the get_program_info call
+// getProgramInfoRPC simulates the get_program_info contract call and decodes the
+// returned ScMap into a ProgramEscrowData struct.
+//
+// Expected contract return layout (ScMap with ScvSymbol keys):
+//
+//	{
+//	    "program_id":            ScvString,
+//	    "total_funds":           ScvI64,
+//	    "remaining_balance":     ScvI64,
+//	    "authorized_payout_key": ScvAddress,
+//	    "token_address":         ScvAddress,
+//	}
+//
+// All fields are validated before use; an error is returned for any unexpected type.
 func (pec *ProgramEscrowContract) getProgramInfoRPC(ctx context.Context) (*ProgramEscrowData, error) {
-	// Similar to escrow - requires building transaction XDR and calling simulateTransaction
-	// Then decoding the ScVal return value
-	slog.Warn("GetProgramInfo requires transaction building and XDR decoding")
-	return nil, fmt.Errorf("GetProgramInfo requires transaction building - use RPC simulateTransaction")
+	contractAddr, err := EncodeContractAddress(pec.contractAddress)
+	if err != nil {
+		return nil, fmt.Errorf("invalid contract address: %w", err)
+	}
+
+	result, err := pec.client.SimulateAndDecode(ctx, contractAddr, "get_program_info", nil)
+	if err != nil {
+		return nil, fmt.Errorf("simulate get_program_info: %w", err)
+	}
+
+	fields, err := DecodeScValStruct(result)
+	if err != nil {
+		return nil, fmt.Errorf("decode program struct: %w", err)
+	}
+
+	programID, err := DecodeScValString(fields["program_id"])
+	if err != nil {
+		return nil, fmt.Errorf("decode program_id: %w", err)
+	}
+
+	totalFunds, err := DecodeScValInt64(fields["total_funds"])
+	if err != nil {
+		return nil, fmt.Errorf("decode total_funds: %w", err)
+	}
+
+	remainingBalance, err := DecodeScValInt64(fields["remaining_balance"])
+	if err != nil {
+		return nil, fmt.Errorf("decode remaining_balance: %w", err)
+	}
+
+	authKey, err := DecodeScValAddress(fields["authorized_payout_key"])
+	if err != nil {
+		return nil, fmt.Errorf("decode authorized_payout_key: %w", err)
+	}
+
+	tokenAddr, err := DecodeScValAddress(fields["token_address"])
+	if err != nil {
+		return nil, fmt.Errorf("decode token_address: %w", err)
+	}
+
+	return &ProgramEscrowData{
+		ProgramID:           programID,
+		TotalFunds:          totalFunds,
+		RemainingBalance:    remainingBalance,
+		AuthorizedPayoutKey: authKey,
+		TokenAddress:        tokenAddr,
+	}, nil
 }
 
 // GetRemainingBalance retrieves the remaining balance (read-only)
@@ -254,9 +310,23 @@ func (pec *ProgramEscrowContract) GetRemainingBalance(ctx context.Context) (int6
 	return pec.getRemainingBalanceRPC(ctx)
 }
 
-// getRemainingBalanceRPC uses Soroban RPC to get remaining balance
+// getRemainingBalanceRPC simulates the get_remaining_balance contract call and
+// returns the int64 balance.
 func (pec *ProgramEscrowContract) getRemainingBalanceRPC(ctx context.Context) (int64, error) {
-	// Similar to getProgramInfoRPC - requires transaction building and XDR decoding
-	slog.Warn("GetRemainingBalance requires transaction building and XDR decoding")
-	return 0, fmt.Errorf("GetRemainingBalance requires transaction building - use RPC simulateTransaction")
+	contractAddr, err := EncodeContractAddress(pec.contractAddress)
+	if err != nil {
+		return 0, fmt.Errorf("invalid contract address: %w", err)
+	}
+
+	result, err := pec.client.SimulateAndDecode(ctx, contractAddr, "get_remaining_balance", nil)
+	if err != nil {
+		return 0, fmt.Errorf("simulate get_remaining_balance: %w", err)
+	}
+
+	balance, err := DecodeScValInt64(result)
+	if err != nil {
+		return 0, fmt.Errorf("decode balance: %w", err)
+	}
+
+	return balance, nil
 }

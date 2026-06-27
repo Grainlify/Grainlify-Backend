@@ -224,9 +224,15 @@ func (ec *EscrowContract) GetEscrowInfo(ctx context.Context, bountyID uint64) (*
 	return ec.getEscrowInfoRPC(ctx, bountyID)
 }
 
-// getEscrowInfoRPC uses Soroban RPC to simulate the get_escrow_info call
+// getEscrowInfoRPC simulates the get_escrow_info contract call and decodes the
+// returned ScMap into an EscrowData struct.
+//
+// Expected contract return layout (ScMap with ScvSymbol keys):
+//
+//	{ "depositor": ScvAddress, "amount": ScvI64, "status": ScvSymbol, "deadline": ScvI64 }
+//
+// All fields are validated before use; an error is returned for any unexpected type.
 func (ec *EscrowContract) getEscrowInfoRPC(ctx context.Context, bountyID uint64) (*EscrowData, error) {
-	// Build a read-only transaction for simulation
 	contractAddr, err := EncodeContractAddress(ec.contractAddress)
 	if err != nil {
 		return nil, fmt.Errorf("invalid contract address: %w", err)
@@ -234,29 +240,45 @@ func (ec *EscrowContract) getEscrowInfoRPC(ctx context.Context, bountyID uint64)
 
 	bountyIDVal, err := EncodeScValUint64(bountyID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode bounty_id: %w", err)
+		return nil, fmt.Errorf("encode bounty_id: %w", err)
 	}
 
-	args := []xdr.ScVal{bountyIDVal}
-
-	// Build operation
-	_, err = BuildInvokeHostFunctionOp(contractAddr, "get_escrow_info", args)
+	result, err := ec.client.SimulateAndDecode(ctx, contractAddr, "get_escrow_info", []xdr.ScVal{bountyIDVal})
 	if err != nil {
-		return nil, fmt.Errorf("failed to build operation: %w", err)
+		return nil, fmt.Errorf("simulate get_escrow_info: %w", err)
 	}
 
-	// Build transaction (read-only, won't be submitted)
-	// For now, we'll use RPC simulation
-	// This requires building the transaction XDR and calling simulateTransaction
-	
-	// Note: Full implementation requires:
-	// 1. Building transaction XDR
-	// 2. Calling simulateTransaction via RPC
-	// 3. Decoding the ScVal return value
-	// 4. Converting to EscrowData struct
+	fields, err := DecodeScValStruct(result)
+	if err != nil {
+		return nil, fmt.Errorf("decode escrow struct: %w", err)
+	}
 
-	slog.Warn("GetEscrowInfo requires transaction building and XDR decoding")
-	return nil, fmt.Errorf("GetEscrowInfo requires transaction building - use RPC simulateTransaction")
+	depositor, err := DecodeScValAddress(fields["depositor"])
+	if err != nil {
+		return nil, fmt.Errorf("decode depositor: %w", err)
+	}
+
+	amount, err := DecodeScValInt64(fields["amount"])
+	if err != nil {
+		return nil, fmt.Errorf("decode amount: %w", err)
+	}
+
+	statusStr, err := DecodeScValSymbol(fields["status"])
+	if err != nil {
+		return nil, fmt.Errorf("decode status: %w", err)
+	}
+
+	deadline, err := DecodeScValInt64(fields["deadline"])
+	if err != nil {
+		return nil, fmt.Errorf("decode deadline: %w", err)
+	}
+
+	return &EscrowData{
+		Depositor: depositor,
+		Amount:    amount,
+		Status:    EscrowStatus(statusStr),
+		Deadline:  deadline,
+	}, nil
 }
 
 // GetBalance retrieves the contract balance (read-only)
@@ -265,9 +287,22 @@ func (ec *EscrowContract) GetBalance(ctx context.Context) (int64, error) {
 	return ec.getBalanceRPC(ctx)
 }
 
-// getBalanceRPC uses Soroban RPC to get contract balance
+// getBalanceRPC simulates the get_balance contract call and returns the int64 balance.
 func (ec *EscrowContract) getBalanceRPC(ctx context.Context) (int64, error) {
-	// Similar to getEscrowInfoRPC - requires transaction building and XDR decoding
-	slog.Warn("GetBalance requires transaction building and XDR decoding")
-	return 0, fmt.Errorf("GetBalance requires transaction building - use RPC simulateTransaction")
+	contractAddr, err := EncodeContractAddress(ec.contractAddress)
+	if err != nil {
+		return 0, fmt.Errorf("invalid contract address: %w", err)
+	}
+
+	result, err := ec.client.SimulateAndDecode(ctx, contractAddr, "get_balance", nil)
+	if err != nil {
+		return 0, fmt.Errorf("simulate get_balance: %w", err)
+	}
+
+	balance, err := DecodeScValInt64(result)
+	if err != nil {
+		return 0, fmt.Errorf("decode balance: %w", err)
+	}
+
+	return balance, nil
 }

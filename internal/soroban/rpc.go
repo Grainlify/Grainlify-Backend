@@ -3,12 +3,17 @@ package soroban
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/stellar/go/keypair"
+	"github.com/stellar/go/txnbuild"
+	"github.com/stellar/go/xdr"
 )
 
 // RPCRequest represents a Soroban RPC JSON-RPC request
@@ -153,6 +158,85 @@ func (c *Client) GetLatestLedger(ctx context.Context) (map[string]interface{}, e
 	}
 
 	return result, nil
+}
+
+// simulateResult is the decoded result entry from simulateTransaction.
+type simulateResult struct {
+	XDR string `json:"xdr"`
+}
+
+// simulateTransactionResponse is the typed Soroban simulateTransaction response.
+type simulateTransactionResponse struct {
+	Results []simulateResult `json:"results"`
+	Error   string           `json:"error,omitempty"`
+}
+
+// SimulateAndDecode builds a minimal unsigned transaction for the given operation,
+// calls simulateTransaction, and returns the first result as a decoded ScVal.
+//
+// The transaction is never submitted; it only needs to be structurally valid
+// enough for the RPC to simulate it. We use a dummy account/sequence so no
+// live account or signing key is required.
+func (c *Client) SimulateAndDecode(ctx context.Context, contractAddress xdr.ScAddress, functionName string, args []xdr.ScVal) (xdr.ScVal, error) {
+	op, err := BuildInvokeHostFunctionOp(contractAddress, functionName, args)
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("build op: %w", err)
+	}
+
+	// Use a random ephemeral keypair as the source so we never need a real account.
+	kp, err := keypair.Random()
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("keypair: %w", err)
+	}
+
+	tx, err := txnbuild.NewTransaction(txnbuild.TransactionParams{
+		SourceAccount:        &txnbuild.SimpleAccount{AccountID: kp.Address(), Sequence: 1},
+		IncrementSequenceNum: false,
+		BaseFee:              txnbuild.MinBaseFee,
+		Operations:           []txnbuild.Operation{op},
+		Preconditions:        txnbuild.Preconditions{TimeBounds: txnbuild.NewInfiniteTimeout()},
+	})
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("build tx: %w", err)
+	}
+
+	txXDR := tx.ToXDR()
+	txBase64, err := txXDR.MarshalBinary()
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("marshal tx: %w", err)
+	}
+
+	params := map[string]interface{}{
+		"transaction": base64.StdEncoding.EncodeToString(txBase64),
+	}
+
+	rpcResp, err := c.Call(ctx, "simulateTransaction", params)
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("simulateTransaction: %w", err)
+	}
+
+	var simResp simulateTransactionResponse
+	if err := json.Unmarshal(rpcResp.Result, &simResp); err != nil {
+		return xdr.ScVal{}, fmt.Errorf("decode simulate response: %w", err)
+	}
+	if simResp.Error != "" {
+		return xdr.ScVal{}, fmt.Errorf("simulation error: %s", simResp.Error)
+	}
+	if len(simResp.Results) == 0 {
+		return xdr.ScVal{}, fmt.Errorf("simulation returned no results")
+	}
+
+	resultBytes, err := base64.StdEncoding.DecodeString(simResp.Results[0].XDR)
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("decode result XDR: %w", err)
+	}
+
+	var scVal xdr.ScVal
+	if err := xdr.SafeUnmarshal(resultBytes, &scVal); err != nil {
+		return xdr.ScVal{}, fmt.Errorf("unmarshal ScVal: %w", err)
+	}
+
+	return scVal, nil
 }
 
 // PollTransactionStatus polls for transaction status until confirmed or timeout

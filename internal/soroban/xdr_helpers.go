@@ -86,6 +86,89 @@ func EncodeScSymbol(s string) (xdr.ScSymbol, error) {
 	return xdr.ScSymbol(s), nil
 }
 
+// DecodeScValInt64 extracts an int64 from an ScvI64 ScVal.
+// Returns an error if the type does not match or the pointer is nil.
+func DecodeScValInt64(v xdr.ScVal) (int64, error) {
+	if v.Type != xdr.ScValTypeScvI64 {
+		return 0, fmt.Errorf("expected ScvI64, got %v", v.Type)
+	}
+	if v.I64 == nil {
+		return 0, fmt.Errorf("ScvI64 value is nil")
+	}
+	return int64(*v.I64), nil
+}
+
+// DecodeScValAddress extracts the Stellar strkey address (G… account or C… contract)
+// from an ScvAddress ScVal.
+func DecodeScValAddress(v xdr.ScVal) (string, error) {
+	if v.Type != xdr.ScValTypeScvAddress {
+		return "", fmt.Errorf("expected ScvAddress, got %v", v.Type)
+	}
+	if v.Address == nil {
+		return "", fmt.Errorf("ScvAddress value is nil")
+	}
+	switch v.Address.Type {
+	case xdr.ScAddressTypeScAddressTypeAccount:
+		if v.Address.AccountId == nil {
+			return "", fmt.Errorf("account address is nil")
+		}
+		return v.Address.AccountId.Address(), nil
+	case xdr.ScAddressTypeScAddressTypeContract:
+		if v.Address.ContractId == nil {
+			return "", fmt.Errorf("contract address is nil")
+		}
+		// Encode as a 64-char lowercase hex string (the canonical internal form).
+		return fmt.Sprintf("%x", (*v.Address.ContractId)[:]), nil
+	default:
+		return "", fmt.Errorf("unknown address type: %v", v.Address.Type)
+	}
+}
+
+// DecodeScValString extracts a string from an ScvString ScVal.
+func DecodeScValString(v xdr.ScVal) (string, error) {
+	if v.Type != xdr.ScValTypeScvString {
+		return "", fmt.Errorf("expected ScvString, got %v", v.Type)
+	}
+	if v.Str == nil {
+		return "", fmt.Errorf("ScvString value is nil")
+	}
+	return string(*v.Str), nil
+}
+
+// DecodeScValSymbol extracts the symbol string from an ScvSymbol ScVal.
+func DecodeScValSymbol(v xdr.ScVal) (string, error) {
+	if v.Type != xdr.ScValTypeScvSymbol {
+		return "", fmt.Errorf("expected ScvSymbol, got %v", v.Type)
+	}
+	if v.Sym == nil {
+		return "", fmt.Errorf("ScvSymbol value is nil")
+	}
+	return string(*v.Sym), nil
+}
+
+// DecodeScValStruct extracts the fields map (key→ScVal) from an ScvMap ScVal.
+// It validates that the ScVal is indeed a map and that every key is an ScvSymbol.
+func DecodeScValStruct(v xdr.ScVal) (map[string]xdr.ScVal, error) {
+	if v.Type != xdr.ScValTypeScvMap {
+		return nil, fmt.Errorf("expected ScvMap, got %v", v.Type)
+	}
+	if v.Map == nil || *v.Map == nil {
+		return nil, fmt.Errorf("ScvMap value is nil")
+	}
+	m := **v.Map
+	out := make(map[string]xdr.ScVal, len(m))
+	for _, entry := range m {
+		if entry.Key.Type != xdr.ScValTypeScvSymbol {
+			return nil, fmt.Errorf("map key type %v is not ScvSymbol", entry.Key.Type)
+		}
+		if entry.Key.Sym == nil {
+			return nil, fmt.Errorf("map key symbol is nil")
+		}
+		out[string(*entry.Key.Sym)] = entry.Val
+	}
+	return out, nil
+}
+
 // BuildInvokeHostFunctionOp builds an InvokeHostFunction operation for contract calls
 func BuildInvokeHostFunctionOp(contractAddress xdr.ScAddress, functionName string, args []xdr.ScVal) (txnbuild.Operation, error) {
 	symbol, err := EncodeScSymbol(functionName)
