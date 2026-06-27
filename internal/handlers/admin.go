@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -120,36 +123,48 @@ WHERE id = $1
 // This allows any authenticated user with the correct bootstrap token to become an admin.
 //
 // Rules:
-// - Requires ADMIN_BOOTSTRAP_TOKEN header match
+// - Requires ADMIN_BOOTSTRAP_TOKEN header match (using SHA-256 and subtle.ConstantTimeCompare)
+// - Requires the configured token to be at least 32 characters long, otherwise the endpoint is disabled
 // - If user is already an admin, returns a fresh JWT token
 // - Otherwise, promotes the user to admin and returns a fresh JWT with the updated role
+// - Logs success/failure audit entries without the token values
 func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
-		if h.cfg.AdminBootstrapToken == "" {
+		
+		configToken := strings.TrimSpace(h.cfg.AdminBootstrapToken)
+		if len(configToken) < 32 {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "bootstrap_not_configured"})
 		}
+		
 		if h.cfg.JWTSecret == "" {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "jwt_not_configured"})
 		}
-		headerToken := strings.TrimSpace(c.Get("X-Admin-Bootstrap-Token"))
-		configToken := strings.TrimSpace(h.cfg.AdminBootstrapToken)
-		if headerToken != configToken {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_bootstrap_token"})
-		}
+		
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
+			slog.Warn("admin bootstrap failed: invalid user id in context", "raw_user_id", sub)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		}
+
+		headerToken := strings.TrimSpace(c.Get("X-Admin-Bootstrap-Token"))
+		h1 := sha256.Sum256([]byte(headerToken))
+		h2 := sha256.Sum256([]byte(configToken))
+		if subtle.ConstantTimeCompare(h1[:], h2[:]) != 1 {
+			slog.Warn("admin bootstrap failed: invalid bootstrap token", "user_id", userID.String())
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_bootstrap_token"})
 		}
 
 		var currentRole string
 		if err := h.db.Pool.QueryRow(c.Context(), `SELECT role FROM users WHERE id = $1`, userID).Scan(&currentRole); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("admin bootstrap failed: user not found in database", "user_id", userID.String())
 				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
 			}
+			slog.Error("admin bootstrap failed: database query error", "user_id", userID.String(), "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "bootstrap_failed"})
 		}
 
@@ -157,8 +172,10 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		if currentRole == "admin" {
 			jwtToken, err := auth.IssueJWT(h.cfg.JWTSecret, userID, "admin", "", "", 60*time.Minute)
 			if err != nil {
+				slog.Error("admin bootstrap failed: token issue failed", "user_id", userID.String(), "error", err)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
 			}
+			slog.Info("admin bootstrap succeeded: user is already admin", "user_id", userID.String())
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{
 				"ok":    true,
 				"token": jwtToken,
@@ -169,13 +186,17 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		// Promote user to admin if they have the correct bootstrap token
 		_, err = h.db.Pool.Exec(c.Context(), `UPDATE users SET role = 'admin', updated_at = now() WHERE id = $1`, userID)
 		if err != nil {
+			slog.Error("admin bootstrap failed: database promotion failed", "user_id", userID.String(), "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "bootstrap_failed"})
 		}
 
 		jwtToken, err := auth.IssueJWT(h.cfg.JWTSecret, userID, "admin", "", "", 60*time.Minute)
 		if err != nil {
+			slog.Error("admin bootstrap failed: token issue failed after promotion", "user_id", userID.String(), "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
 		}
+		
+		slog.Info("admin bootstrap succeeded: user promoted to admin", "user_id", userID.String())
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"ok":    true,
 			"token": jwtToken,
