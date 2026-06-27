@@ -34,6 +34,23 @@ func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebho
 		action = strings.TrimSpace(env.Action)
 	}
 
+	// De-duplicate webhook events to ensure idempotency.
+	if e.DeliveryID != "" {
+		res, err := i.Pool.Exec(ctx, `
+INSERT INTO processed_deliveries (delivery_id)
+VALUES ($1)
+ON CONFLICT (delivery_id) DO NOTHING
+`, e.DeliveryID)
+		if err != nil {
+			slog.Error("failed to record webhook delivery ID", "delivery_id", e.DeliveryID, "error", err)
+			return err
+		}
+		if res.RowsAffected() == 0 {
+			slog.Warn("skipping duplicate github webhook delivery", "delivery_id", e.DeliveryID, "event", e.Event, "action", action)
+			return nil
+		}
+	}
+
 	var projectID *string
 	if repoFullName != "" {
 		var pid string
@@ -271,6 +288,21 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// CleanupProcessedDeliveries deletes processed delivery IDs older than 7 days.
+func (i *GitHubWebhookIngestor) CleanupProcessedDeliveries(ctx context.Context) (int64, error) {
+	if i == nil || i.Pool == nil {
+		return 0, nil
+	}
+	res, err := i.Pool.Exec(ctx, `
+DELETE FROM processed_deliveries
+WHERE processed_at < NOW() - INTERVAL '7 days'
+`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
 }
 
 

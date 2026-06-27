@@ -290,7 +290,7 @@ func TestIngest_InstallationDeleted_SoftDeletesProjects(t *testing.T) {
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/del-test", "install-del-99")
+	projectID := seedProject(t, pool, "acme/del-test", "99")
 
 	payload := mustJSON(t, map[string]any{
 		"action": "deleted",
@@ -337,7 +337,7 @@ func TestIngest_InstallationRepositoriesRemoved_SoftDeletesProject(t *testing.T)
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/repo-removed", "install-rm-77")
+	projectID := seedProject(t, pool, "acme/repo-removed", "77")
 
 	payload := mustJSON(t, map[string]any{
 		"action": "removed",
@@ -383,7 +383,7 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/repo-restored", "install-add-55")
+	projectID := seedProject(t, pool, "acme/repo-restored", "55")
 
 	// First, soft-delete it manually.
 	if _, err := pool.Exec(ctx, `
@@ -430,3 +430,86 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, ev.DeliveryID)
 	})
 }
+
+func TestIngest_Idempotence(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	projectID := seedProject(t, pool, "acme/repo-idempotent", "install-id-99")
+
+	payload := mustJSON(t, map[string]any{
+		"action": "opened",
+		"issue": map[string]any{
+			"id":     123456789,
+			"number": 42,
+			"state":  "open",
+			"title":  "A test issue for idempotence",
+			"body":   "This is a test issue body",
+			"html_url": "https://github.com/acme/repo-idempotent/issues/42",
+			"user": map[string]any{
+				"login": "octocat",
+			},
+		},
+		"repository": map[string]any{
+			"full_name": "acme/repo-idempotent",
+		},
+	})
+
+	deliveryID := "test-delivery-idempotence-" + time.Now().Format("20060102150405.000000000")
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: deliveryID,
+		Event:      "issues",
+		Action:     "opened",
+		Payload:    payload,
+	}
+
+	// 1. First Ingestion: should process and insert sync jobs
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("First Ingest: %v", err)
+	}
+
+	// Verify sync jobs were created
+	var countBefore int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM sync_jobs WHERE project_id = $1::uuid", projectID).Scan(&countBefore); err != nil {
+		t.Fatalf("select count sync_jobs: %v", err)
+	}
+	if countBefore == 0 {
+		t.Error("expected sync jobs to be created on first ingestion")
+	}
+
+	// 2. Second Ingestion (duplicate): should skip and not create duplicate sync jobs
+	// Delete sync jobs to see if second ingestion recreates them
+	if _, err := pool.Exec(ctx, "DELETE FROM sync_jobs WHERE project_id = $1::uuid", projectID); err != nil {
+		t.Fatalf("delete sync_jobs: %v", err)
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Second Ingest: %v", err)
+	}
+
+	// Verify NO sync jobs were recreated
+	var countAfter int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM sync_jobs WHERE project_id = $1::uuid", projectID).Scan(&countAfter); err != nil {
+		t.Fatalf("select count sync_jobs after: %v", err)
+	}
+	if countAfter != 0 {
+		t.Errorf("expected 0 sync jobs after duplicate ingestion, got %d", countAfter)
+	}
+
+	// Test CleanupProcessedDeliveries function works
+	deletedRows, err := ing.CleanupProcessedDeliveries(ctx)
+	if err != nil {
+		t.Fatalf("CleanupProcessedDeliveries: %v", err)
+	}
+	// The current entry is brand new, so it should not be deleted yet (rows deleted = 0)
+	if deletedRows != 0 {
+		t.Errorf("expected 0 rows deleted, got %d", deletedRows)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM processed_deliveries WHERE delivery_id = $1`, deliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, deliveryID)
+	})
+}
+

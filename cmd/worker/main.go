@@ -117,8 +117,9 @@ func main() {
 	var workerWG sync.WaitGroup
 
 	// ---------- GitHub webhook consumer ----------
+	webhookIngestor := &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool}
 	consumer := &worker.GitHubWebhookConsumer{
-		Ingest: &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool},
+		Ingest: webhookIngestor,
 	}
 	if err := consumer.Subscribe(workerCtx, nbus.Conn(), worker.GitHubWebhookQueueGroup); err != nil {
 		slog.Error("failed to subscribe to webhook events", "error", err)
@@ -130,6 +131,35 @@ func main() {
 		}
 	}()
 	slog.Info("github webhook consumer subscribed")
+
+	// ---------- Processed deliveries cleanup (concurrent) ----------
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		slog.Info("starting processed deliveries cleanup worker")
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		if count, err := webhookIngestor.CleanupProcessedDeliveries(workerCtx); err != nil {
+			slog.Error("failed initial processed deliveries cleanup", "error", err)
+		} else {
+			slog.Info("initial processed deliveries cleanup complete", "rows_deleted", count)
+		}
+
+		for {
+			select {
+			case <-workerCtx.Done():
+				slog.Info("processed deliveries cleanup worker stopped")
+				return
+			case <-ticker.C:
+				if count, err := webhookIngestor.CleanupProcessedDeliveries(workerCtx); err != nil {
+					slog.Error("failed processed deliveries cleanup", "error", err)
+				} else {
+					slog.Info("processed deliveries cleanup complete", "rows_deleted", count)
+				}
+			}
+		}
+	}()
 
 	// ---------- Sync jobs runner (concurrent) ----------
 	syncWorker := syncjobs.New(cfg, dbConn.Pool)
