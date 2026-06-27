@@ -34,6 +34,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -45,14 +46,17 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/ingest"
+	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
 	"github.com/jagadeesh/grainlify/backend/internal/worker"
 )
 
 func main() {
+	// Load environment variables and configuration
 	config.LoadDotenv()
 	cfg := config.Load()
 
+	// Set up logger
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: cfg.LogLevel(),
 	})))
@@ -77,46 +81,63 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Database.
-	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	dbConn, err := db.Connect(dbCtx, cfg.DBURL)
-	dbCancel()
+	// ---------- Database connection ----------
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	dbConn, err := db.Connect(ctx, cfg.DBURL, db.PoolConfig{
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnLifetime: cfg.DBMaxConnLifetime,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+	})
+	cancel()
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer dbConn.Close()
+	defer func() {
+		slog.Info("closing database connection")
+		dbConn.Close()
+	}()
 
-	// NATS.
+	// ---------- NATS connection ----------
 	nbus, err := natsbus.Connect(cfg.NATSURL)
 	if err != nil {
 		slog.Error("failed to connect to NATS", "error", err)
 		os.Exit(1)
 	}
-	defer nbus.Close()
+	defer func() {
+		slog.Info("closing NATS connection")
+		nbus.Close()
+	}()
 
 	// Root context — cancelled on shutdown signal.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	workerCtx, stopWorkers := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopWorkers()
 
-	var wg sync.WaitGroup
+	var workerWG sync.WaitGroup
 
-	// GitHub webhook consumer.
+	// ---------- GitHub webhook consumer ----------
 	consumer := &worker.GitHubWebhookConsumer{
 		Ingest: &ingest.GitHubWebhookIngestor{Pool: dbConn.Pool},
 	}
-	if err := consumer.Subscribe(ctx, nbus.Conn(), worker.GitHubWebhookQueueGroup); err != nil {
+	if err := consumer.Subscribe(workerCtx, nbus.Conn(), worker.GitHubWebhookQueueGroup); err != nil {
 		slog.Error("failed to subscribe to webhook events", "error", err)
 		os.Exit(1)
 	}
+	defer func() {
+		if consumer.Sub != nil {
+			_ = consumer.Sub.Unsubscribe()
+		}
+	}()
 	slog.Info("github webhook consumer subscribed")
 
-	// Syncjobs worker.
-	wg.Add(1)
+	// ---------- Sync jobs runner (concurrent) ----------
+	syncWorker := syncjobs.New(cfg, dbConn.Pool)
+	workerWG.Add(1)
 	go func() {
-		defer wg.Done()
+		defer workerWG.Done()
 		slog.Info("starting syncjobs worker")
-		if err := syncjobs.New(cfg, dbConn.Pool).Run(ctx); err != nil && err != context.Canceled {
+		if err := syncWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("syncjobs worker exited with error", "error", err)
 		}
 	}()
@@ -124,24 +145,17 @@ func main() {
 	slog.Info("=== Grainlify Worker Running ===")
 
 	// Block until signal.
-	<-ctx.Done()
+	<-workerCtx.Done()
 	slog.Info("shutdown signal received, draining workers")
 
 	// Give goroutines up to 10 s to finish in-flight work.
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 
-	shutdownTimer := time.NewTimer(10 * time.Second)
-	defer shutdownTimer.Stop()
-	select {
-	case <-done:
+	if err := shutdownwait.Wait(shutdownCtx, &workerWG); err != nil {
+		slog.Warn("worker shutdown exceeded deadline", "error", err)
+	} else {
 		slog.Info("all workers drained cleanly")
-	case <-shutdownTimer.C:
-		slog.Warn("shutdown timeout exceeded; forcing exit")
 	}
-
 	slog.Info("worker shutdown complete")
 }

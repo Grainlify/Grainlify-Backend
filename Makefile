@@ -1,4 +1,4 @@
-.PHONY: run dev install-air lint build build-worker run-worker test
+.PHONY: run dev install-air lint build build-worker run-worker build-prod test
 
 # Install air for live reload
 install-air:
@@ -24,6 +24,14 @@ run:
 # Build the API binary
 build:
 	@go build -o ./api ./cmd/api
+
+# Build the binary with version metadata injected via ldflags.
+build-prod:
+	@go build -ldflags="\
+		-X main.Version=$$(git describe --tags --always 2>/dev/null || echo dev) \
+		-X main.Commit=$$(git rev-parse --short HEAD) \
+		-X main.BuildTime=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		-o ./api ./cmd/api
 
 # Build the worker binary
 build-worker:

@@ -614,14 +614,26 @@ SELECT
 
 // ProjectsContributed returns projects a user has contributed to (via issues or PRs)
 // Accepts optional user_id or login query parameters for viewing other users' profiles
+//
+// Query parameters:
+//   - limit: max results (default 10, max 100)
+//   - offset: pagination offset (default 0)
+//
+// The response remains a bare JSON array for backward compatibility; limit/offset
+// simply bound and page the underlying query so older contributions are reachable.
 func (h *UserProfileHandler) ProjectsContributed() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		p, err := ParsePagination(c, 10, 100)
+		if err != nil {
+			// response already written by ParsePagination on error
+			return nil
+		}
+
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
 
 		var githubLogin *string
-		var err error
 
 		// Check if user_id or login is provided in query params (for viewing other users)
 		userIDParam := c.Query("user_id")
@@ -690,8 +702,8 @@ INNER JOIN projects p ON contrib_projects.project_id = p.id
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE p.status = 'verified' AND p.deleted_at IS NULL
 ORDER BY p.github_full_name ASC
-LIMIT 10
-`, *githubLogin)
+LIMIT $2 OFFSET $3
+`, *githubLogin, p.Limit, p.Offset)
 		if err != nil {
 			slog.Error("failed to fetch contributed projects", "error", err, "github_login", *githubLogin)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_fetch_failed"})

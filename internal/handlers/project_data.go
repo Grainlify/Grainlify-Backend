@@ -53,7 +53,8 @@ func (h *ProjectDataHandler) Issues() fiber.Handler {
 
 		p, err := ParsePagination(c, 20, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -132,7 +133,8 @@ func (h *ProjectDataHandler) PRs() fiber.Handler {
 
 		p, err := ParsePagination(c, 20, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -195,7 +197,8 @@ func (h *ProjectDataHandler) Events() fiber.Handler {
 
 		p, err := ParsePagination(c, 20, 100)
 		if err != nil {
-			return err
+			// response already written by ParsePagination on error
+			return nil
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `

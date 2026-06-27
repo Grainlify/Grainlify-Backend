@@ -1,8 +1,16 @@
 package handlers
 
 import (
+	"errors"
+
 	"github.com/gofiber/fiber/v2"
 )
+
+// ErrPaginationResponded is returned by ParsePagination when it has already
+// written an error response to the client (e.g. a 400 for a negative offset).
+// Callers should stop processing the request when they receive a non-nil
+// error and simply return nil, since the response is already committed.
+var ErrPaginationResponded = errors.New("pagination: response already written")
 
 // PaginationParams holds validated pagination parameters extracted from
 // request query strings. Limit is clamped to [1, maxLimit] and offset is
@@ -29,9 +37,14 @@ func ParsePagination(c *fiber.Ctx, defaultLimit, maxLimit int) (PaginationParams
 
 	offset := c.QueryInt("offset", 0)
 	if offset < 0 {
-		return PaginationParams{}, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		// Write the 400 response now and signal callers (via the non-nil
+		// sentinel) to stop processing. Because the body is already
+		// committed, callers must return nil rather than the error so the
+		// framework's error handler does not overwrite this response.
+		_ = c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "offset must be non-negative",
 		})
+		return PaginationParams{}, ErrPaginationResponded
 	}
 
 	return PaginationParams{Limit: limit, Offset: offset}, nil

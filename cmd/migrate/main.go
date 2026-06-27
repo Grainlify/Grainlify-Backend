@@ -23,7 +23,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	d, err := db.Connect(ctx, cfg.DBURL)
+	d, err := db.Connect(ctx, cfg.DBURL, db.PoolConfig{
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnLifetime: cfg.DBMaxConnLifetime,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+	})
 	if err != nil {
 		slog.Error("db connect failed", "error", err)
 		os.Exit(1)
@@ -37,5 +42,3 @@ func main() {
 
 	slog.Info("migrations applied")
 }
-
-
