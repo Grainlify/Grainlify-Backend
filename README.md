@@ -176,7 +176,7 @@ AUTO_MIGRATE=true
 
 # Authentication
 JWT_SECRET=your-secret-key-min-32-chars
-ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token
+ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token-min-32-chars
 
 # GitHub OAuth
 GITHUB_OAUTH_CLIENT_ID=your_client_id

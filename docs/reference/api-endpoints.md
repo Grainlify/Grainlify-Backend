@@ -1009,13 +1009,13 @@ Bootstrap the first admin user (or promote current user to admin if already admi
 ```
 
 **Error Responses:**
-- `401 Unauthorized` - Invalid bootstrap token
-- `403 Forbidden` - Admin already exists and user is not admin
-- `503 Service Unavailable` - Bootstrap not configured
+- `403 Forbidden` - Invalid bootstrap token (`invalid_bootstrap_token`), token too weak (`bootstrap_token_too_weak`), or endpoint disabled in this environment (`bootstrap_disabled_in_env`)
+- `503 Service Unavailable` - Bootstrap not configured (`bootstrap_not_configured`) or database connection issue (`db_not_configured`)
 
 **Notes:**
-- Only works if there are 0 admins in the database, OR the user is already an admin
-- Returns a new JWT token with updated role (use this token for subsequent requests)
+- Only allowed when `APP_ENV=dev`.
+- Requires the configured `ADMIN_BOOTSTRAP_TOKEN` to be at least 32 characters long.
+- Returns a new JWT token with updated role (use this token for subsequent requests).
 
 ---
 
