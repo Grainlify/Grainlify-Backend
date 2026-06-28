@@ -11,16 +11,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
 
 type Worker struct {
 	cfg      config.Config
-	pool     *pgxpool.Pool
+	pool     db.DBPool
 	limiter  *rate.Limiter
 	gh       *github.Client
 	workerID string
@@ -32,7 +32,7 @@ type jobState struct {
 	incrementAttempts bool
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
+func New(cfg config.Config, pool db.DBPool) *Worker {
 	return &Worker{
 		cfg:      cfg,
 		pool:     pool,

@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jagadeesh/grainlify/backend/internal/cryptox"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 type LinkedAccount struct {
@@ -18,7 +18,7 @@ type LinkedAccount struct {
 	AccessToken  string
 }
 
-func GetLinkedAccount(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, tokenEncKeyB64 string) (LinkedAccount, error) {
+func GetLinkedAccount(ctx context.Context, pool db.DBPool, userID uuid.UUID, tokenEncKeyB64 string) (LinkedAccount, error) {
 	if pool == nil {
 		return LinkedAccount{}, fmt.Errorf("db not configured")
 	}
