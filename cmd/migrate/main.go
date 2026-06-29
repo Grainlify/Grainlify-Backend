@@ -20,6 +20,11 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	if err := cfg.Validate(); err != nil {
+		slog.Error("startup config validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
