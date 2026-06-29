@@ -16,6 +16,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type Deps struct {
@@ -52,6 +53,8 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	// Baseline middleware.
 	app.Use(requestid.New())
 	app.Use(NewRateLimitMiddleware(cfg))
+	// Prometheus latency instrumentation (before recover so panics are counted).
+	app.Use(metrics.LatencyMiddleware())
 
 	// Add request logging middleware BEFORE recover to catch all requests
 	app.Use(func(c *fiber.Ctx) error {
@@ -140,6 +143,8 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	})
 	app.Get("/health", handlers.NewHealth(build))
 	app.Get("/ready", handlers.NewReady(deps.DB, deps.Bus))
+	// Prometheus metrics endpoint — restrict access via network policy or METRICS_TOKEN env var.
+	app.Get("/metrics", metrics.TokenGate(cfg.MetricsToken), metrics.Handler())
 
 	authHandler := handlers.NewAuthHandler(cfg, deps.DB)
 	authGroup := app.Group("/auth")

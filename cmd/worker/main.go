@@ -63,6 +63,11 @@ func main() {
 
 	slog.Info("=== Grainlify Worker Starting ===", "env", cfg.Env)
 
+	if err := cfg.Validate(); err != nil {
+		slog.Error("startup config validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	// Fail fast on missing required config.
 	if cfg.DBURL == "" {
 		if cfg.Env != "dev" {
