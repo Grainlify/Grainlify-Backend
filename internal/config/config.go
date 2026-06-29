@@ -1,7 +1,11 @@
 package config
 
 import (
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -167,6 +171,100 @@ func Load() Config {
 // IsDev reports whether the app runs in local development mode.
 func (c Config) IsDev() bool {
 	return strings.EqualFold(strings.TrimSpace(c.Env), "dev")
+}
+
+// Validate checks that all security-critical configuration values are present
+// and well-formed. In non-dev environments it returns an error (never logging
+// secret values) so that the process can exit with an actionable message
+// before accepting any traffic.
+//
+// Rules applied in every environment:
+//   - SorobanNetwork must be "testnet" or "mainnet" when set.
+//   - HTTPAddr must be parseable as a TCP address.
+//
+// Additional rules applied outside dev:
+//   - JWT_SECRET must be at least 32 characters.
+//   - TOKEN_ENC_KEY_B64 must base64-decode to exactly 32 bytes (AES-256-GCM).
+//   - DB_URL must be non-empty.
+//   - When any Soroban field (SorobanRPCURL, SorobanSourceSecret, EscrowContractID,
+//     ProgramEscrowContractID, TokenContractID) is set, all of them must be set.
+func (c Config) Validate() error {
+	var errs []string
+
+	// --- HTTPAddr ---
+	if addr := strings.TrimSpace(c.HTTPAddr); addr != "" {
+		// Normalise ":8080" → "0.0.0.0:8080" for net.ResolveTCPAddr.
+		if strings.HasPrefix(addr, ":") {
+			addr = "0.0.0.0" + addr
+		}
+		if _, err := net.ResolveTCPAddr("tcp", addr); err != nil {
+			errs = append(errs, fmt.Sprintf("HTTP_ADDR %q is not a valid TCP address: %v", c.HTTPAddr, err))
+		}
+	}
+
+	// --- SorobanNetwork ---
+	if net := strings.TrimSpace(c.SorobanNetwork); net != "" {
+		if net != "testnet" && net != "mainnet" {
+			errs = append(errs, fmt.Sprintf("SOROBAN_NETWORK must be \"testnet\" or \"mainnet\", got %q", net))
+		}
+	}
+
+	if !c.IsDev() {
+		// --- DB_URL ---
+		if strings.TrimSpace(c.DBURL) == "" {
+			errs = append(errs, "DB_URL is required in non-dev environments")
+		}
+
+		// --- JWT_SECRET ---
+		if len(strings.TrimSpace(c.JWTSecret)) < 32 {
+			errs = append(errs, "JWT_SECRET must be at least 32 characters (set JWT_SECRET)")
+		}
+
+		// --- TOKEN_ENC_KEY_B64 ---
+		if strings.TrimSpace(c.TokenEncKeyB64) == "" {
+			errs = append(errs, "TOKEN_ENC_KEY_B64 is required in non-dev environments (set TOKEN_ENC_KEY_B64)")
+		} else {
+			decoded, err := base64.StdEncoding.DecodeString(c.TokenEncKeyB64)
+			if err != nil {
+				// Try URL-safe variant as well.
+				decoded, err = base64.URLEncoding.DecodeString(c.TokenEncKeyB64)
+			}
+			if err != nil {
+				errs = append(errs, "TOKEN_ENC_KEY_B64 is not valid base64 (set TOKEN_ENC_KEY_B64 to a base64-encoded 32-byte key)")
+			} else if len(decoded) != 32 {
+				errs = append(errs, fmt.Sprintf("TOKEN_ENC_KEY_B64 must decode to exactly 32 bytes for AES-256-GCM (got %d bytes)", len(decoded)))
+			}
+		}
+
+		// --- Soroban group: all-or-nothing ---
+		sorobanFields := map[string]string{
+			"SOROBAN_RPC_URL":           c.SorobanRPCURL,
+			"SOROBAN_SOURCE_SECRET":     c.SorobanSourceSecret,
+			"ESCROW_CONTRACT_ID":        c.EscrowContractID,
+			"PROGRAM_ESCROW_CONTRACT_ID": c.ProgramEscrowContractID,
+			"TOKEN_CONTRACT_ID":         c.TokenContractID,
+		}
+		anySet := false
+		var missing []string
+		for key, val := range sorobanFields {
+			if strings.TrimSpace(val) != "" {
+				anySet = true
+			} else {
+				missing = append(missing, key)
+			}
+		}
+		if anySet && len(missing) > 0 {
+			errs = append(errs, fmt.Sprintf(
+				"incomplete Soroban configuration: when any Soroban field is set, all must be set; missing: %s",
+				strings.Join(missing, ", "),
+			))
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.New("invalid configuration:\n  - " + strings.Join(errs, "\n  - "))
 }
 
 func (c Config) LogLevel() slog.Leveler {
