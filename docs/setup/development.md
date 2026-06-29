@@ -102,6 +102,22 @@ go test ./internal/handlers/... ./internal/ingest/...
 
 The handler tests (`internal/handlers`) are pure unit tests with a mock bus — no external dependencies.
 
+### HTTP Integration Tests (no database required) 🔌
+
+We have comprehensive HTTP integration tests covering the assembled Fiber app (routing, middleware like requestid, CORS, recover, rate limiters, auth/role gates, and response shapes) without requiring a database.
+
+Run the API integration tests:
+
+```bash
+go test -v ./internal/api/... -race
+```
+
+These integration tests drive the app via `app.Test(httptest.NewRequest(...))` using a mock database seam (`db.DBPool`) and a mock message bus. The test covers:
+- **Public endpoints**: (e.g. `/health`, `/projects`) returning successful statuses.
+- **Route Precedence**: Explicitly asserting that specific routes (like `/projects/mine` and `/projects/pending-setup`) resolve before parameterized routes (like `/projects/:id`).
+- **Auth and Role Gates**: Asserting that `RequireAuth` and `RequireRole` block invalid/missing tokens (with 401 Unauthorized) and insufficient roles (with 403 Forbidden).
+- **Error Responses**: Asserting that error envelopes use the standard structure (`ErrorEnvelope`) and include `request_id` for traceability.
+
 ### Integration tests (requires PostgreSQL)
 
 DB integration tests in `internal/ingest` are gated behind the `TEST_DB_URL` environment variable.  

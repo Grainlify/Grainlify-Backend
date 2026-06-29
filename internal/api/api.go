@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"log/slog"
@@ -16,6 +16,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type Deps struct {
@@ -23,20 +24,37 @@ type Deps struct {
 	Bus bus.Bus
 }
 
-func New(cfg config.Config, deps Deps) *fiber.App {
+func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	slog.Info("initializing Fiber app",
 		"app_name", "grainlify-api",
 	)
+	// Since Fiber/fasthttp enforces BodyLimit at the server level before routing,
+	// the global BodyLimit must accommodate the larger webhook payload size (e.g. 10 MB).
+	// We then enforce the tighter MaxBodyBytes on all other routes via middleware.
+	webhookBodyLimit := 10 * 1024 * 1024 // 10 MB for GitHub webhooks
+	globalBodyLimit := cfg.MaxBodyBytes
+	if globalBodyLimit < webhookBodyLimit {
+		globalBodyLimit = webhookBodyLimit
+	}
+
 	app := fiber.New(fiber.Config{
-		AppName:      "grainlify-api",
-		IdleTimeout:  60 * time.Second,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		AppName:                 "grainlify-api",
+		IdleTimeout:             60 * time.Second,
+		ReadTimeout:             10 * time.Second,
+		WriteTimeout:            10 * time.Second,
+		BodyLimit:               globalBodyLimit,
+		ErrorHandler:            JSONErrorHandler(),
+		ProxyHeader:             fiber.HeaderXForwardedFor,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
 	})
 	slog.Info("Fiber app created")
 
 	// Baseline middleware.
 	app.Use(requestid.New())
+	app.Use(NewRateLimitMiddleware(cfg))
+	// Prometheus latency instrumentation (before recover so panics are counted).
+	app.Use(metrics.LatencyMiddleware())
 
 	// Add request logging middleware BEFORE recover to catch all requests
 	app.Use(func(c *fiber.Ctx) error {
@@ -55,67 +73,50 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		return c.Next()
 	})
 
-	app.Use(recover.New())
+	app.Use(recover.New(recover.Config{
+		EnableStackTrace:  true,
+		StackTraceHandler: PanicStackTraceHandler,
+	}))
 
 	// Configure CORS from environment variables
+	corsPolicy := BuildCORSOriginPolicy(cfg)
 	corsConfig := cors.Config{
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Admin-Bootstrap-Token",
 		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
 		AllowCredentials: true,
-	}
-
-	// Always use AllowOriginsFunc so we can:
-	// - allow localhost for dev
-	// - allow explicit CORS_ORIGINS (comma-separated)
-	// - allow FrontendBaseURL
-	explicitOrigins := map[string]struct{}{}
-	if strings.TrimSpace(cfg.CORSOrigins) != "" {
-		for _, o := range strings.Split(cfg.CORSOrigins, ",") {
-			o = strings.TrimSpace(o)
-			if o == "" {
-				continue
-			}
-			explicitOrigins[o] = struct{}{}
-		}
-	}
-
-	corsConfig.AllowOriginsFunc = func(origin string) bool {
-		// Always allow localhost origins for development / local frontend testing.
-		if strings.HasPrefix(origin, "http://localhost:") ||
-			strings.HasPrefix(origin, "http://127.0.0.1:") ||
-			strings.HasPrefix(origin, "https://localhost:") ||
-			strings.HasPrefix(origin, "https://127.0.0.1:") {
-			return true
-		}
-
-		// Allow all Vercel preview deployments (*.vercel.app)
-		if strings.HasSuffix(origin, ".vercel.app") {
-			return true
-		}
-
-		// Allow production domain (*.0xo.in) for grainlify.0xo.in / api.grainlify.0xo.in
-		if strings.HasSuffix(origin, ".0xo.in") {
-			return true
-		}
-
-		// Check explicit CORS origins from config
-		if _, ok := explicitOrigins[origin]; ok {
-			return true
-		}
-
-		// If FrontendBaseURL is set, allow it (exact match or with path)
-		if cfg.FrontendBaseURL != "" {
-			frontendBase := strings.TrimSuffix(cfg.FrontendBaseURL, "/")
-			if origin == frontendBase || strings.HasPrefix(origin, frontendBase+"/") {
-				return true
-			}
-		}
-
-		return false
+		AllowOriginsFunc: corsPolicy.Allows,
 	}
 
 	app.Use(cors.New(corsConfig))
 	app.Use(logger.New())
+
+	// Enforce MAX_BODY_BYTES request body size limit for all routes except the GitHub webhook route
+	app.Use(func(c *fiber.Ctx) error {
+		// A non-positive limit means "no per-route limit configured"; skip the
+		// check so an unset MaxBodyBytes does not reject every request.
+		if cfg.MaxBodyBytes <= 0 {
+			return c.Next()
+		}
+
+		path := c.Path()
+		// Allow larger payloads on the GitHub webhook route
+		if strings.HasPrefix(path, "/webhooks/github") {
+			return c.Next()
+		}
+
+		// Enforce MaxBodyBytes limit by checking Content-Length header first
+		contentLength := c.Request().Header.ContentLength()
+		if contentLength > cfg.MaxBodyBytes {
+			return fiber.ErrRequestEntityTooLarge
+		}
+
+		// Also check the actual read body size in case of chunked encoding or forged headers
+		if len(c.Body()) > cfg.MaxBodyBytes {
+			return fiber.ErrRequestEntityTooLarge
+		}
+
+		return c.Next()
+	})
 
 	// Routes.
 	// Root handler - also handle POST requests to catch misconfigured webhooks
@@ -140,8 +141,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 			"correct_url": "/webhooks/github",
 		})
 	})
-	app.Get("/health", handlers.Health())
-	app.Get("/ready", handlers.Ready(deps.DB))
+	app.Get("/health", handlers.NewHealth(build))
+	app.Get("/ready", handlers.NewReady(deps.DB, deps.Bus))
+	// Prometheus metrics endpoint — restrict access via network policy or METRICS_TOKEN env var.
+	app.Get("/metrics", metrics.TokenGate(cfg.MetricsToken), metrics.Handler())
 
 	authHandler := handlers.NewAuthHandler(cfg, deps.DB)
 	authGroup := app.Group("/auth")
@@ -281,9 +284,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 			"remote_ip", c.IP(),
 			"user_agent", c.Get("User-Agent"),
 		)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "not_found",
-			"path":  c.Path(),
+		return WriteErrorEnvelope(c, fiber.StatusNotFound, "not_found", "", fiber.Map{
+			"path": c.Path(),
 		})
 	})
 
@@ -294,7 +296,6 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	)
 	// Docs routes
 	RegisterDocsRoutes(app)
-
 
 	return app
 }

@@ -44,6 +44,8 @@ https://abc123.loclx.io/auth/github/app/install/callback
 ```
 (Replace `abc123.loclx.io` with your actual tunnel URL)
 
+See [Installation Callbacks](callbacks.md) for the canonical callback troubleshooting guide.
+
 **Expire user authorization tokens:**
 - ✅ **Checked** (Recommended: enables refresh tokens)
 

@@ -24,7 +24,8 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 				"request_id", c.Locals("requestid"),
 			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "missing_bearer_token",
+				"error":      "missing_bearer_token",
+				"request_id": c.Locals("requestid"),
 			})
 		}
 		token := strings.TrimSpace(h[len("bearer "):])
@@ -35,7 +36,8 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 				"request_id", c.Locals("requestid"),
 			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "missing_bearer_token",
+				"error":      "missing_bearer_token",
+				"request_id": c.Locals("requestid"),
 			})
 		}
 		claims, err := ParseJWT(jwtSecret, token)
@@ -48,7 +50,8 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 				"request_id", c.Locals("requestid"),
 			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid_token",
+				"error":      "invalid_token",
+				"request_id": c.Locals("requestid"),
 			})
 		}
 
@@ -67,12 +70,14 @@ func RequireRole(roles ...string) fiber.Handler {
 		role, _ := c.Locals(LocalRole).(string)
 		if role == "" {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "missing_role",
+				"error":      "missing_role",
+				"request_id": c.Locals("requestid"),
 			})
 		}
 		if _, ok := allowed[role]; !ok {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "insufficient_role",
+				"error":      "insufficient_role",
+				"request_id": c.Locals("requestid"),
 			})
 		}
 		return c.Next()

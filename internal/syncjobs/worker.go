@@ -6,27 +6,63 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type Worker struct {
-	cfg     config.Config
-	pool    *pgxpool.Pool
-	limiter *rate.Limiter
-	gh      *github.Client
+	cfg      config.Config
+	pool     db.DBPool
+	limiter  *rate.Limiter
+	gh       *github.Client
 	workerID string
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
+type jobState struct {
+	status            string
+	lastErr           string
+	incrementAttempts bool
+	runAt             *time.Time // non-nil when rescheduling with backoff
+}
+
+// secretPattern matches common secret shapes (tokens, keys, passwords in URLs).
+// Used to sanitize last_error before persisting it.
+var secretPattern = regexp.MustCompile(`(?i)(token|key|secret|password|auth|bearer)[=: ]+\S+`)
+
+// sanitizeError removes potential secrets from an error string before
+// it is written to last_error on the job row.
+func sanitizeError(msg string) string {
+	return secretPattern.ReplaceAllString(msg, "[REDACTED]")
+}
+
+// backoffDuration returns the next retry delay using truncated exponential
+// backoff with ±25 % jitter to avoid thundering-herd against the GitHub API.
+//
+//	delay = base * 2^(attempt-1) * (0.75 + rand*0.5), capped at 1 hour
+func backoffDuration(base time.Duration, attempt int) time.Duration {
+	exp := math.Pow(2, float64(attempt-1))
+	jitter := 0.75 + rand.Float64()*0.5 // [0.75, 1.25)
+	d := time.Duration(float64(base) * exp * jitter)
+	const maxBackoff = time.Hour
+	if d > maxBackoff {
+		d = maxBackoff
+	}
+	return d
+}
+
+func New(cfg config.Config, pool db.DBPool) *Worker {
 	return &Worker{
 		cfg:      cfg,
 		pool:     pool,
@@ -36,23 +72,79 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
 	}
 }
 
+// jobCompletionContext gives final status updates a short, non-canceled window
+// after the worker root context is canceled during graceful shutdown.
+func jobCompletionContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), timeout)
+}
+
+// jobFinalState determines the next status for a job after it finishes.
+// attempts is the current value stored in the DB (before this run's increment).
+// maxAttempts and backoffBase drive retry/dead-letter behaviour.
+func jobFinalState(runErr error, attempts int, maxAttempts int, backoffBase time.Duration) jobState {
+	if runErr == nil {
+		return jobState{status: "completed", incrementAttempts: true}
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return jobState{
+			status:            "pending",
+			lastErr:           "worker_shutdown_requeued",
+			incrementAttempts: false,
+		}
+	}
+
+	nextAttempt := attempts + 1
+	if nextAttempt >= maxAttempts {
+		return jobState{
+			status:            "dead",
+			lastErr:           sanitizeError(runErr.Error()),
+			incrementAttempts: true,
+		}
+	}
+
+	delay := backoffDuration(backoffBase, nextAttempt)
+	runAt := time.Now().Add(delay)
+	return jobState{
+		status:            "pending",
+		lastErr:           sanitizeError(runErr.Error()),
+		incrementAttempts: true,
+		runAt:             &runAt,
+	}
+}
+
 func (w *Worker) Run(ctx context.Context) error {
 	if w.pool == nil {
 		return fmt.Errorf("db not configured")
 	}
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
+	depth := time.NewTicker(15 * time.Second)
+	defer depth.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-depth.C:
+			w.refreshQueueDepth(ctx)
 		case <-t.C:
 			if err := w.processOne(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				slog.Error("sync worker error", "error", err)
 			}
 		}
 	}
+}
+
+// refreshQueueDepth queries the pending sync_jobs count and updates the gauge.
+func (w *Worker) refreshQueueDepth(ctx context.Context) {
+	var n float64
+	if err := w.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sync_jobs WHERE status = 'pending'`,
+	).Scan(&n); err != nil {
+		slog.Warn("failed to refresh sync_jobs queue depth metric", "error", err)
+		return
+	}
+	metrics.SyncJobsQueueDepth.Set(n)
 }
 
 func (w *Worker) processOne(ctx context.Context) error {
@@ -65,15 +157,16 @@ func (w *Worker) processOne(ctx context.Context) error {
 	var jobID uuid.UUID
 	var projectID uuid.UUID
 	var jobType string
+	var attempts int
 	err = tx.QueryRow(ctx, `
-SELECT id, project_id, job_type
+SELECT id, project_id, job_type, attempts
 FROM sync_jobs
 WHERE status = 'pending'
   AND run_at <= now()
 ORDER BY run_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT 1
-`).Scan(&jobID, &projectID, &jobType)
+`).Scan(&jobID, &projectID, &jobType, &attempts)
 	if err != nil {
 		return err
 	}
@@ -92,19 +185,57 @@ WHERE id = $1
 	}
 
 	runErr := w.runJob(ctx, jobID, projectID, jobType)
-
-	status := "completed"
-	lastErr := ""
-	if runErr != nil {
-		status = "failed"
-		lastErr = runErr.Error()
+	state := jobFinalState(runErr, attempts, w.cfg.SyncJobsMaxAttempts, w.cfg.SyncJobsBackoffBase)
+	attemptDelta := 0
+	if state.incrementAttempts {
+		attemptDelta = 1
+	}
+	switch state.status {
+	case "completed":
+		metrics.SyncJobsProcessed.Inc()
+	case "failed":
+		metrics.SyncJobsFailed.Inc()
 	}
 
-	_, _ = w.pool.Exec(ctx, `
+	completeCtx, cancel := jobCompletionContext(ctx, 5*time.Second)
+	defer cancel()
+
+	if state.runAt != nil {
+		// Reschedule with backoff: set run_at to the computed future time.
+		_, err = w.pool.Exec(completeCtx, `
 UPDATE sync_jobs
-SET status = $2, attempts = attempts + 1, last_error = NULLIF($3, ''), updated_at = now()
+SET status = $2,
+    attempts = attempts + $3,
+    last_error = NULLIF($4, ''),
+    run_at = $5,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
 WHERE id = $1
-`, jobID, status, lastErr)
+`, jobID, state.status, attemptDelta, state.lastErr, *state.runAt)
+	} else {
+		_, err = w.pool.Exec(completeCtx, `
+UPDATE sync_jobs
+SET status = $2,
+    attempts = attempts + $3,
+    last_error = NULLIF($4, ''),
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1
+`, jobID, state.status, attemptDelta, state.lastErr)
+	}
+	if err != nil {
+		return err
+	}
+
+	if state.status == "dead" {
+		slog.Warn("sync job dead-lettered",
+			"job_id", jobID,
+			"attempts", attempts+attemptDelta,
+			"last_error", state.lastErr,
+		)
+	}
 
 	return nil
 }
@@ -202,7 +333,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			assigneesJSON, _ := json.Marshal(it.Assignees)
 			// Convert labels to JSONB (array of {name, color} objects)
 			labelsJSON, _ := json.Marshal(it.Labels)
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -244,7 +375,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					)
 				}
 			}
-			
+
 			// Fetch comments for this issue (if comments_count > 0)
 			var commentsJSON []byte = []byte("[]")
 			if it.Comments > 0 {
@@ -255,7 +386,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					}
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
@@ -277,7 +408,7 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 `, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt)
 		}
 	}
-	
+
 	slog.Info("sync issues completed",
 		"project_id", projectID,
 		"repo", fullName,
@@ -313,7 +444,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 
 		for _, it := range items {
 			totalPRs++
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt, mergedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -336,7 +467,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 					mergedAt = &t
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -366,7 +497,3 @@ func hostname() string {
 	}
 	return h
 }
-
-
-
-

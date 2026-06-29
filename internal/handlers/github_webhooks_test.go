@@ -38,6 +38,8 @@ func (b *mockBus) Publish(_ context.Context, subject string, data []byte) error 
 	return nil
 }
 
+func (b *mockBus) Status() string { return "CONNECTED" }
+
 func (b *mockBus) Close() {}
 
 func (b *mockBus) published() []mockMsg {

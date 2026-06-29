@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
@@ -116,19 +117,19 @@ func NewKYCHandler(cfg config.Config, d *db.DB) *KYCHandler {
 func (h *KYCHandler) Start() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		if h.didit == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "kyc_not_configured", "message": "DIDIT_API_KEY and DIDIT_WORKFLOW_ID must be set"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "kyc_not_configured", "DIDIT_API_KEY and DIDIT_WORKFLOW_ID must be set")
 		}
 		if h.cfg.DiditWorkflowID == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "kyc_not_configured", "message": "DIDIT_WORKFLOW_ID must be set"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "kyc_not_configured", "DIDIT_WORKFLOW_ID must be set")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		// Check if user already has an active KYC session
@@ -140,7 +141,7 @@ FROM users
 WHERE id = $1
 `, userID).Scan(&existingSessionID, &existingStatus)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "user_lookup_failed", "")
 		}
 
 		// Only allow new session if:
@@ -323,19 +324,19 @@ func (h *KYCHandler) Status() fiber.Handler {
 
 		if h.db == nil || h.db.Pool == nil {
 			slog.Error("db not configured in kyc status handler")
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		if sub == "" {
 			slog.Error("no user id in context")
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		userID, err := uuid.Parse(sub)
 		if err != nil {
 			slog.Error("failed to parse user id", "sub", sub, "error", err)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		slog.Info("fetching kyc status from database", "user_id", userID)

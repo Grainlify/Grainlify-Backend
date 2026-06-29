@@ -14,16 +14,16 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/migrations"
 )
 
 // NeedsMigration checks if migrations are needed by comparing the current database version
 // with available migrations. Returns true if migrations are needed, false otherwise.
 // This function queries the database directly to avoid acquiring locks.
-func NeedsMigration(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+func NeedsMigration(ctx context.Context, pool db.DBPool) (bool, error) {
 	if pool == nil {
 		return false, fmt.Errorf("db pool is nil")
 	}
@@ -124,7 +124,7 @@ func getLatestMigrationVersion(src source.Driver) (uint, error) {
 	return latestVersion, nil
 }
 
-func Up(ctx context.Context, pool *pgxpool.Pool) error {
+func Up(ctx context.Context, pool db.DBPool) error {
 	if pool == nil {
 		return fmt.Errorf("db pool is nil")
 	}
@@ -304,6 +304,66 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	return nil
+}
+
+// Down rolls back all applied migrations using the embedded migration files.
+// It is the inverse of Up and is intended for use in tests and incident recovery.
+func Down(ctx context.Context, pool db.DBPool) error {
+	m, closer, err := newMigrator(pool)
+	if err != nil {
+		return err
+	}
+	defer closer()
+	_ = ctx
+	if err := m.Down(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate down: %w", err)
+	}
+	return nil
+}
+
+// Steps runs n migration steps. Positive n migrates up; negative n migrates down.
+// It wraps golang-migrate's Steps using the same embedded iofs source.
+func Steps(ctx context.Context, pool db.DBPool, n int) error {
+	m, closer, err := newMigrator(pool)
+	if err != nil {
+		return err
+	}
+	defer closer()
+	_ = ctx
+	if err := m.Steps(n); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate steps(%d): %w", n, err)
+	}
+	return nil
+}
+
+// newMigrator creates a golang-migrate instance backed by the embedded migrations FS.
+// The caller must invoke the returned closer to release resources.
+func newMigrator(pool db.DBPool) (*migrate.Migrate, func(), error) {
+	if pool == nil {
+		return nil, nil, fmt.Errorf("db pool is nil")
+	}
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		return nil, nil, fmt.Errorf("open embedded migrations: %w", err)
+	}
+	sqlDB := stdlib.OpenDB(*pool.Config().ConnConfig)
+	dbDriver, err := postgres.WithInstance(sqlDB, &postgres.Config{
+		MigrationsTable: "schema_migrations",
+	})
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, nil, fmt.Errorf("create postgres driver: %w", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "postgres", dbDriver)
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, nil, fmt.Errorf("create migrator: %w", err)
+	}
+	closer := func() {
+		_, _ = m.Close()
+		_ = sqlDB.Close()
+	}
+	return m, closer, nil
 }
 
 // contains checks if a string contains a substring (case-insensitive)
