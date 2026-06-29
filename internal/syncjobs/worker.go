@@ -16,6 +16,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type Worker struct {
@@ -72,17 +73,33 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
+	depth := time.NewTicker(15 * time.Second)
+	defer depth.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-depth.C:
+			w.refreshQueueDepth(ctx)
 		case <-t.C:
 			if err := w.processOne(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				slog.Error("sync worker error", "error", err)
 			}
 		}
 	}
+}
+
+// refreshQueueDepth queries the pending sync_jobs count and updates the gauge.
+func (w *Worker) refreshQueueDepth(ctx context.Context) {
+	var n float64
+	if err := w.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sync_jobs WHERE status = 'pending'`,
+	).Scan(&n); err != nil {
+		slog.Warn("failed to refresh sync_jobs queue depth metric", "error", err)
+		return
+	}
+	metrics.SyncJobsQueueDepth.Set(n)
 }
 
 func (w *Worker) processOne(ctx context.Context) error {
@@ -126,6 +143,12 @@ WHERE id = $1
 	attemptDelta := 0
 	if state.incrementAttempts {
 		attemptDelta = 1
+	}
+	switch state.status {
+	case "completed":
+		metrics.SyncJobsProcessed.Inc()
+	case "failed":
+		metrics.SyncJobsFailed.Inc()
 	}
 
 	completeCtx, cancel := jobCompletionContext(ctx, 5*time.Second)
