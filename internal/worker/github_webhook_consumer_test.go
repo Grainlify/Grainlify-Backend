@@ -143,12 +143,14 @@ type ackTrackingMsg struct {
 type recordingIngestor struct {
 	called bool
 	ctx    context.Context
+	count  int
 	err    error
 }
 
 func (r *recordingIngestor) Ingest(ctx context.Context, _ events.GitHubWebhookReceived) error {
 	r.called = true
 	r.ctx = ctx
+	r.count++
 	return r.err
 }
 
@@ -165,4 +167,76 @@ func (i *idempotentIngestor) Ingest(_ context.Context, e events.GitHubWebhookRec
 	}
 	i.seen[e.DeliveryID] = true
 	return nil
+}
+
+func makeWebhookMsg(t *testing.T, deliveryID, event string) *nats.Msg {
+	t.Helper()
+	payload, err := json.Marshal(events.GitHubWebhookReceived{
+		DeliveryID: deliveryID,
+		Event:      event,
+		Payload:    json.RawMessage(`{"action":"opened"}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal webhook event: %v", err)
+	}
+	return &nats.Msg{Data: payload}
+}
+
+// Duplicate X-GitHub-Delivery ID must be discarded — Ingest called only once.
+func TestGitHubWebhookConsumer_DeduplicatesByDeliveryID(t *testing.T) {
+	ingestor := &recordingIngestor{}
+	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
+	ctx := context.Background()
+
+	msg := makeWebhookMsg(t, "dup-delivery-1", "issues")
+	consumer.handleMessage(ctx, msg)
+	consumer.handleMessage(ctx, msg) // exact duplicate
+
+	if ingestor.count != 1 {
+		t.Errorf("expected Ingest called once, got %d", ingestor.count)
+	}
+}
+
+// Different delivery IDs must each be processed.
+func TestGitHubWebhookConsumer_DistinctDeliveryIDsAreEachProcessed(t *testing.T) {
+	ingestor := &recordingIngestor{}
+	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
+	ctx := context.Background()
+
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "delivery-A", "issues"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "delivery-B", "push"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "delivery-C", "pull_request"))
+
+	if ingestor.count != 3 {
+		t.Errorf("expected Ingest called 3 times, got %d", ingestor.count)
+	}
+}
+
+// An empty DeliveryID must never be de-duplicated (pass-through always).
+func TestGitHubWebhookConsumer_EmptyDeliveryIDAlwaysForwarded(t *testing.T) {
+	ingestor := &recordingIngestor{}
+	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
+	ctx := context.Background()
+
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "", "issues"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "", "issues"))
+
+	if ingestor.count != 2 {
+		t.Errorf("empty delivery ID must not be de-duplicated, got count=%d", ingestor.count)
+	}
+}
+
+// markSeen must be goroutine-safe (no data race).
+func TestGitHubWebhookConsumer_MarkSeenIsConcurrentlySafe(t *testing.T) {
+	consumer := &GitHubWebhookConsumer{}
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func(n int) {
+			consumer.markSeen("delivery-concurrent")
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
 }
