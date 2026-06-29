@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
@@ -217,35 +218,35 @@ type nonceRequest struct {
 func (h *AuthHandler) Nonce() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		var req nonceRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		if len(req.WalletType) > MaxWalletTypeLength {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_wallet_type", "")
 		}
 
 		wType, err := auth.NormalizeWalletType(req.WalletType)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_wallet_type", "")
 		}
 
 		if !isValidAddress(wType, req.Address) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_address", "")
 		}
 
 		addr, err := auth.NormalizeAddress(wType, req.Address)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_address", "")
 		}
 
 		n, err := auth.CreateNonce(c.Context(), h.db.Pool, wType, addr, 10*time.Minute)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "nonce_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "nonce_create_failed", "")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -267,54 +268,54 @@ type verifyRequest struct {
 func (h *AuthHandler) Verify() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		if h.cfg.JWTSecret == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "jwt_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "jwt_not_configured", "")
 		}
 
 		var req verifyRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		if len(req.WalletType) > MaxWalletTypeLength {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_wallet_type", "")
 		}
 
 		wType, err := auth.NormalizeWalletType(req.WalletType)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_wallet_type"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_wallet_type", "")
 		}
 
 		if !isValidAddress(wType, req.Address) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_address", "")
 		}
 
 		addr, err := auth.NormalizeAddress(wType, req.Address)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_address"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_address", "")
 		}
 
 		if req.Nonce == "" || req.Signature == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_nonce_or_signature"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "missing_nonce_or_signature", "")
 		}
 
 		if !isValidNonce(req.Nonce) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_nonce"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_nonce", "")
 		}
 
 		if !isValidSignature(wType, req.Signature) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_signature"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_signature", "")
 		}
 
 		if wType == auth.WalletTypeStellarEd25519 || wType == auth.WalletTypeStellarSecp256k1 {
 			if !isValidPublicKey(wType, req.PublicKey) {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_public_key"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_public_key", "")
 			}
 		} else {
 			if req.PublicKey != "" && !isValidPublicKey(wType, req.PublicKey) {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_public_key"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_public_key", "")
 			}
 		}
 
@@ -332,20 +333,20 @@ func (h *AuthHandler) Verify() fiber.Handler {
 			}
 		}
 		if !sigOK {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_signature", "")
 		}
 
 		res, err := auth.ConsumeNonceAndUpsertUser(c.Context(), h.db.Pool, wType, addr, req.Nonce, req.PublicKey)
 		if err != nil {
 			if err.Error() == "invalid_or_expired_nonce" {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_or_expired_nonce"})
+				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_or_expired_nonce", "")
 			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "auth_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "auth_failed", "")
 		}
 
 		token, err := auth.IssueJWT(h.cfg.JWTSecret, res.User.ID, res.User.Role, res.Wallet.WalletType, res.Wallet.Address, 15*time.Minute)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "token_issue_failed", "")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -362,14 +363,14 @@ func (h *AuthHandler) Verify() fiber.Handler {
 func (h *AuthHandler) Me() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		userIDStr, _ := c.Locals(auth.LocalUserID).(string)
 		role, _ := c.Locals(auth.LocalRole).(string)
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		// Get user profile fields from database
@@ -531,19 +532,19 @@ WHERE user_id = $1
 func (h *AuthHandler) ResyncGitHubProfile() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		userIDStr, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		// Get GitHub access token
 		linkedAccount, err := github.GetLinkedAccount(c.Context(), h.db.Pool, userID, h.cfg.TokenEncKeyB64)
 		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "github_not_linked"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "github_not_linked", "")
 		}
 
 		// Fetch fresh GitHub user profile
@@ -551,7 +552,7 @@ func (h *AuthHandler) ResyncGitHubProfile() fiber.Handler {
 		ghUser, err := gh.GetUser(c.Context(), linkedAccount.AccessToken)
 		if err != nil {
 			slog.Error("failed to fetch GitHub user", "error", err, "user_id", userID)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "github_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_fetch_failed", "")
 		}
 
 		// Get primary email from GitHub
@@ -569,7 +570,7 @@ WHERE user_id = $3
 `, ghUser.Login, ghUser.AvatarURL, userID)
 		if err != nil {
 			slog.Error("failed to update github_accounts", "error", err, "user_id", userID)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "update_failed", "")
 		}
 
 		// Return fresh GitHub data
