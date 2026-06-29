@@ -306,6 +306,66 @@ func Up(ctx context.Context, pool db.DBPool) error {
 	return nil
 }
 
+// Down rolls back all applied migrations using the embedded migration files.
+// It is the inverse of Up and is intended for use in tests and incident recovery.
+func Down(ctx context.Context, pool db.DBPool) error {
+	m, closer, err := newMigrator(pool)
+	if err != nil {
+		return err
+	}
+	defer closer()
+	_ = ctx
+	if err := m.Down(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate down: %w", err)
+	}
+	return nil
+}
+
+// Steps runs n migration steps. Positive n migrates up; negative n migrates down.
+// It wraps golang-migrate's Steps using the same embedded iofs source.
+func Steps(ctx context.Context, pool db.DBPool, n int) error {
+	m, closer, err := newMigrator(pool)
+	if err != nil {
+		return err
+	}
+	defer closer()
+	_ = ctx
+	if err := m.Steps(n); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("migrate steps(%d): %w", n, err)
+	}
+	return nil
+}
+
+// newMigrator creates a golang-migrate instance backed by the embedded migrations FS.
+// The caller must invoke the returned closer to release resources.
+func newMigrator(pool db.DBPool) (*migrate.Migrate, func(), error) {
+	if pool == nil {
+		return nil, nil, fmt.Errorf("db pool is nil")
+	}
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		return nil, nil, fmt.Errorf("open embedded migrations: %w", err)
+	}
+	sqlDB := stdlib.OpenDB(*pool.Config().ConnConfig)
+	dbDriver, err := postgres.WithInstance(sqlDB, &postgres.Config{
+		MigrationsTable: "schema_migrations",
+	})
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, nil, fmt.Errorf("create postgres driver: %w", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "postgres", dbDriver)
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, nil, fmt.Errorf("create migrator: %w", err)
+	}
+	closer := func() {
+		_, _ = m.Close()
+		_ = sqlDB.Close()
+	}
+	return m, closer, nil
+}
+
 // contains checks if a string contains a substring (case-insensitive)
 func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))

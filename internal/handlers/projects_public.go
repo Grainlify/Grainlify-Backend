@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
@@ -97,7 +98,7 @@ func (h *ProjectsPublicHandler) Get() fiber.Handler {
 		)
 
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		projectID, err := uuid.Parse(projectIDParam)
@@ -107,7 +108,7 @@ func (h *ProjectsPublicHandler) Get() fiber.Handler {
 				"error", err,
 				"request_id", c.Locals("requestid"),
 			)
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
 		// Load project from DB (verified + not deleted)
@@ -162,10 +163,10 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 			&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug,
 		)
 		if err == pgx.ErrNoRows {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_lookup_failed", "")
 		}
 
 		// Parse tags JSONB
@@ -205,7 +206,7 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 					"github_full_name", fullName,
 					"error", repoErr,
 				)
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_accessible"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "project_not_accessible", "")
 			}
 			slog.Warn("failed to fetch repo metadata from GitHub",
 				"project_id", projectID,
@@ -219,7 +220,7 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 					"project_id", projectID,
 					"github_full_name", fullName,
 				)
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_accessible"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "project_not_accessible", "")
 			}
 			repo = r
 			repoOK = true
@@ -302,11 +303,11 @@ WHERE id=$1
 func (h *ProjectsPublicHandler) IssuesPublic() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		projectID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
 		// Ensure project is verified and not deleted
@@ -316,7 +317,7 @@ SELECT EXISTS(
   SELECT 1 FROM projects WHERE id=$1 AND status='verified' AND deleted_at IS NULL
 )
 `, projectID).Scan(&ok); err != nil || !ok {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 
 		p, err := ParsePagination(c, 20, 100)
@@ -333,7 +334,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -347,7 +348,7 @@ LIMIT $2 OFFSET $3
 			var updated *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &body, &author, &url, &labelsJSON, &updated, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 			}
 
 			var labels []any
@@ -385,11 +386,11 @@ SELECT COUNT(*) FROM github_issues WHERE project_id = $1
 func (h *ProjectsPublicHandler) PRsPublic() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		projectID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
 		var ok bool
@@ -398,7 +399,7 @@ SELECT EXISTS(
   SELECT 1 FROM projects WHERE id=$1 AND status='verified' AND deleted_at IS NULL
 )
 `, projectID).Scan(&ok); err != nil || !ok {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 
 		p, err := ParsePagination(c, 20, 100)
@@ -416,7 +417,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -429,7 +430,7 @@ LIMIT $2 OFFSET $3
 			var createdAt, updated, closedAt, mergedAt *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &author, &url, &merged, &createdAt, &updated, &closedAt, &mergedAt, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"github_pr_id": gid,
@@ -470,7 +471,7 @@ SELECT COUNT(*) FROM github_pull_requests WHERE project_id = $1
 func (h *ProjectsPublicHandler) List() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Parse query parameters
@@ -586,7 +587,7 @@ LIMIT $%d OFFSET $%d
 
 		rows, err := h.db.Pool.Query(c.Context(), query, args...)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -673,7 +674,7 @@ WHERE %s
 func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		p, err := ParsePagination(c, 8, 20)
@@ -723,7 +724,7 @@ LIMIT $1 OFFSET $2
 `
 		rows, err := h.db.Pool.Query(c.Context(), query, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "recommended_projects_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
 		}
 		defer rows.Close()
 
@@ -740,7 +741,7 @@ LIMIT $1 OFFSET $2
 			var ecosystemName, ecosystemSlug *string
 
 			if err := rows.Scan(&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount, &createdAt, &updatedAt, &ecosystemName, &ecosystemSlug); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "recommended_projects_scan_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_scan_failed", "")
 			}
 
 			var tags []string
@@ -795,7 +796,7 @@ WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = fals
 func (h *ProjectsPublicHandler) FilterOptions() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get distinct languages (only from projects that completed setup / appear on Browse; exclude private)
@@ -806,7 +807,7 @@ WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND 
 ORDER BY language
 `)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "filter_options_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
 		}
 		defer langRows.Close()
 
@@ -826,7 +827,7 @@ WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND 
 ORDER BY category
 `)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "filter_options_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
 		}
 		defer catRows.Close()
 
@@ -846,7 +847,7 @@ WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND 
 ORDER BY tag
 `)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "filter_options_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
 		}
 		defer tagRows.Close()
 
