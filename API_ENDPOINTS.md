@@ -1,5 +1,40 @@
 # API Endpoints
 
+## Error Envelope
+
+All error responses share a consistent JSON envelope produced by the `httpx.RespondError` helper.
+
+### Shape
+
+```json
+{
+  "error": {
+    "code":       "<machine_readable_snake_case_code>",
+    "message":    "<human_readable_message>",
+    "request_id": "<value of X-Request-Id set by requestid middleware>"
+  }
+}
+```
+
+| Field        | Type   | Notes                                                                 |
+|--------------|--------|-----------------------------------------------------------------------|
+| `code`       | string | Machine-readable snake_case identifier (e.g. `invalid_json`)         |
+| `message`    | string | Human-readable description; may be empty for some codes              |
+| `request_id` | string | Echoes the `X-Request-Id` header for log correlation; empty if unset |
+
+### Security notes
+
+- 5xx responses surface only an opaque `code` and `message`; raw database or upstream errors are written to server logs only and never exposed in the response body.
+- The `request_id` field is always present (empty string when the `requestid` middleware is not active).
+
+### Helper usage
+
+```go
+return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+```
+
+---
+
 ## HTTP rate limiting
 
 The API now applies configurable rate limits at the HTTP layer for abuse-prone routes.
