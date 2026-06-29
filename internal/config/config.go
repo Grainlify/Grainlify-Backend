@@ -33,6 +33,20 @@ type Config struct {
 
 	NATSURL string
 
+	// JetStream configuration for durable GitHub webhook event delivery.
+	// JetStreamEnabled enables JetStream-backed publishing and consumption (JS_ENABLED, default false).
+	JetStreamEnabled bool
+	// JetStreamStreamName is the name of the JetStream stream (JS_STREAM_NAME, default "GITHUB_WEBHOOKS").
+	JetStreamStreamName string
+	// JetStreamConsumerName is the durable consumer name (JS_CONSUMER_NAME, default "grainlify-workers").
+	JetStreamConsumerName string
+	// JetStreamMaxDeliver is the maximum number of delivery attempts before dead-lettering (JS_MAX_DELIVER, default 5).
+	JetStreamMaxDeliver int
+	// JetStreamAckWait is how long the server waits for an ack before redelivering (JS_ACK_WAIT, default 30s).
+	JetStreamAckWait time.Duration
+	// JetStreamMaxAge is the maximum age of messages retained in the stream (JS_MAX_AGE, default 24h).
+	JetStreamMaxAge time.Duration
+
 	GitHubOAuthClientID           string
 	GitHubOAuthClientSecret       string
 	GitHubOAuthRedirectURL        string // Full callback URL (e.g., http://localhost:8080/auth/github/login/callback)
@@ -128,6 +142,13 @@ func Load() Config {
 		JWTSecret: getEnv("JWT_SECRET", ""),
 
 		NATSURL: getEnv("NATS_URL", ""),
+
+		JetStreamEnabled:      getEnvBool("JS_ENABLED", false),
+		JetStreamStreamName:   getEnv("JS_STREAM_NAME", "GITHUB_WEBHOOKS"),
+		JetStreamConsumerName: getEnv("JS_CONSUMER_NAME", "grainlify-workers"),
+		JetStreamMaxDeliver:   getEnvInt("JS_MAX_DELIVER", 5),
+		JetStreamAckWait:      getEnvDuration("JS_ACK_WAIT", 30*time.Second),
+		JetStreamMaxAge:       getEnvDuration("JS_MAX_AGE", 24*time.Hour),
 
 		GitHubOAuthClientID:           getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
 		GitHubOAuthClientSecret:       getEnv("GITHUB_OAUTH_CLIENT_SECRET", ""),
