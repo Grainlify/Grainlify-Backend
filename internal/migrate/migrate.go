@@ -14,16 +14,16 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/migrations"
 )
 
 // NeedsMigration checks if migrations are needed by comparing the current database version
 // with available migrations. Returns true if migrations are needed, false otherwise.
 // This function queries the database directly to avoid acquiring locks.
-func NeedsMigration(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+func NeedsMigration(ctx context.Context, pool db.DBPool) (bool, error) {
 	if pool == nil {
 		return false, fmt.Errorf("db pool is nil")
 	}
@@ -124,7 +124,7 @@ func getLatestMigrationVersion(src source.Driver) (uint, error) {
 	return latestVersion, nil
 }
 
-func Up(ctx context.Context, pool *pgxpool.Pool) error {
+func Up(ctx context.Context, pool db.DBPool) error {
 	if pool == nil {
 		return fmt.Errorf("db pool is nil")
 	}

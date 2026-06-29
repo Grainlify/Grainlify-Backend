@@ -7,13 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 )
 
 type GitHubWebhookIngestor struct {
-	Pool *pgxpool.Pool
+	Pool db.DBPool
 }
 
 func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebhookReceived) error {

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,8 +19,19 @@ type PoolConfig struct {
 	MaxConnIdleTime time.Duration
 }
 
+// DBPool defines the database query interface for mockability.
+type DBPool interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	Ping(ctx context.Context) error
+	Close()
+	Config() *pgxpool.Config
+}
+
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool DBPool
 }
 
 // parsePgxConfig wraps pgxpool.ParseConfig for testability.
