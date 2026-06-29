@@ -47,6 +47,11 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	if err := cfg.Validate(); err != nil {
+		slog.Error("startup config validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	// Log configuration (mask sensitive values)
 	slog.Info("configuration loaded", "step", "3", "action", "configuration_loaded",
 		"env", cfg.Env,

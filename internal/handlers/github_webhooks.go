@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/ingest"
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type GitHubWebhooksHandler struct {
@@ -80,6 +81,7 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 			"event", event,
 			"body_size_bytes", bodySize,
 		)
+		metrics.WebhooksReceived.Inc()
 
 		// Log first 500 chars of body for debugging (truncate if too long)
 		bodyPreview := string(body)
@@ -168,6 +170,7 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 				)
 			} else {
 				if pubErr := h.bus.Publish(c.Context(), events.SubjectGitHubWebhookReceived, b); pubErr != nil {
+					metrics.NATSPublishFailures.Inc()
 					slog.Error("Failed to publish webhook event to NATS",
 						"delivery_id", delivery,
 						"error", pubErr,
