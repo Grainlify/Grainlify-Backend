@@ -82,6 +82,10 @@ type Config struct {
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
 
+	// MetricsToken is the bearer token required to access /metrics. If empty, the endpoint
+	// is unauthenticated — only acceptable when /metrics is firewalled at the network level.
+	MetricsToken string
+
 	// RateLimitAuthPerMin is the per-minute limit for auth and webhook endpoints.
 	// Controlled by RATE_LIMIT_AUTH_PER_MIN, default 60 requests/minute.
 	RateLimitAuthPerMin int
@@ -161,6 +165,7 @@ func Load() Config {
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
 		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
 		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
+		MetricsToken:          strings.TrimSpace(getEnv("METRICS_TOKEN", "")),
 	}
 }
 
