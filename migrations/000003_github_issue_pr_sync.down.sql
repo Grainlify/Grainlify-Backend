@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_sync_jobs_project;
+DROP INDEX IF EXISTS idx_sync_jobs_pending;
+DROP TABLE IF EXISTS sync_jobs;
+DROP INDEX IF EXISTS idx_github_prs_project;
+DROP TABLE IF EXISTS github_pull_requests;
+DROP INDEX IF EXISTS idx_github_issues_project;
+DROP TABLE IF EXISTS github_issues;
+DROP INDEX IF EXISTS idx_github_events_repo;
+DROP INDEX IF EXISTS idx_github_events_project;
+DROP TABLE IF EXISTS github_events;
