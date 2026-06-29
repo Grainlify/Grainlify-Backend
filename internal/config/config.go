@@ -97,6 +97,13 @@ type Config struct {
 	ProgramEscrowContractID  string
 	TokenContractID          string
 
+	// SyncJobsMaxAttempts is the maximum number of attempts before a sync job is dead-lettered.
+	// Controlled by SYNC_JOBS_MAX_ATTEMPTS, default 5.
+	SyncJobsMaxAttempts int
+	// SyncJobsBackoffBase is the base duration for exponential backoff between retries.
+	// Controlled by SYNC_JOBS_BACKOFF_BASE, default 30s.
+	SyncJobsBackoffBase time.Duration
+
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
 
@@ -185,6 +192,9 @@ func Load() Config {
 		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
+
+		SyncJobsMaxAttempts: getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
+		SyncJobsBackoffBase: getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
