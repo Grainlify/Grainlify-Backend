@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
 
 type EcosystemsAdminHandler struct {
@@ -24,7 +25,7 @@ func NewEcosystemsAdminHandler(d *db.DB) *EcosystemsAdminHandler {
 func (h *EcosystemsAdminHandler) List() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -51,7 +52,7 @@ ORDER BY e.created_at DESC
 LIMIT 200
 `)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystems_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystems_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -65,7 +66,7 @@ LIMIT 200
 			var projectCnt int64
 			var userCnt int64
 			if err := rows.Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &about, &linksJSON, &keyAreasJSON, &technologiesJSON, &projectCnt, &userCnt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystems_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystems_list_failed", "")
 			}
 			var links, keyAreas, technologies interface{}
 			if len(linksJSON) > 0 {
@@ -104,11 +105,11 @@ LIMIT 200
 func (h *EcosystemsAdminHandler) GetByID() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		ecoID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_ecosystem_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_ecosystem_id", "")
 		}
 		var id uuid.UUID
 		var slug, name, status string
@@ -123,9 +124,9 @@ WHERE e.id = $1
 `, ecoID).Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &about, &linksJSON, &keyAreasJSON, &technologiesJSON)
 		if err != nil {
 			if err.Error() == "no rows in result set" {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ecosystem_not_found"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "ecosystem_not_found", "")
 			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_lookup_failed", "")
 		}
 		var links, keyAreas, technologies interface{}
 		if len(linksJSON) > 0 {
@@ -175,27 +176,27 @@ type ecosystemUpsertRequest struct {
 func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		var req ecosystemUpsertRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 		name := strings.TrimSpace(req.Name)
 		if name == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name_required"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "name_required", "")
 		}
 		// Auto-generate slug from name (users never see/type slug)
 		slug := normalizeSlug(name)
 		if slug == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name_must_contain_valid_characters"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "name_must_contain_valid_characters", "")
 		}
 		status := strings.TrimSpace(req.Status)
 		if status == "" {
 			status = "active"
 		}
 		if status != "active" && status != "inactive" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_status"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_status", "")
 		}
 
 		linksJSON := req.Links
@@ -218,7 +219,7 @@ VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), $6, NULLIF($7,''), 
 RETURNING id
 `, slug, name, strings.TrimSpace(req.Description), strings.TrimSpace(req.WebsiteURL), strings.TrimSpace(req.LogoURL), status, strings.TrimSpace(req.About), linksJSON, keyAreasJSON, technologiesJSON).Scan(&id)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_create_failed", "")
 		}
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id.String()})
 	}
@@ -227,22 +228,22 @@ RETURNING id
 func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		ecoID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_ecosystem_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_ecosystem_id", "")
 		}
 		var req ecosystemUpsertRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		name := strings.TrimSpace(req.Name)
 		status := strings.TrimSpace(req.Status)
 
 		if status != "" && status != "active" && status != "inactive" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_status"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_status", "")
 		}
 
 		// Auto-generate slug from name if name is provided
@@ -250,7 +251,7 @@ func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 		if name != "" {
 			slug := normalizeSlug(name)
 			if slug == "" {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name_must_contain_valid_characters"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "name_must_contain_valid_characters", "")
 			}
 			slugVal = &slug
 		}
@@ -285,10 +286,10 @@ SET slug = COALESCE($2, slug),
 WHERE id = $1
 `, ecoID, slugVal, name, strings.TrimSpace(req.Description), strings.TrimSpace(req.WebsiteURL), strings.TrimSpace(req.LogoURL), status, aboutVal, linksJSON, keyAreasJSON, technologiesJSON)
 		if errors.Is(err, pgx.ErrNoRows) || ct.RowsAffected() == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ecosystem_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "ecosystem_not_found", "")
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_update_failed", "")
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
@@ -297,28 +298,28 @@ WHERE id = $1
 func (h *EcosystemsAdminHandler) Delete() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		ecoID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_ecosystem_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_ecosystem_id", "")
 		}
 
 		// Check if ecosystem has any projects
 		var projectCount int64
 		if err := h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(*) FROM projects WHERE ecosystem_id = $1`, ecoID).Scan(&projectCount); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_delete_check_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_delete_check_failed", "")
 		}
 		if projectCount > 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ecosystem_has_projects", "message": "Cannot delete ecosystem with existing projects"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "ecosystem_has_projects", "Cannot delete ecosystem with existing projects")
 		}
 
 		ct, err := h.db.Pool.Exec(c.Context(), `DELETE FROM ecosystems WHERE id = $1`, ecoID)
 		if errors.Is(err, pgx.ErrNoRows) || ct.RowsAffected() == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ecosystem_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "ecosystem_not_found", "")
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_delete_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_delete_failed", "")
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
