@@ -343,7 +343,9 @@ func TestAPIIntegration(t *testing.T) {
 				var res map[string]any
 				err := json.Unmarshal(body, &res)
 				require.NoError(t, err)
-				assert.Equal(t, "project_not_found", res["error"])
+				errObj, ok := res["error"].(map[string]any)
+				require.True(t, ok, "expected nested error envelope, got %#v", res["error"])
+				assert.Equal(t, "project_not_found", errObj["code"])
 			},
 		},
 		{

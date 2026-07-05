@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,9 +16,20 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/stretchr/testify/assert"
 )
+
+// decodeErrorCode reads a standard httpx.ErrorEnvelope JSON body and returns
+// the machine-readable error code nested under "error.code".
+func decodeErrorCode(t *testing.T, body []byte) string {
+	t.Helper()
+	var env httpx.ErrorEnvelope
+	err := json.Unmarshal(body, &env)
+	assert.NoError(t, err)
+	return env.Error.Code
+}
 
 func getTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -184,19 +196,17 @@ func TestNonceValidation(t *testing.T) {
 				// which means it passed early handler input validation.
 				if os.Getenv("TEST_DB_URL") == "" {
 					assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
-					var body map[string]string
-					err := json.NewDecoder(resp.Body).Decode(&body)
+					b, err := io.ReadAll(resp.Body)
 					assert.NoError(t, err)
-					assert.Equal(t, "nonce_create_failed", body["error"])
+					assert.Equal(t, "nonce_create_failed", decodeErrorCode(t, b))
 				} else {
 					assert.Equal(t, http.StatusOK, resp.StatusCode)
 				}
 			} else {
 				assert.Equal(t, tt.wantStatus, resp.StatusCode)
-				var body map[string]string
-				err := json.NewDecoder(resp.Body).Decode(&body)
+				b, err := io.ReadAll(resp.Body)
 				assert.NoError(t, err)
-				assert.Equal(t, tt.wantError, body["error"])
+				assert.Equal(t, tt.wantError, decodeErrorCode(t, b))
 			}
 		})
 	}
@@ -351,10 +361,9 @@ func TestVerifyValidation(t *testing.T) {
 			defer resp.Body.Close()
 
 			assert.Equal(t, tt.wantStatus, resp.StatusCode)
-			var body map[string]string
-			err = json.NewDecoder(resp.Body).Decode(&body)
+			b, err = io.ReadAll(resp.Body)
 			assert.NoError(t, err)
-			assert.Equal(t, tt.wantError, body["error"])
+			assert.Equal(t, tt.wantError, decodeErrorCode(t, b))
 		})
 	}
 }

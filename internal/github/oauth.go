@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-const tokenEndpoint = "https://github.com/login/oauth/access_token"
+// tokenEndpoint is a var (not const) so tests can override it to point at a
+// local httptest server.
+var tokenEndpoint = "https://github.com/login/oauth/access_token"
 
 // OAuthConfig holds the configuration for GitHub OAuth authentication.
 // ClientID and ClientSecret are obtained from GitHub OAuth app settings.
