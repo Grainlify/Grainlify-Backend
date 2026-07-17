@@ -20,6 +20,18 @@ func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebho
 		return nil
 	}
 
+	if e.DeliveryID != "" {
+		tag, err := i.Pool.Exec(ctx, `
+INSERT INTO webhook_delivery_dedup (delivery_id) VALUES ($1)
+ON CONFLICT (delivery_id) DO NOTHING
+`, e.DeliveryID)
+		if err != nil {
+			slog.Warn("failed to check delivery dedup", "delivery_id", e.DeliveryID, "error", err)
+		} else if tag.RowsAffected() == 0 {
+			return nil
+		}
+	}
+
 	// Parse minimal envelope for mapping to project and snapshot upserts.
 	var env ghWebhookEnvelope
 	_ = json.Unmarshal(e.Payload, &env)
@@ -263,6 +275,17 @@ type ghInstallationPayload struct {
 
 type ghInstallationInfo struct {
 	ID json.Number `json:"id"` // GitHub returns installation ID as a number
+}
+
+// CleanupDedup deletes dedup records older than the given retention duration.
+func (i *GitHubWebhookIngestor) CleanupDedup(ctx context.Context, retention time.Duration) error {
+	if i == nil || i.Pool == nil {
+		return nil
+	}
+	_, err := i.Pool.Exec(ctx, `
+DELETE FROM webhook_delivery_dedup WHERE created_at < now() - make_interval(secs => $1)
+`, int64(retention.Seconds()))
+	return err
 }
 
 func nullIfEmpty(s string) any {
