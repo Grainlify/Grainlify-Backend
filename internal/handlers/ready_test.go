@@ -396,5 +396,3 @@ func searchSubstring(s, substr string) bool {
 
 // Ensure mockBusReady satisfies bus.Bus interface at compile time.
 var _ bus.Bus = (*mockBusReady)(nil)
-
-

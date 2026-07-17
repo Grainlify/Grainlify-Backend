@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -99,7 +101,7 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 				"delivery_id", delivery,
 				"event", event,
 			)
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook_secret_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "webhook_secret_not_configured", "")
 		}
 
 		slog.Info("GitHub webhook secret configured, proceeding with signature verification",
@@ -121,7 +123,7 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 				"signature_256_preview", sigPreview,
 				"body_size", bodySize,
 			)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_signature", "")
 		}
 
 		slog.Info("GitHub webhook signature verification SUCCESS",
@@ -255,7 +257,3 @@ type ghWebhookEnvelope struct {
 type ghRepoPayload struct {
 	FullName string `json:"full_name"`
 }
-
- 
-
-

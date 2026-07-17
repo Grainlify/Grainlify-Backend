@@ -180,10 +180,10 @@ func TestReceive_InvalidSignature_Returns401(t *testing.T) {
 
 	body := []byte(`{"action":"ping"}`)
 	resp := doRequest(app, body, map[string]string{
-		"Content-Type":            "application/json",
-		"X-GitHub-Event":          "ping",
-		"X-GitHub-Delivery":       "abc-2",
-		"X-Hub-Signature-256":     "sha256=deadbeef",
+		"Content-Type":        "application/json",
+		"X-GitHub-Event":      "ping",
+		"X-GitHub-Delivery":   "abc-2",
+		"X-Hub-Signature-256": "sha256=deadbeef",
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusUnauthorized {
@@ -198,10 +198,10 @@ func TestReceive_ValidSignature_PublishesToBus(t *testing.T) {
 
 	body := []byte(`{"action":"opened","repository":{"full_name":"acme/widget"}}`)
 	resp := doRequest(app, body, map[string]string{
-		"Content-Type":            "application/json",
-		"X-GitHub-Event":          "issues",
-		"X-GitHub-Delivery":       "del-123",
-		"X-Hub-Signature-256":     sign("secret", body),
+		"Content-Type":        "application/json",
+		"X-GitHub-Event":      "issues",
+		"X-GitHub-Delivery":   "del-123",
+		"X-Hub-Signature-256": sign("secret", body),
 	})
 	defer resp.Body.Close()
 

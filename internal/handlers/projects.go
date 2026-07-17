@@ -14,10 +14,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
-	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
 
 type ProjectsHandler struct {

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"fmt"
 	"log/slog"
 	"strings"
@@ -31,14 +33,14 @@ func NewUserProfileHandler(cfg config.Config, d *db.DB) *UserProfileHandler {
 func (h *UserProfileHandler) Profile() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get user ID from JWT
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		// Get user's GitHub login from github_accounts
@@ -79,7 +81,7 @@ SELECT
 `, *githubLogin).Scan(&contributionsCount)
 		if err != nil {
 			slog.Error("failed to count contributions", "error", err, "user_id", userID, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "contribution_count_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "contribution_count_failed", "")
 		}
 
 		// Get most active languages (top 10)
@@ -101,7 +103,7 @@ LIMIT 10
 `, *githubLogin)
 		if err != nil {
 			slog.Error("failed to fetch languages", "error", err, "user_id", userID, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "languages_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "languages_fetch_failed", "")
 		}
 		defer langRows.Close()
 
@@ -139,7 +141,7 @@ LIMIT 10
 `, *githubLogin)
 		if err != nil {
 			slog.Error("failed to fetch ecosystems", "error", err, "user_id", userID, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystems_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystems_fetch_failed", "")
 		}
 		defer ecoRows.Close()
 
@@ -313,7 +315,7 @@ WHERE p.status = 'verified'
 func (h *UserProfileHandler) ContributionCalendar() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		var githubLogin *string
@@ -327,7 +329,7 @@ func (h *UserProfileHandler) ContributionCalendar() fiber.Handler {
 			// Fetch by user_id
 			parsedUserID, err := uuid.Parse(userIDParam)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -342,7 +344,7 @@ WHERE user_id = $1
 			sub, _ := c.Locals(auth.LocalUserID).(string)
 			userID, err := uuid.Parse(sub)
 			if err != nil {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -393,7 +395,7 @@ ORDER BY date ASC
 `, *githubLogin, startDate, now)
 		if err != nil {
 			slog.Error("failed to fetch contribution calendar", "error", err, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "calendar_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "calendar_fetch_failed", "")
 		}
 		defer rows.Close()
 
@@ -454,7 +456,7 @@ ORDER BY date ASC
 func (h *UserProfileHandler) ContributionActivity() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get pagination parameters
@@ -475,7 +477,7 @@ func (h *UserProfileHandler) ContributionActivity() fiber.Handler {
 			// Fetch by user_id
 			parsedUserID, err := uuid.Parse(userIDParam)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -490,7 +492,7 @@ WHERE user_id = $1
 			sub, _ := c.Locals(auth.LocalUserID).(string)
 			userID, err := uuid.Parse(sub)
 			if err != nil {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -546,7 +548,7 @@ LIMIT $2 OFFSET $3
 `, *githubLogin, limit, offset)
 		if err != nil {
 			slog.Error("failed to fetch contribution activity", "error", err, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "activity_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "activity_fetch_failed", "")
 		}
 		defer rows.Close()
 
@@ -630,7 +632,7 @@ func (h *UserProfileHandler) ProjectsContributed() fiber.Handler {
 		}
 
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		var githubLogin *string
@@ -643,7 +645,7 @@ func (h *UserProfileHandler) ProjectsContributed() fiber.Handler {
 			// Fetch by user_id
 			parsedUserID, parseErr := uuid.Parse(userIDParam)
 			if parseErr != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -659,7 +661,7 @@ WHERE user_id = $1
 			sub, _ := c.Locals(auth.LocalUserID).(string)
 			userID, parseErr := uuid.Parse(sub)
 			if parseErr != nil {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
 			err = h.db.Pool.QueryRow(c.Context(), `
 SELECT login
@@ -706,7 +708,7 @@ LIMIT $2 OFFSET $3
 `, *githubLogin, p.Limit, p.Offset)
 		if err != nil {
 			slog.Error("failed to fetch contributed projects", "error", err, "github_login", *githubLogin)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_fetch_failed", "")
 		}
 		defer rows.Close()
 
@@ -773,7 +775,7 @@ LIMIT $2 OFFSET $3
 func (h *UserProfileHandler) ProjectsLed() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		userIDParam := c.Query("user_id")
@@ -783,7 +785,7 @@ func (h *UserProfileHandler) ProjectsLed() fiber.Handler {
 		if userIDParam != "" {
 			parsed, err := uuid.Parse(userIDParam)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
 			targetUserID = &parsed
 		} else if loginParam != "" {
@@ -799,7 +801,7 @@ SELECT user_id FROM github_accounts WHERE LOWER(login) = LOWER($1)
 			sub, _ := c.Locals(auth.LocalUserID).(string)
 			parsed, err := uuid.Parse(sub)
 			if err != nil {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
 			targetUserID = &parsed
 		}
@@ -813,7 +815,7 @@ ORDER BY p.github_full_name ASC
 `, *targetUserID)
 		if err != nil {
 			slog.Error("failed to fetch projects led", "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_led_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_led_fetch_failed", "")
 		}
 		defer rows.Close()
 
@@ -857,7 +859,7 @@ ORDER BY p.github_full_name ASC
 func (h *UserProfileHandler) PublicProfile() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get identifier from query params (user_id or login)
@@ -865,7 +867,7 @@ func (h *UserProfileHandler) PublicProfile() fiber.Handler {
 		loginParam := c.Query("login")
 
 		if userIDParam == "" && loginParam == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_identifier"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "missing_identifier", "")
 		}
 
 		var githubLogin *string
@@ -877,7 +879,7 @@ func (h *UserProfileHandler) PublicProfile() fiber.Handler {
 		if userIDParam != "" {
 			parsedUserID, err := uuid.Parse(userIDParam)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
 			userID = &parsedUserID
 
@@ -888,7 +890,7 @@ WHERE user_id = $1
 `, parsedUserID).Scan(&githubLogin)
 			if err != nil {
 				// User doesn't have GitHub account linked
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "user_not_found", "")
 			}
 
 			// Get profile fields
@@ -937,7 +939,7 @@ WHERE id = $1
 		}
 
 		if githubLogin == nil || *githubLogin == "" {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "user_not_found", "")
 		}
 
 		// Count total contributions (issues + PRs) for verified projects only
@@ -1221,14 +1223,14 @@ func calculateContributionLevel(count int, maxCount int) int {
 func (h *UserProfileHandler) UpdateProfile() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get user ID from JWT
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		var req struct {
@@ -1245,7 +1247,7 @@ func (h *UserProfileHandler) UpdateProfile() fiber.Handler {
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		// Build update query dynamically based on provided fields
@@ -1305,7 +1307,7 @@ func (h *UserProfileHandler) UpdateProfile() fiber.Handler {
 		}
 
 		if len(updates) == 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no_fields_to_update"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "no_fields_to_update", "")
 		}
 
 		// Always update updated_at
@@ -1321,7 +1323,7 @@ WHERE id = $%d
 		_, err = h.db.Pool.Exec(c.Context(), query, args...)
 		if err != nil {
 			slog.Error("failed to update user profile", "error", err, "user_id", userID)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "profile_update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "profile_update_failed", "")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "profile_updated"})
@@ -1332,14 +1334,14 @@ WHERE id = $%d
 func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Get user ID from JWT
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		var req struct {
@@ -1347,19 +1349,19 @@ func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		avatarURL := strings.TrimSpace(req.AvatarURL)
 		if avatarURL == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "avatar_url_required"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "avatar_url_required", "")
 		}
 
 		// Validate URL format (either http/https URL or data URL)
 		if !strings.HasPrefix(avatarURL, "http://") &&
 			!strings.HasPrefix(avatarURL, "https://") &&
 			!strings.HasPrefix(avatarURL, "data:image/") {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_avatar_url_format"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_avatar_url_format", "")
 		}
 
 		_, err = h.db.Pool.Exec(c.Context(), `
@@ -1369,7 +1371,7 @@ WHERE id = $2
 `, avatarURL, userID)
 		if err != nil {
 			slog.Error("failed to update user avatar", "error", err, "user_id", userID)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "avatar_update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "avatar_update_failed", "")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{

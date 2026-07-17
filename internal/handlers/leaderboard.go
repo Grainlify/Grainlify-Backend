@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"fmt"
 	"log/slog"
 
@@ -94,7 +96,7 @@ WHERE (
 func (h *LeaderboardHandler) Leaderboard() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		p, err := ParsePagination(c, 10, 100)
@@ -112,7 +114,7 @@ LIMIT $1 OFFSET $2
 			slog.Error("failed to fetch leaderboard",
 				"error", err,
 			)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "leaderboard_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "leaderboard_fetch_failed", "")
 		}
 		defer rows.Close()
 

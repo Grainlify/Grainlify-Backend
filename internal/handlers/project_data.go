@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"encoding/json"
 	"errors"
 	"time"
@@ -25,21 +27,21 @@ func NewProjectDataHandler(d *db.DB) *ProjectDataHandler {
 // Any authenticated user can read project issues/PRs/events (e.g. contributors browsing issues).
 func (h *ProjectDataHandler) projectIDForRead(c *fiber.Ctx) (uuid.UUID, error) {
 	if h.db == nil || h.db.Pool == nil {
-		return uuid.Nil, c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		return uuid.Nil, httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 	}
 	if _, ok := c.Locals(auth.LocalUserID).(string); !ok {
-		return uuid.Nil, c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		return uuid.Nil, httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 	}
 	projectID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return uuid.Nil, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+		return uuid.Nil, httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 	}
 	var exists bool
 	err = h.db.Pool.QueryRow(c.Context(), `
 SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL)
 `, projectID).Scan(&exists)
 	if err != nil || !exists {
-		return uuid.Nil, c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+		return uuid.Nil, httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 	}
 	return projectID, nil
 }
@@ -65,7 +67,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -80,7 +82,7 @@ LIMIT $2 OFFSET $3
 			var updated *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &body, &author, &url, &assigneesJSON, &labelsJSON, &commentsCount, &commentsJSON, &updated, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 			}
 
 			var assignees []any
@@ -146,7 +148,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -159,7 +161,7 @@ LIMIT $2 OFFSET $3
 			var createdAt, updated, closedAt, mergedAt *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &author, &url, &merged, &createdAt, &updated, &closedAt, &mergedAt, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"github_pr_id": gid,
@@ -209,7 +211,7 @@ ORDER BY received_at DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "events_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -220,7 +222,7 @@ LIMIT $2 OFFSET $3
 			var action *string
 			var receivedAt time.Time
 			if err := rows.Scan(&deliveryID, &event, &action, &receivedAt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "events_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"delivery_id": deliveryID,
@@ -243,32 +245,28 @@ SELECT COUNT(*) FROM github_events WHERE project_id = $1
 
 func (h *ProjectDataHandler) authorizeProject(c *fiber.Ctx) (uuid.UUID, bool, error) {
 	if h.db == nil || h.db.Pool == nil {
-		return uuid.Nil, false, c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		return uuid.Nil, false, httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 	}
 	sub, _ := c.Locals(auth.LocalUserID).(string)
 	userID, err := uuid.Parse(sub)
 	if err != nil {
-		return uuid.Nil, false, c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		return uuid.Nil, false, httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 	}
 	projectID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return uuid.Nil, false, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+		return uuid.Nil, false, httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 	}
 
 	var owner uuid.UUID
 	err = h.db.Pool.QueryRow(c.Context(), `SELECT owner_user_id FROM projects WHERE id = $1`, projectID).Scan(&owner)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+		return uuid.Nil, false, httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 	}
 	if err != nil {
-		return uuid.Nil, false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
+		return uuid.Nil, false, httpx.RespondError(c, fiber.StatusInternalServerError, "project_lookup_failed", "")
 	}
 
 	role, _ := c.Locals(auth.LocalRole).(string)
 	ownerOK := owner == userID || role == "admin"
 	return projectID, ownerOK, nil
 }
-
-
-
-

@@ -11,10 +11,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
-	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
 
 // extractKYCInfo extracts structured information from Didit response data

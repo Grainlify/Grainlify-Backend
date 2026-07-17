@@ -142,12 +142,12 @@ WHERE github_app_installation_id = $1
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		(s == substr || 
-		 (len(s) > len(substr) && 
-		  (s[:len(substr)] == substr || 
-		   s[len(s)-len(substr):] == substr || 
-		   containsSubstring(s, substr))))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			(len(s) > len(substr) &&
+				(s[:len(substr)] == substr ||
+					s[len(s)-len(substr):] == substr ||
+					containsSubstring(s, substr))))
 }
 
 func containsSubstring(s, substr string) bool {
@@ -158,4 +158,3 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
-
