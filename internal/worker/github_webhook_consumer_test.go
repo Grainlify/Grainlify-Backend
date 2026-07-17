@@ -212,17 +212,16 @@ func TestGitHubWebhookConsumer_DistinctDeliveryIDsAreEachProcessed(t *testing.T)
 	}
 }
 
-// An empty DeliveryID must never be de-duplicated (pass-through always).
-func TestGitHubWebhookConsumer_EmptyDeliveryIDAlwaysForwarded(t *testing.T) {
+// An empty DeliveryID is invalid and must not be forwarded to ingest.
+func TestGitHubWebhookConsumer_EmptyDeliveryIDIsRejected(t *testing.T) {
 	ingestor := &recordingIngestor{}
 	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
 	ctx := context.Background()
 
 	consumer.handleMessage(ctx, makeWebhookMsg(t, "", "issues"))
-	consumer.handleMessage(ctx, makeWebhookMsg(t, "", "issues"))
 
-	if ingestor.count != 2 {
-		t.Errorf("empty delivery ID must not be de-duplicated, got count=%d", ingestor.count)
+	if ingestor.count != 0 {
+		t.Errorf("empty delivery ID must be rejected before ingest, got count=%d", ingestor.count)
 	}
 }
 
