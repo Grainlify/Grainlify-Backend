@@ -70,6 +70,14 @@ var (
 		Name:      "nats_publish_failures_total",
 		Help:      "Total number of NATS publish failures for GitHub webhook events.",
 	})
+
+	// LandingStatsCache counts cache hits and misses for the public landing stats endpoint.
+	LandingStatsCache = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "grainlify",
+		Subsystem: "stats",
+		Name:      "landing_cache_total",
+		Help:      "Total number of landing stats cache lookups by result.",
+	}, []string{"result"})
 )
 
 // NormalizePath replaces dynamic path segments (UUIDs, numeric IDs) with ":id"
