@@ -166,6 +166,7 @@ func TestPaginatedResponse_Shape(t *testing.T) {
 	assert.Equal(t, 10, resp["limit"])
 	assert.Equal(t, 0, resp["offset"])
 	assert.Equal(t, 100, resp["total"])
+	assert.True(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_NilItems(t *testing.T) {
@@ -177,6 +178,7 @@ func TestPaginatedResponse_NilItems(t *testing.T) {
 	assert.Equal(t, 20, resp["limit"])
 	assert.Equal(t, 5, resp["offset"])
 	assert.Equal(t, 0, resp["total"])
+	assert.False(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_CustomItemsKey(t *testing.T) {
@@ -189,6 +191,7 @@ func TestPaginatedResponse_CustomItemsKey(t *testing.T) {
 	assert.Equal(t, 1, resp["offset"])
 	assert.Equal(t, 42, resp["total"])
 	assert.NotContains(t, resp, "items") // custom key, not "items"
+	assert.True(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_RoundTrip(t *testing.T) {
