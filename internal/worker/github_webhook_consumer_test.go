@@ -1,15 +1,21 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 )
+
+type contextKey string
 
 func TestGitHubWebhookQueueGroupDefault(t *testing.T) {
 	if got := githubWebhookQueueGroup(""); got != GitHubWebhookQueueGroup {
@@ -21,8 +27,6 @@ func TestGitHubWebhookQueueGroupDefault(t *testing.T) {
 }
 
 func TestGitHubWebhookConsumerUsesSubscriptionContextForIngest(t *testing.T) {
-	type contextKey string
-
 	const key contextKey = "shutdown-marker"
 	ingestor := &recordingIngestor{}
 	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
@@ -44,6 +48,97 @@ func TestGitHubWebhookConsumerUsesSubscriptionContextForIngest(t *testing.T) {
 	}
 	if got := ingestor.ctx.Value(key); got != "from-root" {
 		t.Fatalf("ingest context marker = %v, want from-root", got)
+	}
+}
+
+func TestGitHubWebhookConsumerShutdownDrainsInFlightWithinGracePeriod(t *testing.T) {
+	ingestor := &blockingIngestor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	consumer := &GitHubWebhookConsumer{
+		Ingest:              ingestor,
+		ShutdownGracePeriod: 200 * time.Millisecond,
+	}
+	lifecycleCtx, stop := context.WithCancel(context.WithValue(context.Background(), contextKey("shutdown-marker"), "from-root"))
+	processingCtx := consumer.initProcessingContext(lifecycleCtx)
+
+	consumer.wg.Add(1)
+	go func() {
+		defer consumer.wg.Done()
+		consumer.handleMessage(processingCtx, makeWebhookMsg(t, "drain-delivery", "issues"))
+	}()
+
+	<-ingestor.started
+	stop()
+	drained := make(chan struct{})
+	go func() {
+		consumer.drainOnShutdown(lifecycleCtx, nil)
+		close(drained)
+	}()
+
+	close(ingestor.release)
+
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not drain in-flight webhook processing within grace period")
+	}
+	select {
+	case <-ingestor.done:
+	case <-time.After(time.Second):
+		t.Fatal("ingestor did not finish after being released")
+	}
+	if err := processingCtx.Err(); err != nil {
+		t.Fatalf("processing context was cancelled before graceful drain completed: %v", err)
+	}
+	if ingestor.count != 1 {
+		t.Fatalf("expected message to be processed exactly once, got %d", ingestor.count)
+	}
+}
+
+func TestGitHubWebhookConsumerLogsCancelledInFlightMessageAfterGracePeriod(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	ingestor := &blockingIngestor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	consumer := &GitHubWebhookConsumer{
+		Ingest:              ingestor,
+		ShutdownGracePeriod: 10 * time.Millisecond,
+	}
+	lifecycleCtx, stop := context.WithCancel(context.Background())
+	processingCtx := consumer.initProcessingContext(lifecycleCtx)
+
+	consumer.wg.Add(1)
+	go func() {
+		defer consumer.wg.Done()
+		consumer.handleMessage(processingCtx, makeWebhookMsg(t, "cancel-delivery", "issues"))
+	}()
+
+	<-ingestor.started
+	stop()
+	consumer.drainOnShutdown(lifecycleCtx, nil)
+
+	select {
+	case <-ingestor.done:
+	case <-time.After(time.Second):
+		t.Fatal("ingestor did not observe cancellation after shutdown grace period")
+	}
+	if ingestor.count != 1 {
+		t.Fatalf("expected cancelled message to be attempted exactly once, got %d", ingestor.count)
+	}
+	if got := logs.String(); !strings.Contains(got, "github webhook message processing cancelled") ||
+		!strings.Contains(got, "delivery_id=cancel-delivery") {
+		t.Fatalf("expected cancellation log with delivery ID, got logs:\n%s", got)
 	}
 }
 
@@ -152,6 +247,26 @@ func (r *recordingIngestor) Ingest(ctx context.Context, _ events.GitHubWebhookRe
 	r.ctx = ctx
 	r.count++
 	return r.err
+}
+
+type blockingIngestor struct {
+	started chan struct{}
+	release chan struct{}
+	done    chan struct{}
+	count   int
+}
+
+func (b *blockingIngestor) Ingest(ctx context.Context, _ events.GitHubWebhookReceived) error {
+	b.count++
+	close(b.started)
+	defer close(b.done)
+
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // idempotentIngestor records calls but processes each delivery_id only once.
