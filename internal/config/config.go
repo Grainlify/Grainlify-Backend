@@ -106,6 +106,9 @@ type Config struct {
 
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
+	// WebhookMaxBodyBytes is the maximum request body size in bytes for webhook routes
+	// (WEBHOOK_MAX_BODY_BYTES, default 10485760 / 10MB).
+	WebhookMaxBodyBytes int
 
 	// MetricsToken is the bearer token required to access /metrics. If empty, the endpoint
 	// is unauthenticated — only acceptable when /metrics is firewalled at the network level.
@@ -197,6 +200,7 @@ func Load() Config {
 		SyncJobsBackoffBase: getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
+		WebhookMaxBodyBytes:   getEnvInt("WEBHOOK_MAX_BODY_BYTES", 10*1024*1024),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
 		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
 		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
