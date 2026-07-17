@@ -47,17 +47,24 @@ func sanitizeError(msg string) string {
 	return secretPattern.ReplaceAllString(msg, "[REDACTED]")
 }
 
+const defaultSyncJobsMaxBackoff = time.Hour
+
 // backoffDuration returns the next retry delay using truncated exponential
 // backoff with ±25 % jitter to avoid thundering-herd against the GitHub API.
 //
-//	delay = base * 2^(attempt-1) * (0.75 + rand*0.5), capped at 1 hour
-func backoffDuration(base time.Duration, attempt int) time.Duration {
+//	delay = base * 2^(attempt-1) * (0.75 + rand*0.5), capped at max
+func backoffDuration(base time.Duration, attempt int, max time.Duration) time.Duration {
+	if base <= 0 {
+		base = 30 * time.Second
+	}
+	if max <= 0 {
+		max = defaultSyncJobsMaxBackoff
+	}
 	exp := math.Pow(2, float64(attempt-1))
 	jitter := 0.75 + rand.Float64()*0.5 // [0.75, 1.25)
 	d := time.Duration(float64(base) * exp * jitter)
-	const maxBackoff = time.Hour
-	if d > maxBackoff {
-		d = maxBackoff
+	if d > max {
+		d = max
 	}
 	return d
 }
@@ -80,8 +87,8 @@ func jobCompletionContext(parent context.Context, timeout time.Duration) (contex
 
 // jobFinalState determines the next status for a job after it finishes.
 // attempts is the current value stored in the DB (before this run's increment).
-// maxAttempts and backoffBase drive retry/dead-letter behaviour.
-func jobFinalState(runErr error, attempts int, maxAttempts int, backoffBase time.Duration) jobState {
+// failureAttentionThreshold and backoff settings drive retry/manual-attention behaviour.
+func jobFinalState(runErr error, attempts int, failureAttentionThreshold int, backoffBase time.Duration, backoffMax time.Duration) jobState {
 	if runErr == nil {
 		return jobState{status: "completed", incrementAttempts: true}
 	}
@@ -94,7 +101,10 @@ func jobFinalState(runErr error, attempts int, maxAttempts int, backoffBase time
 	}
 
 	nextAttempt := attempts + 1
-	if nextAttempt >= maxAttempts {
+	if failureAttentionThreshold <= 0 {
+		failureAttentionThreshold = 1
+	}
+	if nextAttempt >= failureAttentionThreshold {
 		return jobState{
 			status:            "dead",
 			lastErr:           sanitizeError(runErr.Error()),
@@ -102,7 +112,7 @@ func jobFinalState(runErr error, attempts int, maxAttempts int, backoffBase time
 		}
 	}
 
-	delay := backoffDuration(backoffBase, nextAttempt)
+	delay := backoffDuration(backoffBase, nextAttempt, backoffMax)
 	runAt := time.Now().Add(delay)
 	return jobState{
 		status:            "pending",
@@ -185,16 +195,23 @@ WHERE id = $1
 	}
 
 	runErr := w.runJob(ctx, jobID, projectID, jobType)
-	state := jobFinalState(runErr, attempts, w.cfg.SyncJobsMaxAttempts, w.cfg.SyncJobsBackoffBase)
+	failureAttentionThreshold := w.cfg.SyncJobsFailureAttentionThreshold
+	if failureAttentionThreshold == 0 {
+		failureAttentionThreshold = w.cfg.SyncJobsMaxAttempts
+	}
+	state := jobFinalState(runErr, attempts, failureAttentionThreshold, w.cfg.SyncJobsBackoffBase, w.cfg.SyncJobsBackoffMax)
 	attemptDelta := 0
 	if state.incrementAttempts {
 		attemptDelta = 1
 	}
-	switch state.status {
-	case "completed":
+	consecutiveFailures := attempts + attemptDelta
+	metricLabels := []string{jobID.String(), projectID.String(), jobType}
+	if runErr == nil {
 		metrics.SyncJobsProcessed.Inc()
-	case "failed":
+		metrics.SyncJobsConsecutiveFailures.WithLabelValues(metricLabels...).Set(0)
+	} else if !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {
 		metrics.SyncJobsFailed.Inc()
+		metrics.SyncJobsConsecutiveFailures.WithLabelValues(metricLabels...).Set(float64(consecutiveFailures))
 	}
 
 	completeCtx, cancel := jobCompletionContext(ctx, 5*time.Second)
