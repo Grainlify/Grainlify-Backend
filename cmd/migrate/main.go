@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"os"
 	"time"
@@ -12,6 +13,9 @@ import (
 )
 
 func main() {
+	allowIrreversibleFlag := flag.Bool("allow-irreversible", false, "allow irreversible migrations to run")
+	flag.Parse()
+
 	config.LoadDotenv()
 	cfg := config.Load()
 
@@ -24,6 +28,8 @@ func main() {
 		slog.Error("startup config validation failed", "error", err)
 		os.Exit(1)
 	}
+
+	allowIrreversible := cfg.IsDev() || *allowIrreversibleFlag || os.Getenv("MIGRATE_ALLOW_IRREVERSIBLE") == "1"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -40,7 +46,7 @@ func main() {
 	}
 	defer d.Close()
 
-	if err := migrate.Up(ctx, d.Pool); err != nil {
+	if err := migrate.Up(ctx, d.Pool, allowIrreversible); err != nil {
 		slog.Error("migrate up failed", "error", err)
 		os.Exit(1)
 	}
