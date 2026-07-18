@@ -1,11 +1,13 @@
 ﻿package api_test
 
 import (
-"os"
-"strings"
-"testing"
+	"context"
+	"os"
+	"strings"
+	"testing"
 
-"gopkg.in/yaml.v3"
+	"github.com/getkin/kin-openapi/openapi3"
+	"gopkg.in/yaml.v3"
 )
 
 // specPaths parses openapi.yaml and returns all documented paths.
@@ -67,7 +69,30 @@ t.Error("openapi.yaml info.title is empty")
 if spec.Info.Version == "" {
 t.Error("openapi.yaml info.version is empty")
 }
-t.Logf("spec: OpenAPI %s — %s %s", spec.OpenAPI, spec.Info.Title, spec.Info.Version)
+	t.Logf("spec: OpenAPI %s — %s %s", spec.OpenAPI, spec.Info.Title, spec.Info.Version)
+}
+
+// TestOpenAPISpecValid validates the spec against the OpenAPI 3.x schema
+// using kin-openapi. This catches structural errors like broken $ref targets,
+// invalid schemas, missing required fields, etc.
+func TestOpenAPISpecValid(t *testing.T) {
+	data, err := os.ReadFile("openapi.yaml")
+	if err != nil {
+		t.Fatalf("failed to read openapi.yaml: %v", err)
+	}
+
+	loader := openapi3.NewLoader()
+	loader.IsExternalRefsAllowed = false
+
+	doc, err := loader.LoadFromData(data)
+	if err != nil {
+		t.Fatalf("failed to load openapi.yaml: %v", err)
+	}
+
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("openapi.yaml validation failed: %v", err)
+	}
+	t.Logf("openapi.yaml is a valid OpenAPI %s document", doc.OpenAPI)
 }
 
 // registeredRoutes is the canonical list of routes from internal/api/api.go.

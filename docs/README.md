@@ -51,6 +51,7 @@ Indexed documentation for setup, GitHub integration, OAuth, deployment, and trou
 | Document | Description |
 |----------|-------------|
 | [API Endpoints](reference/api-endpoints.md) | Complete REST API reference |
+| [OpenAPI Spec](reference/openapi-spec.md) | OpenAPI 3.1 spec — location, validation, and update guide |
 
 ## Interactive API docs
 

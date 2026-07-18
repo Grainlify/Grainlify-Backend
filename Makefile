@@ -1,4 +1,4 @@
-.PHONY: run dev install-air lint build build-worker run-worker build-prod test
+.PHONY: run dev install-air lint build build-worker run-worker build-prod test openapi-validate openapi-sync
 
 # Install air for live reload
 install-air:
@@ -48,6 +48,15 @@ lint:
 # Run unit tests with race detection; skips tests that require live network/DB.
 test:
 	@go test -race -short ./...
+
+# Validate the OpenAPI spec against the OpenAPI 3.x schema.
+openapi-validate:
+	@go test -run TestOpenAPISpecValid ./internal/api/ -v
+
+# Sync the root-level openapi.yaml mirror with the canonical copy.
+openapi-sync:
+	@cp internal/api/openapi.yaml openapi.yaml 2>/dev/null || copy /y internal\api\openapi.yaml openapi.yaml >nul
+	@echo "openapi.yaml synced"
 
 
 
