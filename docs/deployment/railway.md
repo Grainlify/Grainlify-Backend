@@ -191,17 +191,121 @@ For each project repository:
 
 ## Step 10: Run Database Migrations
 
-Migrations run automatically if `AUTO_MIGRATE=true` is set.
+The repository has three deployment entrypoints:
+
+- API: `go run ./cmd/api` / a binary built from `./cmd/api`
+- Worker: `go run ./cmd/worker` / a binary built from `./cmd/worker`
+- Migration job: `go run ./cmd/migrate` / a binary built from `./cmd/migrate`
+
+Migrations can run automatically from the API process when `AUTO_MIGRATE=true` is
+set. On startup, `cmd/api/main.go` checks whether migrations are needed and then
+calls `internal/migrate.Up` before starting the HTTP server. For production, prefer
+`AUTO_MIGRATE=false` on long-running API replicas and run migrations explicitly as
+a one-off job so that rollout order is intentional and observable.
 
 To run manually (if needed):
 
 1. Install Railway CLI: `npm i -g @railway/cli`
 2. Login: `railway login`
 3. Link project: `railway link`
-4. Run migrations:
+4. Run migrations with the current Railway environment:
    ```bash
    railway run go run ./cmd/migrate
    ```
+
+`cmd/migrate/main.go` loads the same environment/configuration as the app, opens a
+PostgreSQL connection from `DB_URL`, and calls `migrate.Up` with a 60-second outer
+startup context. The migration implementation uses embedded files from
+`migrations/`, the `schema_migrations` table, a small startup jitter, and retry
+loops for PostgreSQL migration-lock contention. It treats `migrate.ErrNoChange` as
+success, so rerunning the command is safe when the database is already current.
+
+---
+
+## Migration ordering
+
+Use an **expand → deploy → contract** migration strategy for zero-downtime
+deployments:
+
+1. **Expand first**: apply only backward-compatible schema changes before the new
+   API and worker binaries are rolled out. Safe examples include adding nullable
+   columns, adding tables, creating indexes concurrently where applicable, or
+   adding code paths that tolerate both old and new shapes.
+2. **Deploy binaries second**: deploy the new `cmd/api` service and the matching
+   `cmd/worker` service after the schema can support both old and new code.
+3. **Contract later**: remove columns, tighten constraints, rename fields without
+   compatibility shims, or drop tables only after every old API/worker instance is
+   stopped and a separate release has proven the new code no longer depends on the
+   old schema.
+
+For zero-downtime deploys, every migration that runs before or during rollout must
+be backward compatible with the previous API and worker binaries. This matters
+because Railway may have old and new replicas running at the same time during a
+deploy, and a rollback may put the previous binary back against the already-migrated
+database. If a schema change cannot be made backward compatible, schedule downtime,
+stop the API and worker services, take a database backup, apply the migration, then
+start the new binaries.
+
+Recommended production order:
+
+1. Confirm the release's migrations are backward compatible with the currently
+   deployed `cmd/api` and `cmd/worker` binaries.
+2. Run `railway run go run ./cmd/migrate` once and verify the log line
+   `migrations applied` or `migrations up to date, no changes needed`.
+3. Deploy the API service built from `./cmd/api`.
+4. Deploy the worker service built from `./cmd/worker`.
+5. Verify `/health`, `/ready`, worker logs, and any release-specific smoke tests.
+
+---
+
+## Rollback
+
+Use this procedure when a deploy must be reverted. The default rollback is a
+**binary rollback**, not a destructive database rollback. Do not run down migrations
+in production unless an incident commander explicitly approves it and a current
+database backup has been captured.
+
+1. **Triage and freeze changes**
+   - Stop additional deploys and pause non-essential manual writes or admin jobs.
+   - Identify the bad deployment and the last known-good commit/deployment for the
+     API and worker services.
+   - Check whether the bad release ran migrations with
+     `railway run go run ./cmd/migrate` or API `AUTO_MIGRATE=true`.
+
+2. **Roll back long-running binaries**
+   - In Railway, redeploy the last known-good deployment for the API service, or
+     push/redeploy the last known-good commit for the service built from
+     `./cmd/api`.
+   - Redeploy the matching last known-good worker deployment for the service built
+     from `./cmd/worker`. Keep API and worker versions paired unless the incident
+     plan says otherwise.
+   - If the worker is causing data corruption or retry storms, temporarily scale
+     the worker service to zero replicas before redeploying it.
+
+3. **Leave compatible migrations in place**
+   - If the release followed the backward-compatible migration rules above, leave
+     the database at its current schema version. The previous binaries must be able
+     to run against that schema.
+   - Verify that the rolled-back API starts with `AUTO_MIGRATE=false` unless you
+     intentionally want startup to call `migrate.Up` again. Rerunning `cmd/migrate`
+     is safe when there is no change, but it should not be part of an emergency
+     rollback unless needed.
+
+4. **Only consider database rollback for incompatible or destructive changes**
+   - Capture a fresh backup/snapshot first.
+   - Review the relevant `migrations/*.down.sql` files and the behavior in
+     `internal/migrate/migrate.go` before running any downward migration.
+   - Prefer a forward hotfix migration that restores compatibility over running
+     down migrations on production data.
+   - If a down migration is approved, run it from controlled operational tooling or
+     a purpose-built recovery command. The current `cmd/migrate` entrypoint only
+     runs `migrate.Up`; it does not expose a CLI flag for `Down` or `Steps`.
+
+5. **Verify rollback**
+   - Check API health: `curl https://your-railway-app.railway.app/health`.
+   - Check database readiness: `curl https://your-railway-app.railway.app/ready`.
+   - Check API and worker logs for startup, migration, database, and NATS errors.
+   - Confirm user-facing functionality and queued background work have recovered.
 
 ---
 

@@ -20,7 +20,7 @@ func TestJobCompletionContextSurvivesWorkerCancellation(t *testing.T) {
 }
 
 func TestJobFinalStateRequeuesCanceledWork(t *testing.T) {
-	state := jobFinalState(context.Canceled, 0, 5, 30*time.Second)
+	state := jobFinalState(context.Canceled, 0, 5, 30*time.Second, time.Hour)
 
 	if state.status != "pending" {
 		t.Fatalf("status = %q, want pending", state.status)
@@ -37,7 +37,7 @@ func TestJobFinalStateRequeuesCanceledWork(t *testing.T) {
 }
 
 func TestJobFinalStateCompletesSuccessfulWork(t *testing.T) {
-	state := jobFinalState(nil, 1, 5, 30*time.Second)
+	state := jobFinalState(nil, 1, 5, 30*time.Second, time.Hour)
 
 	if state.status != "completed" {
 		t.Fatalf("status = %q, want completed", state.status)
@@ -55,7 +55,7 @@ func TestJobFinalStateCompletesSuccessfulWork(t *testing.T) {
 
 func TestJobFinalStateReschedulesTransientFailure(t *testing.T) {
 	err := errors.New("transient github error")
-	state := jobFinalState(err, 1, 5, 30*time.Second)
+	state := jobFinalState(err, 1, 5, 30*time.Second, time.Hour)
 
 	if state.status != "pending" {
 		t.Fatalf("status = %q, want pending", state.status)
@@ -77,7 +77,7 @@ func TestJobFinalStateReschedulesTransientFailure(t *testing.T) {
 func TestJobFinalStateDeadLettersAfterMaxAttempts(t *testing.T) {
 	err := errors.New("persistent failure")
 	// attempts=4, maxAttempts=5 → nextAttempt=5 >= maxAttempts → dead
-	state := jobFinalState(err, 4, 5, 30*time.Second)
+	state := jobFinalState(err, 4, 5, 30*time.Second, time.Hour)
 
 	if state.status != "dead" {
 		t.Fatalf("status = %q, want dead", state.status)
@@ -114,7 +114,7 @@ func TestSanitizeErrorRemovesSecrets(t *testing.T) {
 func TestBackoffDurationBounds(t *testing.T) {
 	base := 30 * time.Second
 	for attempt := 1; attempt <= 10; attempt++ {
-		d := backoffDuration(base, attempt)
+		d := backoffDuration(base, attempt, time.Hour)
 		if d <= 0 {
 			t.Errorf("attempt %d: backoff = %v, want > 0", attempt, d)
 		}
@@ -123,11 +123,50 @@ func TestBackoffDurationBounds(t *testing.T) {
 		}
 	}
 	// Verify growth: attempt 3 should generally be larger than attempt 1
-	d1 := backoffDuration(base, 1)
-	d3 := backoffDuration(base, 3)
+	d1 := backoffDuration(base, 1, time.Hour)
+	d3 := backoffDuration(base, 3, time.Hour)
 	// With jitter the ranges may overlap at extremes, so use a loose check.
 	// base*2^0*1.25=37.5s vs base*2^2*0.75=90s — plenty of headroom.
 	if d3 < d1 {
 		t.Errorf("backoff not growing: attempt3=%v < attempt1=%v", d3, d1)
+	}
+}
+
+func TestJobFinalStateRepeatedFailuresBackoffAndCap(t *testing.T) {
+	err := errors.New("token revoked")
+	base := time.Minute
+	capDelay := 10 * time.Minute
+	threshold := 6
+
+	var previousDelay time.Duration
+	for attempts := 0; attempts < threshold-1; attempts++ {
+		before := time.Now()
+		state := jobFinalState(err, attempts, threshold, base, capDelay)
+		if state.status != "pending" {
+			t.Fatalf("attempts %d: status = %q, want pending", attempts, state.status)
+		}
+		if state.runAt == nil {
+			t.Fatalf("attempts %d: expected run_at backoff", attempts)
+		}
+
+		delay := state.runAt.Sub(before)
+		if delay <= 0 {
+			t.Fatalf("attempts %d: delay = %v, want positive", attempts, delay)
+		}
+		if delay > capDelay+time.Second {
+			t.Fatalf("attempts %d: delay = %v, exceeds cap %v", attempts, delay, capDelay)
+		}
+		if attempts > 0 && delay < previousDelay/2 {
+			t.Fatalf("attempts %d: delay regressed too much: previous=%v current=%v", attempts, previousDelay, delay)
+		}
+		previousDelay = delay
+	}
+
+	state := jobFinalState(err, threshold-1, threshold, base, capDelay)
+	if state.status != "dead" {
+		t.Fatalf("status = %q, want dead needing manual attention", state.status)
+	}
+	if state.runAt != nil {
+		t.Fatal("manual-attention job should not be rescheduled")
 	}
 }

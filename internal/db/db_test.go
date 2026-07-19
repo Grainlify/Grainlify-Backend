@@ -1,6 +1,9 @@
 package db
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,5 +101,27 @@ func TestPoolConfigMapsOntoPgxConfig(t *testing.T) {
 	}
 	if pgxCfg.MaxConnIdleTime != 8*time.Minute {
 		t.Errorf("MaxConnIdleTime: want 8m, got %v", pgxCfg.MaxConnIdleTime)
+	}
+}
+
+func TestConnectWrapsPingFailureAsDBUnavailable(t *testing.T) {
+	dsn := "postgresql://secret_user:secret_password@127.0.0.1:1/grainlify?sslmode=disable"
+	_, err := Connect(context.Background(), dsn, PoolConfig{MaxConns: 1})
+	if err == nil {
+		t.Fatal("Connect returned nil error, want database unavailable error")
+	}
+	if !errors.Is(err, ErrDBUnavailable) {
+		t.Fatalf("errors.Is(err, ErrDBUnavailable) = false; err = %v", err)
+	}
+
+	var unavailable *DBUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("errors.As(err, *DBUnavailableError) = false; err = %T", err)
+	}
+	if unavailable.Op == "" {
+		t.Fatal("DBUnavailableError.Op is empty")
+	}
+	if strings.Contains(err.Error(), "secret_password") || strings.Contains(err.Error(), dsn) {
+		t.Fatalf("database unavailable error leaked DSN credentials: %q", err.Error())
 	}
 }

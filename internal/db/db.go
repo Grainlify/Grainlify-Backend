@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -32,6 +33,40 @@ type DBPool interface {
 
 type DB struct {
 	Pool DBPool
+}
+
+// ErrDBUnavailable identifies connection-level database failures.
+// Use errors.Is(err, ErrDBUnavailable) to branch on unavailable database
+// conditions without string-matching driver errors.
+var ErrDBUnavailable = errors.New("database unavailable")
+
+// DBUnavailableError wraps the underlying connection-level failure without
+// exposing DSN credentials in its public error text.
+type DBUnavailableError struct {
+	Op  string
+	Err error
+}
+
+func (e *DBUnavailableError) Error() string {
+	if e == nil || e.Op == "" {
+		return ErrDBUnavailable.Error()
+	}
+	return fmt.Sprintf("%s: %s", e.Op, ErrDBUnavailable)
+}
+
+func (e *DBUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *DBUnavailableError) Is(target error) bool {
+	return target == ErrDBUnavailable
+}
+
+func dbUnavailable(op string, err error) error {
+	return &DBUnavailableError{Op: op, Err: err}
 }
 
 // parsePgxConfig wraps pgxpool.ParseConfig for testability.
@@ -81,7 +116,7 @@ func Connect(ctx context.Context, dbURL string, pc PoolConfig) (*DB, error) {
 			"error", err,
 			"error_type", fmt.Sprintf("%T", err),
 		)
-		return nil, fmt.Errorf("connect db: %w", err)
+		return nil, dbUnavailable("connect db", err)
 	}
 
 	slog.Info("database connection pool created, testing connection")
@@ -91,7 +126,7 @@ func Connect(ctx context.Context, dbURL string, pc PoolConfig) (*DB, error) {
 			"error", err,
 			"error_type", fmt.Sprintf("%T", err),
 		)
-		return nil, fmt.Errorf("ping db: %w", err)
+		return nil, dbUnavailable("ping db", err)
 	}
 
 	slog.Info("database connection successful")
@@ -127,7 +162,10 @@ func (d *DB) Ping(ctx context.Context) error {
 	if d == nil || d.Pool == nil {
 		return fmt.Errorf("db not configured")
 	}
-	return d.Pool.Ping(ctx)
+	if err := d.Pool.Ping(ctx); err != nil {
+		return dbUnavailable("ping db", err)
+	}
+	return nil
 }
 
 func (d *DB) Close() {
@@ -136,7 +174,3 @@ func (d *DB) Close() {
 	}
 	d.Pool.Close()
 }
-
-
-
-
