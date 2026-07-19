@@ -64,30 +64,9 @@ func NewReady(d *db.DB, b bus.Bus) fiber.Handler {
 		}
 		deps = append(deps, natsStatus)
 
-				return c.Status(statusCode).JSON(fiber.Map{
+		return c.Status(statusCode).JSON(fiber.Map{
 			"ok":   statusCode == fiber.StatusOK,
 			"deps": deps,
 		})
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

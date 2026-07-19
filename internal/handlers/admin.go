@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
@@ -43,7 +45,7 @@ func (h *AdminHandler) ListUsers() fiber.Handler {
 		}
 
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -53,7 +55,7 @@ ORDER BY created_at DESC
 LIMIT $1 OFFSET $2
 `, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "users_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "users_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -64,7 +66,7 @@ LIMIT $1 OFFSET $2
 			var ghID *int64
 			var createdAt, updatedAt time.Time
 			if err := rows.Scan(&id, &role, &ghID, &createdAt, &updatedAt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "users_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "users_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"id":             id.String(),
@@ -91,19 +93,19 @@ type setRoleRequest struct {
 func (h *AdminHandler) SetUserRole() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		userID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 		}
 		var req setRoleRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 		role := strings.TrimSpace(req.Role)
 		if role != "contributor" && role != "maintainer" && role != "admin" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_role"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_role", "")
 		}
 		ct, err := h.db.Pool.Exec(c.Context(), `
 UPDATE users SET role = $2, updated_at = now()
@@ -111,12 +113,12 @@ WHERE id = $1
 `, userID, role)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "user_not_found", "")
 			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "role_update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "role_update_failed", "")
 		}
 		if ct.RowsAffected() == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "user_not_found", "")
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
@@ -144,31 +146,31 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		// Optionally restrict bootstrap to APP_ENV=dev
 		if h.cfg.Env != "dev" {
 			slog.Warn("Admin bootstrap blocked: endpoint is only allowed in dev environment", "env", h.cfg.Env)
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "bootstrap_disabled_in_env"})
+			return httpx.RespondError(c, fiber.StatusForbidden, "bootstrap_disabled_in_env", "")
 		}
 
 		// Reject bootstrap if configured token is empty (disabling the endpoint)
 		if h.cfg.AdminBootstrapToken == "" {
 			slog.Warn("Admin bootstrap blocked: bootstrap token is empty (endpoint disabled)")
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "bootstrap_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "bootstrap_not_configured", "")
 		}
 
 		// Reject bootstrap if configured token is shorter than 32 characters
 		const minTokenLen = 32
 		if len(h.cfg.AdminBootstrapToken) < minTokenLen {
 			slog.Warn("Admin bootstrap blocked: configured bootstrap token is too short/weak", "length", len(h.cfg.AdminBootstrapToken))
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "bootstrap_token_too_weak"})
+			return httpx.RespondError(c, fiber.StatusForbidden, "bootstrap_token_too_weak", "")
 		}
 
 		if h.cfg.JWTSecret == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "jwt_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "jwt_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
 			slog.Warn("Admin bootstrap failed: invalid user ID in context", "raw_user_id", sub)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		headerToken := strings.TrimSpace(c.Get("X-Admin-Bootstrap-Token"))
@@ -176,22 +178,22 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 
 		if secureCompare(headerToken, configToken) != 1 {
 			slog.Warn("Admin bootstrap failed: token mismatch", "user_id", userID)
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "invalid_bootstrap_token"})
+			return httpx.RespondError(c, fiber.StatusForbidden, "invalid_bootstrap_token", "")
 		}
 
 		// DB configured check (only needed for DB operations)
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		var currentRole string
 		if err := h.db.Pool.QueryRow(c.Context(), `SELECT role FROM users WHERE id = $1`, userID).Scan(&currentRole); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				slog.Warn("Admin bootstrap failed: user not found in database", "user_id", userID)
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
+				return httpx.RespondError(c, fiber.StatusNotFound, "user_not_found", "")
 			}
 			slog.Error("Admin bootstrap failed: database error checking user", "user_id", userID, "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "bootstrap_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "bootstrap_failed", "")
 		}
 
 		// If user is already an admin, no need to update
@@ -199,7 +201,7 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 			jwtToken, err := auth.IssueJWT(h.cfg.JWTSecret, userID, "admin", "", "", 60*time.Minute)
 			if err != nil {
 				slog.Error("Admin bootstrap failed: JWT issuance failed for existing admin", "user_id", userID, "error", err)
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "token_issue_failed", "")
 			}
 			slog.Info("Admin bootstrap successful: user already admin", "user_id", userID)
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -213,13 +215,13 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		_, err = h.db.Pool.Exec(c.Context(), `UPDATE users SET role = 'admin', updated_at = now() WHERE id = $1`, userID)
 		if err != nil {
 			slog.Error("Admin bootstrap failed: database error updating user role", "user_id", userID, "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "bootstrap_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "bootstrap_failed", "")
 		}
 
 		jwtToken, err := auth.IssueJWT(h.cfg.JWTSecret, userID, "admin", "", "", 60*time.Minute)
 		if err != nil {
 			slog.Error("Admin bootstrap failed: JWT issuance failed after promotion", "user_id", userID, "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "token_issue_failed", "")
 		}
 
 		slog.Info("Admin bootstrap successful: user promoted to admin", "user_id", userID)
@@ -230,7 +232,3 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		})
 	}
 }
-
-
-
-

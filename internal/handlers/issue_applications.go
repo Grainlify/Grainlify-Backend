@@ -13,12 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
-	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
-
 
 type IssueApplicationsHandler struct {
 	cfg config.Config
@@ -202,9 +201,9 @@ WHERE project_id = $1 AND number = $2
 		successResponse := fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
@@ -339,9 +338,9 @@ WHERE project_id = $1 AND number = $2
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
@@ -770,7 +769,6 @@ WHERE project_id = $1 AND number = $2
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
-
 
 // hashString returns the SHA-256 hash of a string for logging purposes.
 // Used to log a non-sensitive reference to idempotency keys without exposing the full key value.

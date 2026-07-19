@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,7 +34,7 @@ func NewGitHubAppHandler(cfg config.Config, d *db.DB) *GitHubAppHandler {
 func (h *GitHubAppHandler) StartInstallation() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		if h.cfg.GitHubAppID == "" {
@@ -45,7 +47,7 @@ func (h *GitHubAppHandler) StartInstallation() fiber.Handler {
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		// Generate state for installation callback
@@ -57,7 +59,7 @@ INSERT INTO oauth_states (state, user_id, kind, expires_at)
 VALUES ($1, $2, 'github_app_install', $3)
 `, state, userID, expiresAt)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_create_failed", "")
 		}
 
 		// Build GitHub App installation URL
@@ -124,7 +126,7 @@ func (h *GitHubAppHandler) HandleInstallationCallback() fiber.Handler {
 
 		if h.db == nil || h.db.Pool == nil {
 			slog.Error("callback received but DB not configured")
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		// Log all query parameters for debugging
@@ -183,10 +185,10 @@ WHERE state = $1
   AND kind = 'github_app_install'
 `, state).Scan(&storedUserID, &storedKind)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_or_expired_state"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_or_expired_state", "")
 			}
 			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_lookup_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "state_lookup_failed", "")
 			}
 
 			if storedUserID != nil {
@@ -327,11 +329,11 @@ SELECT id FROM ecosystems WHERE status = 'active' ORDER BY created_at ASC LIMIT 
 		err := h.db.Pool.QueryRow(ctx, `
 SELECT id, status FROM projects WHERE github_full_name = $1
 `, repo.FullName).Scan(&existingID, &existingStatus)
-		
+
 		if err == nil {
 			// Repository already exists - verify and enqueue sync if needed (public only)
 			projectID := existingID
-			
+
 			// Always verify the project (update github_repo_id and status, restore if deleted)
 			_, _ = h.db.Pool.Exec(ctx, `
 UPDATE projects
@@ -344,25 +346,25 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, installationID)
-			
+
 			slog.Info("verified existing project from GitHub App installation",
 				"project_id", projectID,
 				"repo", repo.FullName,
 				"old_status", existingStatus,
 			)
-			
+
 			// Always enqueue sync jobs (they will be deduplicated by the worker if already running)
 			_, _ = h.db.Pool.Exec(ctx, `
 INSERT INTO sync_jobs (project_id, job_type, status, run_at)
 VALUES ($1, 'sync_issues', 'pending', now()),
        ($1, 'sync_prs', 'pending', now())
 `, projectID)
-			
+
 			slog.Info("enqueued sync jobs for existing project",
 				"project_id", projectID,
 				"repo", repo.FullName,
 			)
-			
+
 			updatedCount++
 			continue
 		}
@@ -440,4 +442,3 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 		"installation_id", installationID,
 	)
 }
-

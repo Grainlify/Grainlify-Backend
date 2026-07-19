@@ -78,14 +78,12 @@ func TestProjectDataIssuesUnknownProjectReturnsNotFound(t *testing.T) {
 	}
 
 	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+		Error string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response body: %v", err)
 	}
-	if !strings.EqualFold(body.Error.Code, "project_not_found") {
-		t.Fatalf("expected project_not_found error code, got %q", body.Error.Code)
+	if !strings.EqualFold(body.Error, "project_not_found") {
+		t.Fatalf("expected project_not_found error code, got %q", body.Error)
 	}
 }

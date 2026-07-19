@@ -20,7 +20,7 @@ type ProjectDataHandler struct {
 
 var errProjectDataResponseWritten = errors.New("project data response already written")
 
-func respondProjectDataError(c *fiber.Ctx, status int, code string) error {
+func respondProjectDataError(c *fiber.Ctx, status int, code httpx.Code) error {
 	_ = httpx.RespondError(c, status, code, "")
 	return errProjectDataResponseWritten
 }
@@ -79,7 +79,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -94,7 +94,7 @@ LIMIT $2 OFFSET $3
 			var updated *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &body, &author, &url, &assigneesJSON, &labelsJSON, &commentsCount, &commentsJSON, &updated, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
 			}
 
 			var assignees []any
@@ -160,7 +160,7 @@ ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -173,7 +173,7 @@ LIMIT $2 OFFSET $3
 			var createdAt, updated, closedAt, mergedAt *time.Time
 			var lastSeen time.Time
 			if err := rows.Scan(&gid, &number, &state, &title, &author, &url, &merged, &createdAt, &updated, &closedAt, &mergedAt, &lastSeen); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"github_pr_id": gid,
@@ -223,7 +223,7 @@ ORDER BY received_at DESC
 LIMIT $2 OFFSET $3
 `, projectID, p.Limit, p.Offset)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "events_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -234,7 +234,7 @@ LIMIT $2 OFFSET $3
 			var action *string
 			var receivedAt time.Time
 			if err := rows.Scan(&deliveryID, &event, &action, &receivedAt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "events_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"delivery_id": deliveryID,

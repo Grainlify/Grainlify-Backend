@@ -9,11 +9,12 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRespondError_WritesStableJSONEnvelope(t *testing.T) {
@@ -57,13 +58,92 @@ func TestRespondError_WritesStableJSONEnvelope(t *testing.T) {
 
 			body := decodeRawErrorEnvelope(t, resp.Body)
 			assert.Equal(t, map[string]any{
-				"error": map[string]any{
-					"code":       tt.code,
-					"message":    tt.message,
-					"request_id": tt.requestID,
-				},
+				"error":      tt.code,
+				"message":    tt.message,
+				"request_id": tt.requestID,
 			}, body)
 		})
+	}
+}
+
+func TestRespondError_MissingRequestID(t *testing.T) {
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return httpx.RespondError(c, fiber.StatusBadRequest, "bad_request", "missing field")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var env httpx.ErrorEnvelope
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("failed to parse JSON: %v\nbody: %s", err, body)
+	}
+
+	if env.RequestID != "" {
+		t.Errorf("expected empty request_id, got %q", env.RequestID)
+	}
+	if env.Error != "bad_request" {
+		t.Errorf("expected code bad_request, got %q", env.Error)
+	}
+}
+
+func TestRespondError_404NotFound(t *testing.T) {
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		c.Locals("requestid", "rid-xyz")
+		return httpx.RespondError(c, fiber.StatusNotFound, httpx.CodeNotFound, "resource not found")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("expected status 404, got %d", resp.StatusCode)
+	}
+
+	var env httpx.ErrorEnvelope
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if env.Error != "not_found" {
+		t.Errorf("expected not_found, got %q", env.Error)
+	}
+}
+
+func TestRespondError_JSONShape(t *testing.T) {
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		c.Locals("requestid", "shape-test")
+		return httpx.RespondError(c, fiber.StatusUnauthorized, "unauthorized", "")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("failed to parse JSON: %v\nbody: %s", err, body)
+	}
+	for _, key := range []string{"error", "request_id"} {
+		if _, exists := raw[key]; !exists {
+			t.Errorf("missing key %q in error envelope", key)
+		}
 	}
 }
 
@@ -85,7 +165,7 @@ func TestRespondError_NilOrEmptyInputsDoNotPanic(t *testing.T) {
 				app := fiber.New()
 				app.Get("/test", func(c *fiber.Ctx) error {
 					c.Locals("requestid", tt.requestID)
-					return httpx.RespondError(c, fiber.StatusInternalServerError, tt.code, tt.message)
+					return httpx.RespondError(c, fiber.StatusInternalServerError, httpx.Code(tt.code), tt.message)
 				})
 
 				resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/test", nil))
@@ -93,10 +173,10 @@ func TestRespondError_NilOrEmptyInputsDoNotPanic(t *testing.T) {
 				defer resp.Body.Close()
 
 				body := decodeRawErrorEnvelope(t, resp.Body)
-				errorBody := requireErrorObject(t, body)
-				assert.Contains(t, errorBody, "code")
-				assert.Contains(t, errorBody, "message")
-				assert.Contains(t, errorBody, "request_id")
+				assert.Contains(t, body, "error")
+				// message uses "omitempty" and every case here passes an empty
+				// message, so it is intentionally absent from the envelope.
+				assert.Contains(t, body, "request_id")
 			})
 		})
 	}
@@ -115,14 +195,38 @@ func TestRespondError_RealHandlerUsesSharedEnvelope(t *testing.T) {
 	assert.Equal(t, fiber.MIMEApplicationJSON, resp.Header.Get(fiber.HeaderContentType))
 
 	body := decodeRawErrorEnvelope(t, resp.Body)
-	assert.Equal(t, map[string]any{
-		"error": map[string]any{
-			"code":       "db_not_configured",
-			"message":    "",
-			"request_id": requireErrorObject(t, body)["request_id"],
-		},
-	}, body)
-	assert.NotEmpty(t, requireErrorObject(t, body)["request_id"])
+	assert.Equal(t, "db_not_configured", body["error"])
+	// message is empty for this handler and "omitempty" drops it from the JSON.
+	assert.NotContains(t, body, "message")
+	assert.NotEmpty(t, body["request_id"])
+}
+
+// RespondError does not auto-scrub 5xx responses -- it is the caller's
+// responsibility to only ever pass a static, developer-chosen code/message
+// (never a raw error). This test locks in that pass-through contract so a
+// future change doesn't silently start scrubbing codes that handlers rely
+// on (e.g. "nonce_create_failed", "db_not_configured").
+func TestRespondError_5xxPassesThroughStaticCode(t *testing.T) {
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return httpx.RespondError(c, fiber.StatusInternalServerError, "nonce_create_failed", "")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var env httpx.ErrorEnvelope
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("failed to parse JSON: %v\nbody: %s", err, body)
+	}
+	if env.Error != "nonce_create_failed" {
+		t.Errorf("expected code to pass through unchanged, got %q", env.Error)
+	}
 }
 
 func exerciseRespondError(t *testing.T, status int, code, message, requestID string) *http.Response {
@@ -130,7 +234,7 @@ func exerciseRespondError(t *testing.T, status int, code, message, requestID str
 	app := fiber.New()
 	app.Get("/test", func(c *fiber.Ctx) error {
 		c.Locals("requestid", requestID)
-		return httpx.RespondError(c, status, code, message)
+		return httpx.RespondError(c, status, httpx.Code(code), message)
 	})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/test", nil))
@@ -146,13 +250,4 @@ func decodeRawErrorEnvelope(t *testing.T, body io.Reader) map[string]any {
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(payload, &decoded), "body: %s", payload)
 	return decoded
-}
-
-func requireErrorObject(t *testing.T, body map[string]any) map[string]any {
-	t.Helper()
-	errorValue, ok := body["error"]
-	require.True(t, ok, "missing top-level error field")
-	errorBody, ok := errorValue.(map[string]any)
-	require.True(t, ok, "error field must be an object")
-	return errorBody
 }

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"log/slog"
 	"sync"
 	"time"
@@ -57,7 +59,7 @@ type LandingStatsResponse struct {
 func (h *LandingStatsHandler) Get() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		now := h.now()
@@ -70,7 +72,7 @@ func (h *LandingStatsHandler) Get() fiber.Handler {
 		resp, err := h.fetch(c)
 		if err != nil {
 			slog.Error("failed to fetch landing stats", "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "stats_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "stats_fetch_failed", "")
 		}
 
 		h.store(resp, now.Add(h.ttl))
