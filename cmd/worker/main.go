@@ -147,6 +147,32 @@ func main() {
 		}
 	}()
 
+	// ---------- Idempotency key cleanup (concurrent) ----------
+	// Periodically delete expired idempotency keys (expires_at < now()).
+	// Runs every hour; expired keys are also filtered by the lookup query, so this is just
+	// cleanup to prevent unbounded table growth.
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		slog.Info("starting idempotency key cleanup worker")
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				slog.Info("idempotency key cleanup worker stopped")
+				return
+			case <-ticker.C:
+				result, err := dbConn.Pool.Exec(workerCtx, `DELETE FROM idempotency_keys WHERE expires_at < now()`)
+				if err != nil {
+					slog.Warn("idempotency key cleanup failed", "error", err)
+				} else {
+					slog.Info("idempotency key cleanup completed", "rows_deleted", result.RowsAffected())
+				}
+			}
+		}
+	}()
+
 	slog.Info("=== Grainlify Worker Running ===")
 
 	// Block until signal.
