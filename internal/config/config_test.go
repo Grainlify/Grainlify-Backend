@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 // valid32ByteKey returns a base64-encoded 32-byte key for test use.
@@ -259,5 +260,23 @@ func TestValidate_ErrorDoesNotExposeSecretValues(t *testing.T) {
 	// Should mention the variable name instead.
 	if !strings.Contains(msg, "JWT_SECRET") {
 		t.Fatalf("error should mention JWT_SECRET variable name, got: %v", msg)
+	}
+}
+
+func TestLoad_DefaultShutdownTimeout(t *testing.T) {
+	t.Setenv("SHUTDOWN_TIMEOUT", "")
+
+	cfg := Load()
+	if cfg.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("expected default shutdown timeout 10s, got %s", cfg.ShutdownTimeout)
+	}
+}
+
+func TestLoad_ShutdownTimeoutFromEnv(t *testing.T) {
+	t.Setenv("SHUTDOWN_TIMEOUT", "45s")
+
+	cfg := Load()
+	if cfg.ShutdownTimeout != 45*time.Second {
+		t.Fatalf("expected shutdown timeout 45s, got %s", cfg.ShutdownTimeout)
 	}
 }

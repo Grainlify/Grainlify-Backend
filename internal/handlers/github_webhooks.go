@@ -3,7 +3,7 @@ package handlers
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -229,22 +229,15 @@ func verifyGitHubSignature(secret string, body []byte, header string) bool {
 	if !strings.HasPrefix(header, "sha256=") {
 		return false
 	}
-	gotHex := strings.ToLower(strings.TrimPrefix(header, "sha256="))
+	got, err := hex.DecodeString(strings.TrimPrefix(header, "sha256="))
+	if err != nil {
+		return false
+	}
+
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)
 	want := mac.Sum(nil)
-	wantHex := hexEncodeLower(want)
-	return subtle.ConstantTimeCompare([]byte(gotHex), []byte(wantHex)) == 1
-}
-
-func hexEncodeLower(b []byte) string {
-	const hextable = "0123456789abcdef"
-	out := make([]byte, len(b)*2)
-	for i, v := range b {
-		out[i*2] = hextable[v>>4]
-		out[i*2+1] = hextable[v&0x0f]
-	}
-	return string(out)
+	return hmac.Equal(got, want)
 }
 
 type ghWebhookEnvelope struct {
@@ -255,7 +248,3 @@ type ghWebhookEnvelope struct {
 type ghRepoPayload struct {
 	FullName string `json:"full_name"`
 }
-
- 
-
-

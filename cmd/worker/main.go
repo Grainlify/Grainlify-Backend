@@ -28,8 +28,8 @@
 //     returns when ctx.Done() fires).
 //  2. Stops the syncjobs ticker loop (syncjobs.Worker.Run returns on ctx.Done()).
 //
-// The process then waits up to 10 s for in-flight work to finish before
-// closing the NATS and database connections and exiting cleanly.
+// The process then waits up to SHUTDOWN_TIMEOUT (default 10s) for in-flight
+// work to finish before closing the NATS and database connections and exiting cleanly.
 package main
 
 import (
@@ -61,7 +61,7 @@ func main() {
 		Level: cfg.LogLevel(),
 	})))
 
-	slog.Info("=== Grainlify Worker Starting ===", "env", cfg.Env)
+	slog.Info("=== Grainlify Worker Starting ===", "env", cfg.Env, "shutdown_timeout", cfg.ShutdownTimeout.String())
 
 	if err := cfg.Validate(); err != nil {
 		slog.Error("startup config validation failed", "error", err)
@@ -179,8 +179,8 @@ func main() {
 	<-workerCtx.Done()
 	slog.Info("shutdown signal received, draining workers")
 
-	// Give goroutines up to 10 s to finish in-flight work.
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Give goroutines up to the configured shutdown timeout to finish in-flight work.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
 	if err := shutdownwait.Wait(shutdownCtx, &workerWG); err != nil {

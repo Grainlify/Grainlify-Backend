@@ -127,6 +127,17 @@ type Config struct {
 	SyncJobsMaxAttempts int
 	// SyncJobsBackoffBase is the base duration for exponential backoff between retries (SYNC_JOBS_BACKOFF_BASE, default 30s).
 	SyncJobsBackoffBase time.Duration
+	// SyncJobsBackoffMax is the maximum duration for exponential backoff between retries.
+	// Controlled by SYNC_JOBS_BACKOFF_MAX, default 1h.
+	SyncJobsBackoffMax time.Duration
+	// SyncJobsFailureAttentionThreshold is the consecutive failure count after which
+	// a sync job is marked dead and requires manual attention.
+	// Controlled by SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD, default 5.
+	SyncJobsFailureAttentionThreshold int
+
+	// ShutdownTimeout is the graceful shutdown drain window before forceful exit.
+	// Controlled by SHUTDOWN_TIMEOUT, default 10s.
+	ShutdownTimeout time.Duration
 
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
@@ -214,8 +225,11 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
-		SyncJobsMaxAttempts: getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
-		SyncJobsBackoffBase: getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
+		SyncJobsMaxAttempts:               getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
+		SyncJobsBackoffBase:               getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
+		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
+		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
+		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
@@ -295,11 +309,11 @@ func (c Config) Validate() error {
 
 		// --- Soroban group: all-or-nothing ---
 		sorobanFields := map[string]string{
-			"SOROBAN_RPC_URL":           c.SorobanRPCURL,
-			"SOROBAN_SOURCE_SECRET":     c.SorobanSourceSecret,
-			"ESCROW_CONTRACT_ID":        c.EscrowContractID,
+			"SOROBAN_RPC_URL":            c.SorobanRPCURL,
+			"SOROBAN_SOURCE_SECRET":      c.SorobanSourceSecret,
+			"ESCROW_CONTRACT_ID":         c.EscrowContractID,
 			"PROGRAM_ESCROW_CONTRACT_ID": c.ProgramEscrowContractID,
-			"TOKEN_CONTRACT_ID":         c.TokenContractID,
+			"TOKEN_CONTRACT_ID":          c.TokenContractID,
 		}
 		anySet := false
 		var missing []string
