@@ -122,7 +122,8 @@ func main() {
 			if needsMigration {
 				slog.Info("migrations needed, running database migrations", "step", "5", "action", "running_database_migrations")
 				// Use background context - migrations handle their own retries without timeouts
-				err := migrate.Up(context.Background(), database.Pool)
+				allowIrreversible := cfg.IsDev() || os.Getenv("MIGRATE_ALLOW_IRREVERSIBLE") == "1"
+			err := migrate.Up(context.Background(), database.Pool, allowIrreversible)
 				if err != nil {
 					slog.Error("migration failed", "step", "5", "action", "migration_failed",
 						"error", err,

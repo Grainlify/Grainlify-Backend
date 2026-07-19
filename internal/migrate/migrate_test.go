@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -66,6 +68,87 @@ func TestMigrationVersions_AreContiguous(t *testing.T) {
 		if v != want {
 			t.Fatalf("migration at position %d has version %d, want %d — gap or numbering error", i, v, want)
 		}
+	}
+}
+
+func TestIrreversibleVersions_ContainsKnownMarkers(t *testing.T) {
+	versions, err := irreversibleVersions()
+	if err != nil {
+		t.Fatalf("irreversibleVersions: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected at least one irreversible marker")
+	}
+	if !versions[7] {
+		t.Error("expected version 7 to be marked irreversible (000007_remove_chain_from_projects)")
+	}
+}
+
+func TestIsIrreversible_KnownVersion(t *testing.T) {
+	ok, err := isIrreversible(7)
+	if err != nil {
+		t.Fatalf("isIrreversible(7): %v", err)
+	}
+	if !ok {
+		t.Error("expected version 7 to be irreversible")
+	}
+}
+
+func TestIsIrreversible_UnknownVersion(t *testing.T) {
+	ok, err := isIrreversible(1)
+	if err != nil {
+		t.Fatalf("isIrreversible(1): %v", err)
+	}
+	if ok {
+		t.Error("expected version 1 to not be irreversible")
+	}
+}
+
+func TestCollectPendingVersions_FromVersion(t *testing.T) {
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("iofs.New: %v", err)
+	}
+	pending, err := collectPendingVersions(src, 5, nil)
+	if err != nil {
+		t.Fatalf("collectPendingVersions: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending versions after version 5")
+	}
+	if pending[0] != 6 {
+		t.Fatalf("first pending version: got %d, want 6", pending[0])
+	}
+}
+
+func TestCollectPendingVersions_FromNilVersion(t *testing.T) {
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("iofs.New: %v", err)
+	}
+	pending, err := collectPendingVersions(src, 0, migrate.ErrNilVersion)
+	if err != nil {
+		t.Fatalf("collectPendingVersions: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending versions when no version applied")
+	}
+	if pending[0] != 1 {
+		t.Fatalf("first pending version: got %d, want 1", pending[0])
+	}
+}
+
+func TestCollectPendingVersions_UnknownStateReturnsNil(t *testing.T) {
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("iofs.New: %v", err)
+	}
+	pending, err := collectPendingVersions(src, 0, fmt.Errorf("some error"))
+	if err != nil {
+		t.Fatalf("collectPendingVersions: %v", err)
+	}
+	if pending != nil {
+		t.Fatal("expected nil pending when version state is unknown")
 	}
 }
 

@@ -44,7 +44,7 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 	}
 
 	// Apply all migrations so the schema is up to date.
-	err = migrate.Up(ctx, pool)
+	err = migrate.Up(ctx, pool, true)
 	if err != nil {
 		pool.Close()
 		t.Fatalf("migrate.Up: %v", err)

@@ -51,7 +51,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 	}
 
 	// Apply migrations
-	if err := migrate.Up(ctx, pool); err != nil {
+	if err := migrate.Up(ctx, pool, true); err != nil {
 		pool.Close()
 		t.Fatalf("migrate.Up: %v", err)
 	}

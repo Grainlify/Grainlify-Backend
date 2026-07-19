@@ -3,8 +3,10 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,7 +126,7 @@ func getLatestMigrationVersion(src source.Driver) (uint, error) {
 	return latestVersion, nil
 }
 
-func Up(ctx context.Context, pool db.DBPool) error {
+func Up(ctx context.Context, pool db.DBPool, allowIrreversible bool) error {
 	if pool == nil {
 		return fmt.Errorf("db pool is nil")
 	}
@@ -229,6 +231,28 @@ func Up(ctx context.Context, pool db.DBPool) error {
 			"version", version,
 			"dirty", dirty,
 		)
+	}
+
+	// Collect pending migration versions for logging and irreversible checks.
+	pendingVersions, err := collectPendingVersions(src, version, err)
+	if err != nil {
+		slog.Warn("could not enumerate pending migrations", "error", err)
+	} else if len(pendingVersions) > 0 {
+		slog.Info("pending migrations to apply", "versions", pendingVersions)
+		if !allowIrreversible {
+			for _, pv := range pendingVersions {
+				irr, irrErr := isIrreversible(pv)
+				if irrErr != nil {
+					return fmt.Errorf("check migration %d irreversible status: %w", pv, irrErr)
+				}
+				if irr {
+					return fmt.Errorf(
+						"migration %d is marked irreversible; use --allow-irreversible or set MIGRATE_ALLOW_IRREVERSIBLE=1",
+						pv,
+					)
+				}
+			}
+		}
 	}
 
 	// migrate.Up() is not context-aware; we still accept ctx for future evolutions.
@@ -364,6 +388,64 @@ func newMigrator(pool db.DBPool) (*migrate.Migrate, func(), error) {
 		_ = sqlDB.Close()
 	}
 	return m, closer, nil
+}
+
+// collectPendingVersions enumerates migration versions that have not yet been applied.
+// versionErr is the error returned by m.Version() — may be migrate.ErrNilVersion.
+func collectPendingVersions(src source.Driver, currentVersion uint, versionErr error) ([]uint, error) {
+	start := currentVersion
+	if versionErr == migrate.ErrNilVersion {
+		first, err := src.First()
+		if err != nil {
+			return nil, fmt.Errorf("get first migration: %w", err)
+		}
+		start = first - 1 // so Next(start) yields the first migration
+	} else if versionErr != nil {
+		return nil, nil // unknown state — skip enumeration
+	}
+
+	var pending []uint
+	cur := start
+	for {
+		nextV, err := src.Next(cur)
+		if err != nil {
+			break
+		}
+		pending = append(pending, nextV)
+		cur = nextV
+	}
+	return pending, nil
+}
+
+// irreversibleVersions scans the embedded FS for *.irreversible marker files
+// and returns a set of migration version numbers that are marked irreversible.
+func irreversibleVersions() (map[uint]bool, error) {
+	entries, err := fs.Glob(migrations.FS, "*.irreversible")
+	if err != nil {
+		return nil, fmt.Errorf("glob irreversible markers: %w", err)
+	}
+	versions := make(map[uint]bool, len(entries))
+	for _, entry := range entries {
+		parts := strings.SplitN(entry, "_", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		v, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		versions[uint(v)] = true
+	}
+	return versions, nil
+}
+
+// isIrreversible reports whether the given migration version is marked irreversible.
+func isIrreversible(version uint) (bool, error) {
+	versions, err := irreversibleVersions()
+	if err != nil {
+		return false, err
+	}
+	return versions[version], nil
 }
 
 // contains checks if a string contains a substring (case-insensitive)
