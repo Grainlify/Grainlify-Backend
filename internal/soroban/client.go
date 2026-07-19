@@ -2,13 +2,13 @@ package soroban
 
 import (
 	"fmt"
-	"log/slog"
-	"net/http"
-	"time"
-
 	"github.com/jagadeesh/grainlify/backend/internal/logger"
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/network"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
 )
 
 // Client wraps the Soroban JSON-RPC transport and Horizon client used by the
@@ -28,6 +28,11 @@ type Client struct {
 	horizonClient     *horizonclient.Client
 	httpClient        *http.Client
 	network           Network
+
+	// mu guards inFlight, the in-flight-poll dedup map used by
+	// PollTransactionStatus. See PollTransactionStatus for details.
+	mu       sync.Mutex
+	inFlight map[string]*inFlightPoll
 }
 
 // Config holds the endpoint, network, and timeout settings used by NewClient.
@@ -60,7 +65,6 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.RPCURL == "" {
 		return nil, fmt.Errorf("RPC URL is required")
 	}
-
 	if cfg.NetworkPassphrase == "" {
 		// Set default based on network
 		if cfg.Network == NetworkMainnet {
@@ -69,24 +73,20 @@ func NewClient(cfg Config) (*Client, error) {
 			cfg.NetworkPassphrase = network.TestNetworkPassphrase
 		}
 	}
-
 	if cfg.HTTPTimeout == 0 {
 		cfg.HTTPTimeout = 30 * time.Second
 	}
-
 	// Create Horizon client
 	horizonURL := "https://horizon-testnet.stellar.org"
 	if cfg.Network == NetworkMainnet {
 		horizonURL = "https://horizon.stellar.org"
 	}
-
 	horizonClient := &horizonclient.Client{
 		HorizonURL: horizonURL,
 		HTTP: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
 	}
-
 	return &Client{
 		rpcURL:            cfg.RPCURL,
 		networkPassphrase: cfg.NetworkPassphrase,
@@ -94,7 +94,8 @@ func NewClient(cfg Config) (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
-		network: cfg.Network,
+		network:  cfg.Network,
+		inFlight: make(map[string]*inFlightPoll),
 	}, nil
 }
 
@@ -154,14 +155,12 @@ func (c *Client) GetRPCURL() string {
 // confirmed; use the RPC and transaction helpers for those states.
 func (c *Client) LogContractInteraction(contractID, function string, args map[string]interface{}) {
 	redactedArgs := logger.RedactMap(args)
-
 	slog.Info("contract interaction",
 		"contract_id", contractID,
 		"function", function,
 		"network", c.network,
 		"args", redactedArgs,
 	)
-
 	// Detailed debugging includes unredacted args
 	slog.Debug("contract interaction detailed",
 		"contract_id", contractID,
