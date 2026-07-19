@@ -174,6 +174,10 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 		slog.Error("bad github webhook event", "error", err)
 		return
 	}
+	if err := e.Validate(); err != nil {
+		slog.Error("invalid github webhook event", "error", err)
+		return
+	}
 
 	// De-duplicate by X-GitHub-Delivery ID before forwarding to Ingest.
 	if c.markSeen(e.DeliveryID) {
@@ -286,6 +290,14 @@ func (c *GitHubWebhookJetStreamConsumer) handleJetStreamMessage(ctx context.Cont
 			"subject", msg.Subject,
 		)
 		// Ack malformed messages so they don't loop forever.
+		_ = msg.Ack()
+		return
+	}
+	if err := e.Validate(); err != nil {
+		slog.Error("invalid github webhook event; acking to avoid infinite redelivery",
+			"error", err,
+			"subject", msg.Subject,
+		)
 		_ = msg.Ack()
 		return
 	}
