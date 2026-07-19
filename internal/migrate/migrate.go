@@ -393,19 +393,35 @@ func newMigrator(pool db.DBPool) (*migrate.Migrate, func(), error) {
 // collectPendingVersions enumerates migration versions that have not yet been applied.
 // versionErr is the error returned by m.Version() — may be migrate.ErrNilVersion.
 func collectPendingVersions(src source.Driver, currentVersion uint, versionErr error) ([]uint, error) {
-	start := currentVersion
+	var pending []uint
+
 	if versionErr == migrate.ErrNilVersion {
+		// No migration has been applied yet. src.Next(v) requires v to be an
+		// existing, known migration version (it looks up that version's own
+		// file), so there's no sentinel "before the first migration" value we
+		// can pass in — seed the list with First() directly and walk forward
+		// from there with Next() instead.
 		first, err := src.First()
 		if err != nil {
 			return nil, fmt.Errorf("get first migration: %w", err)
 		}
-		start = first - 1 // so Next(start) yields the first migration
+		pending = append(pending, first)
+
+		cur := first
+		for {
+			nextV, err := src.Next(cur)
+			if err != nil {
+				break
+			}
+			pending = append(pending, nextV)
+			cur = nextV
+		}
+		return pending, nil
 	} else if versionErr != nil {
 		return nil, nil // unknown state — skip enumeration
 	}
 
-	var pending []uint
-	cur := start
+	cur := currentVersion
 	for {
 		nextV, err := src.Next(cur)
 		if err != nil {
