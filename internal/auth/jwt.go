@@ -1,12 +1,20 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
+
+var (
+	ErrJWTExpired = errors.New("jwt expired")
+	ErrJWTInvalid = errors.New("jwt invalid")
+)
+
+var jwtNow = time.Now
 
 type Claims struct {
 	jwt.RegisteredClaims
@@ -23,7 +31,7 @@ func IssueJWT(secret string, userID uuid.UUID, role string, walletType WalletTyp
 		ttl = 15 * time.Minute
 	}
 
-	now := time.Now()
+	now := jwtNow()
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
@@ -45,37 +53,19 @@ func ParseJWT(secret string, tokenString string) (*Claims, error) {
 	}
 	parsed, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		if token.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("unexpected signing method")
+			return nil, fmt.Errorf("%w: unexpected signing method", ErrJWTInvalid)
 		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithTimeFunc(jwtNow))
 	if err != nil {
-		return nil, err
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, fmt.Errorf("%w: %w", ErrJWTExpired, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrJWTInvalid, err)
 	}
 	claims, ok := parsed.Claims.(*Claims)
 	if !ok || !parsed.Valid {
-		return nil, fmt.Errorf("invalid token")
+		return nil, ErrJWTInvalid
 	}
 	return claims, nil
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

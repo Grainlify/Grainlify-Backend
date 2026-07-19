@@ -383,3 +383,40 @@ func TestPrimaryRateLimitResetCapIsRespected(t *testing.T) {
 		t.Fatalf("MaxWait not respected for X-RateLimit-Reset: elapsed %s", time.Since(start))
 	}
 }
+
+// TestFallbackBackoffUsesBoundedJitter verifies unheadered rate-limit waits are
+// randomized and never exceed the configured MaxWait cap.
+func TestFallbackBackoffUsesBoundedJitter(t *testing.T) {
+	resp := &http.Response{Header: make(http.Header)}
+	maxWait := 20 * time.Millisecond
+
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 100; i++ {
+		d := rateLimitWait(resp, maxWait)
+		if d < 0 || d > maxWait {
+			t.Fatalf("jittered wait = %s, want within [0, %s]", d, maxWait)
+		}
+		seen[d] = true
+	}
+
+	if len(seen) < 2 {
+		t.Fatalf("jittered wait did not vary across repeated calls; saw %d unique value(s)", len(seen))
+	}
+}
+
+// TestHeaderDrivenWaitsTakePrecedenceOverJitter verifies explicit GitHub wait
+// headers remain deterministic and are not replaced by fallback jitter.
+func TestHeaderDrivenWaitsTakePrecedenceOverJitter(t *testing.T) {
+	retryAfter := &http.Response{Header: make(http.Header)}
+	retryAfter.Header.Set("Retry-After", "2")
+	if got := rateLimitWait(retryAfter, 5*time.Second); got != 2*time.Second {
+		t.Fatalf("Retry-After wait = %s, want 2s", got)
+	}
+
+	reset := &http.Response{Header: make(http.Header)}
+	reset.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(2*time.Second).Unix(), 10))
+	got := rateLimitWait(reset, 5*time.Second)
+	if got < time.Second || got > 2*time.Second {
+		t.Fatalf("X-RateLimit-Reset wait = %s, want within [1s, 2s]", got)
+	}
+}

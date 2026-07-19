@@ -115,8 +115,8 @@ func TestVerifyGitHubSignature_EmptyHeader(t *testing.T) {
 }
 
 // assertConstantTimeCompare verifies that verifyGitHubSignature still returns
-// false even when the hex strings are equal length (i.e., it exercises the
-// subtle.ConstantTimeCompare branch rather than short-circuiting on length).
+// false even when the decoded signatures are equal length, exercising the
+// hmac.Equal comparison path rather than only malformed-input rejection.
 func TestVerifyGitHubSignature_ConstantTimeCompareExercised(t *testing.T) {
 	body := []byte(`{"action":"ping"}`)
 	// Construct a header that has the right prefix and right length, but wrong value.

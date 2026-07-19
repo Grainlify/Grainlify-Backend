@@ -64,6 +64,7 @@ func main() {
 		"nats_url_set", cfg.NATSURL != "",
 		"github_oauth_client_id_set", cfg.GitHubOAuthClientID != "",
 		"public_base_url", cfg.PublicBaseURL,
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
 	)
 
 	slog.Info("connecting to database", "step", "4", "action", "connecting_to_database")
@@ -231,8 +232,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("initiating graceful shutdown", "step", "10", "action", "initiating_graceful_shutdown")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	slog.Info("initiating graceful shutdown", "step", "10", "action", "initiating_graceful_shutdown",
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := api.Shutdown(ctx, app); err != nil {

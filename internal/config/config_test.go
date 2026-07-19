@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 // valid32ByteKey returns a base64-encoded 32-byte key for test use.
@@ -165,5 +166,117 @@ func TestValidate_MultipleErrors(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("expected error to mention %q, got: %v", want, msg)
 		}
+	}
+}
+
+// TestValidate_AllRequiredFieldsMissing verifies that when all required fields are missing,
+// the validation error lists every missing field in a deterministic order.
+func TestValidate_AllRequiredFieldsMissing(t *testing.T) {
+	cfg := Config{Env: "production", HTTPAddr: ":8080"}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for all missing required fields")
+	}
+	msg := err.Error()
+	// Verify all required fields are mentioned.
+	for _, field := range []string{"DB_URL", "JWT_SECRET", "TOKEN_ENC_KEY_B64"} {
+		if !strings.Contains(msg, field) {
+			t.Errorf("error should mention %q, got: %v", field, msg)
+		}
+	}
+	// Verify the error is a single aggregated message (not multiple separate errors).
+	if !strings.Contains(msg, "invalid configuration") {
+		t.Errorf("error should have aggregated message prefix, got: %v", msg)
+	}
+}
+
+// TestValidate_OptionalFieldsAtZeroValue verifies that optional fields at their zero value
+// do not trigger validation errors.
+func TestValidate_OptionalFieldsAtZeroValue(t *testing.T) {
+	cfg := prodBase()
+	// Set optional fields to zero values.
+	cfg.NATSURL = ""
+	cfg.GitHubOAuthClientID = ""
+	cfg.GitHubOAuthClientSecret = ""
+	cfg.GitHubAppID = ""
+	cfg.GitHubAppPrivateKey = ""
+	cfg.GitHubWebhookSecret = ""
+	cfg.PublicBaseURL = ""
+	cfg.FrontendBaseURL = ""
+	cfg.CORSOrigins = ""
+	cfg.AdminBootstrapToken = ""
+	cfg.DiditAPIKey = ""
+	cfg.DiditWorkflowID = ""
+	cfg.DiditWebhookSecret = ""
+	cfg.SorobanRPCURL = ""
+	cfg.SorobanSourceSecret = ""
+	cfg.EscrowContractID = ""
+	cfg.ProgramEscrowContractID = ""
+	cfg.TokenContractID = ""
+	cfg.MetricsToken = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("optional fields at zero value should not trigger errors, got: %v", err)
+	}
+}
+
+// TestValidate_ErrorMessageDeterministicOrder verifies that when multiple required fields
+// are missing, they are listed in a deterministic order (struct order in this case).
+func TestValidate_ErrorMessageDeterministicOrder(t *testing.T) {
+	cfg := Config{Env: "production", HTTPAddr: ":8080"}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	// DB_URL should appear before JWT_SECRET, which should appear before TOKEN_ENC_KEY_B64,
+	// following the order they are validated in the Validate() function.
+	dbIdx := strings.Index(msg, "DB_URL")
+	jwtIdx := strings.Index(msg, "JWT_SECRET")
+	tokenIdx := strings.Index(msg, "TOKEN_ENC_KEY_B64")
+	if dbIdx == -1 || jwtIdx == -1 || tokenIdx == -1 {
+		t.Fatalf("all required fields should be present in error, got: %v", msg)
+	}
+	if !(dbIdx < jwtIdx && jwtIdx < tokenIdx) {
+		t.Errorf("expected order DB_URL < JWT_SECRET < TOKEN_ENC_KEY_B64, got indices: %d, %d, %d", dbIdx, jwtIdx, tokenIdx)
+	}
+}
+
+// TestValidate_ErrorDoesNotExposeSecretValues verifies that the error message lists only
+// the environment variable names, not their values (even when the values are invalid).
+func TestValidate_ErrorDoesNotExposeSecretValues(t *testing.T) {
+	cfg := prodBase()
+	secretValue := "my-secret-jwt-key"
+	cfg.JWTSecret = secretValue
+	err := cfg.Validate()
+	// JWTSecret is too short, so validation should fail.
+	if err == nil {
+		t.Fatal("expected validation error for short JWT_SECRET")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secretValue) {
+		t.Fatalf("error message must not contain secret value %q, got: %v", secretValue, msg)
+	}
+	// Should mention the variable name instead.
+	if !strings.Contains(msg, "JWT_SECRET") {
+		t.Fatalf("error should mention JWT_SECRET variable name, got: %v", msg)
+	}
+}
+
+func TestLoad_DefaultShutdownTimeout(t *testing.T) {
+	t.Setenv("SHUTDOWN_TIMEOUT", "")
+
+	cfg := Load()
+	if cfg.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("expected default shutdown timeout 10s, got %s", cfg.ShutdownTimeout)
+	}
+}
+
+func TestLoad_ShutdownTimeoutFromEnv(t *testing.T) {
+	t.Setenv("SHUTDOWN_TIMEOUT", "45s")
+
+	cfg := Load()
+	if cfg.ShutdownTimeout != 45*time.Second {
+		t.Fatalf("expected shutdown timeout 45s, got %s", cfg.ShutdownTimeout)
 	}
 }
