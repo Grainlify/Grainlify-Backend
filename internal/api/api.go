@@ -141,7 +141,7 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 			"correct_url": "/webhooks/github",
 		})
 	})
-	app.Get("/health", handlers.NewHealth(build))
+	app.Get("/health", handlers.NewHealthWithDB(build, deps.DB))
 	app.Get("/ready", handlers.NewReady(deps.DB, deps.Bus))
 	// Prometheus metrics endpoint — restrict access via network policy or METRICS_TOKEN env var.
 	app.Get("/metrics", metrics.TokenGate(cfg.MetricsToken), metrics.Handler())

@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -9,8 +10,30 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
+
+type failingHealthPool struct {
+	err error
+}
+
+func (p failingHealthPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, p.err
+}
+func (p failingHealthPool) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, p.err
+}
+func (p failingHealthPool) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
+func (p failingHealthPool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	return nil, p.err
+}
+func (p failingHealthPool) Ping(context.Context) error { return p.err }
+func (p failingHealthPool) Close()                     {}
+func (p failingHealthPool) Config() *pgxpool.Config    { return nil }
 
 func TestHealthReportsGrainlifyServiceName(t *testing.T) {
 	app := fiber.New()
@@ -202,5 +225,34 @@ func TestHealthDoesNotExposeSensitiveData(t *testing.T) {
 		if strings.Contains(bodyStr, sk) {
 			t.Errorf("response may leak sensitive key matching %q", sk)
 		}
+	}
+}
+
+func TestHealthReportsDatabaseUnavailableDistinctly(t *testing.T) {
+	app := fiber.New()
+	app.Get("/health", handlers.NewHealthWithDB(handlers.BuildInfo{}, &db.DB{Pool: failingHealthPool{err: fmt.Errorf("dial tcp: connection refused")}}))
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/health", nil))
+	if err != nil {
+		t.Fatalf("app.Test returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		OK       bool   `json:"ok"`
+		Database string `json:"database"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if body.OK {
+		t.Fatal("health response ok = true, want false")
+	}
+	if body.Database != "unavailable" {
+		t.Fatalf("database status = %q, want %q", body.Database, "unavailable")
 	}
 }

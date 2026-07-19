@@ -111,6 +111,10 @@ type Config struct {
 	// Controlled by SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD, default 5.
 	SyncJobsFailureAttentionThreshold int
 
+	// ShutdownTimeout is the graceful shutdown drain window before forceful exit.
+	// Controlled by SHUTDOWN_TIMEOUT, default 10s.
+	ShutdownTimeout time.Duration
+
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
 
@@ -204,6 +208,7 @@ func Load() Config {
 		SyncJobsBackoffBase:               getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
 		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
 		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
+		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
