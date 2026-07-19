@@ -55,6 +55,15 @@ var (
 		Help:      "Total number of sync jobs that failed.",
 	})
 
+	// SyncJobsConsecutiveFailures exposes the current consecutive failure count
+	// for each sync job row so alerting can detect repositories needing attention.
+	SyncJobsConsecutiveFailures = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "grainlify",
+		Subsystem: "syncjobs",
+		Name:      "consecutive_failures",
+		Help:      "Current consecutive failure count for a sync job.",
+	}, []string{"job_id", "project_id", "job_type"})
+
 	// WebhooksReceived counts incoming GitHub webhook requests.
 	WebhooksReceived = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "grainlify",

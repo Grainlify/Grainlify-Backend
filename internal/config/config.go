@@ -103,6 +103,13 @@ type Config struct {
 	// SyncJobsBackoffBase is the base duration for exponential backoff between retries.
 	// Controlled by SYNC_JOBS_BACKOFF_BASE, default 30s.
 	SyncJobsBackoffBase time.Duration
+	// SyncJobsBackoffMax is the maximum duration for exponential backoff between retries.
+	// Controlled by SYNC_JOBS_BACKOFF_MAX, default 1h.
+	SyncJobsBackoffMax time.Duration
+	// SyncJobsFailureAttentionThreshold is the consecutive failure count after which
+	// a sync job is marked dead and requires manual attention.
+	// Controlled by SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD, default 5.
+	SyncJobsFailureAttentionThreshold int
 
 	// ShutdownTimeout is the graceful shutdown drain window before forceful exit.
 	// Controlled by SHUTDOWN_TIMEOUT, default 10s.
@@ -197,9 +204,11 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
-		SyncJobsMaxAttempts: getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
-		SyncJobsBackoffBase: getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
-		ShutdownTimeout:     getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
+		SyncJobsMaxAttempts:               getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
+		SyncJobsBackoffBase:               getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
+		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
+		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
+		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
