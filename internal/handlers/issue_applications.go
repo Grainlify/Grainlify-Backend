@@ -34,6 +34,14 @@ type applyToIssueRequest struct {
 
 func (h *IssueApplicationsHandler) Apply() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Validate the idempotency key format before anything else so a malformed
+		// header is reported even when downstream dependencies aren't configured.
+		idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
+		if idempotencyKey != "" && len(idempotencyKey) > 255 {
+			// Max 255 characters to fit in the TEXT column and prevent abuse.
+			return httpx.RespondError(c, fiber.StatusBadRequest, "idempotency_key_too_long", "Idempotency-Key header must be 255 characters or less")
+		}
+
 		if h.db == nil || h.db.Pool == nil {
 			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
@@ -58,13 +66,7 @@ func (h *IssueApplicationsHandler) Apply() fiber.Handler {
 
 		// Idempotency key support: if Idempotency-Key header is present, check for a cached response.
 		// The key is scoped per-user to prevent cross-user response leaks.
-		idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
 		if idempotencyKey != "" {
-			// Validate key length (max 255 characters to fit in TEXT column and prevent abuse).
-			if len(idempotencyKey) > 255 {
-				return httpx.RespondError(c, fiber.StatusBadRequest, "idempotency_key_too_long", "Idempotency-Key header must be 255 characters or less")
-			}
-
 			// Query idempotency_keys for a cached response. Always include user_id in the WHERE clause
 			// to enforce per-user scoping — never query by idempotency_key alone.
 			var responseStatus int
