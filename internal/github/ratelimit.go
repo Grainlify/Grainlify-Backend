@@ -6,6 +6,8 @@
 package github
 
 import (
+	cryptorand "crypto/rand"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 const (
 	DefaultMaxRetries = 3
 	DefaultMaxWait    = 60 * time.Second
+	DefaultBaseWait   = time.Second
 )
 
 // RateLimitTransport is an http.RoundTripper that retries rate-limited GitHub
@@ -105,18 +108,14 @@ func isRateLimited(resp *http.Response) bool {
 }
 
 // rateLimitWait computes how long to sleep before retrying, capped at maxWait.
-// Priority: Retry-After (seconds) > X-RateLimit-Reset (Unix timestamp) > 1s fallback.
+// Priority: Retry-After (seconds) > X-RateLimit-Reset (Unix timestamp) > jittered fallback.
 func rateLimitWait(resp *http.Response, maxWait time.Duration) time.Duration {
 	now := time.Now()
 
 	// Secondary rate limit: Retry-After (seconds).
 	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.ParseInt(v, 10, 64); err == nil && secs > 0 {
-			d := time.Duration(secs) * time.Second
-			if d > maxWait {
-				d = maxWait
-			}
-			return d
+		if secs, err := strconv.ParseInt(v, 10, 64); err == nil && secs >= 0 {
+			return capWait(time.Duration(secs)*time.Second, maxWait)
 		}
 	}
 
@@ -126,15 +125,45 @@ func rateLimitWait(resp *http.Response, maxWait time.Duration) time.Duration {
 			resetAt := time.Unix(unix, 0)
 			d := resetAt.Sub(now)
 			if d <= 0 {
-				return time.Second
+				return capWait(DefaultBaseWait, maxWait)
 			}
-			if d > maxWait {
-				d = maxWait
-			}
-			return d
+			return capWait(d, maxWait)
 		}
 	}
 
-	// Fallback: 1 second.
-	return time.Second
+	// Fallback uses full jitter over the bounded base delay to avoid
+	// synchronized retries when multiple workers hit an unheadered limit.
+	return fullJitterDelay(DefaultBaseWait, maxWait)
+}
+
+func capWait(d, maxWait time.Duration) time.Duration {
+	if maxWait <= 0 {
+		maxWait = DefaultMaxWait
+	}
+	if d > maxWait {
+		return maxWait
+	}
+	return d
+}
+
+func fullJitterDelay(baseWait, maxWait time.Duration) time.Duration {
+	if baseWait <= 0 {
+		baseWait = DefaultBaseWait
+	}
+	if maxWait <= 0 {
+		maxWait = DefaultMaxWait
+	}
+	limit := baseWait
+	if limit > maxWait {
+		limit = maxWait
+	}
+	if limit <= 0 {
+		return 0
+	}
+
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(limit)+1))
+	if err != nil {
+		return limit
+	}
+	return time.Duration(n.Int64())
 }

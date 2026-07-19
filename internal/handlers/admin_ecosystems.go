@@ -79,21 +79,21 @@ LIMIT 200
 				_ = json.Unmarshal(technologiesJSON, &technologies)
 			}
 			out = append(out, fiber.Map{
-				"id":             id.String(),
-				"slug":           slug,
-				"name":           name,
-				"description":    desc,
-				"website_url":    website,
-				"logo_url":       logoURL,
-				"status":         status,
-				"created_at":     createdAt,
-				"updated_at":     updatedAt,
-				"about":          about,
-				"links":          links,
-				"key_areas":      keyAreas,
-				"technologies":   technologies,
-				"project_count":  projectCnt,
-				"user_count":     userCnt,
+				"id":            id.String(),
+				"slug":          slug,
+				"name":          name,
+				"description":   desc,
+				"website_url":   website,
+				"logo_url":      logoURL,
+				"status":        status,
+				"created_at":    createdAt,
+				"updated_at":    updatedAt,
+				"about":         about,
+				"links":         links,
+				"key_areas":     keyAreas,
+				"technologies":  technologies,
+				"project_count": projectCnt,
+				"user_count":    userCnt,
 			})
 		}
 
@@ -141,21 +141,21 @@ WHERE e.id = $1
 		var projectCnt, userCnt int64
 		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(p.id), COUNT(DISTINCT p.owner_user_id) FROM projects p WHERE p.ecosystem_id = $1`, ecoID).Scan(&projectCnt, &userCnt)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"id":             id.String(),
-			"slug":           slug,
-			"name":           name,
-			"description":    desc,
-			"website_url":    website,
-			"logo_url":       logoURL,
-			"status":         status,
-			"created_at":     createdAt,
-			"updated_at":     updatedAt,
-			"about":          about,
-			"links":          links,
-			"key_areas":      keyAreas,
-			"technologies":   technologies,
-			"project_count":  projectCnt,
-			"user_count":     userCnt,
+			"id":            id.String(),
+			"slug":          slug,
+			"name":          name,
+			"description":   desc,
+			"website_url":   website,
+			"logo_url":      logoURL,
+			"status":        status,
+			"created_at":    createdAt,
+			"updated_at":    updatedAt,
+			"about":         about,
+			"links":         links,
+			"key_areas":     keyAreas,
+			"technologies":  technologies,
+			"project_count": projectCnt,
+			"user_count":    userCnt,
 		})
 	}
 }
@@ -169,7 +169,7 @@ type ecosystemUpsertRequest struct {
 	Status       string          `json:"status"` // active|inactive
 	About        string          `json:"about"`
 	Links        json.RawMessage `json:"links"`        // [{"label":"...","url":"..."}]
-	KeyAreas     json.RawMessage `json:"key_areas"`     // [{"title":"...","description":"..."}]
+	KeyAreas     json.RawMessage `json:"key_areas"`    // [{"title":"...","description":"..."}]
 	Technologies json.RawMessage `json:"technologies"` // ["..."]
 }
 
@@ -337,5 +337,3 @@ func normalizeSlug(s string) string {
 	}
 	return strings.Trim(string(out), "-")
 }
-
-

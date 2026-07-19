@@ -54,7 +54,7 @@ func ParsePagination(c *fiber.Ctx, defaultLimit, maxLimit int) (PaginationParams
 //
 // The returned map has the shape:
 //
-//	{ "<itemsKey>": [...], "limit": N, "offset": N, "total": N }
+//	{ "<itemsKey>": [...], "limit": N, "offset": N, "total": N, "has_more": bool }
 //
 // If items is nil, an empty slice is substituted so the JSON always contains
 // an array value for the items key.
@@ -63,9 +63,10 @@ func PaginatedResponse(itemsKey string, items any, p PaginationParams, total int
 		items = []any{}
 	}
 	return fiber.Map{
-		itemsKey: items,
-		"limit":  p.Limit,
-		"offset": p.Offset,
-		"total":  total,
+		itemsKey:   items,
+		"limit":    p.Limit,
+		"offset":   p.Offset,
+		"total":    total,
+		"has_more": p.Offset+p.Limit < total,
 	}
 }

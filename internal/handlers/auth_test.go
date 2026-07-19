@@ -28,7 +28,7 @@ func decodeErrorCode(t *testing.T, body []byte) string {
 	var env httpx.ErrorEnvelope
 	err := json.Unmarshal(body, &env)
 	assert.NoError(t, err)
-	return env.Error.Code
+	return env.Error
 }
 
 func getTestPool(t *testing.T) *pgxpool.Pool {

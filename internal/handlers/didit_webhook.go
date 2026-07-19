@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -73,11 +75,11 @@ func (h *DiditWebhookHandler) Receive() fiber.Handler {
 			return h.handleWebhook(c)
 		case fiber.MethodGet:
 			if h.db == nil || h.db.Pool == nil {
-				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+				return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 			}
 			return h.handleCallback(c)
 		default:
-			return c.Status(fiber.StatusMethodNotAllowed).JSON(fiber.Map{"error": "method_not_allowed"})
+			return httpx.RespondError(c, fiber.StatusMethodNotAllowed, "method_not_allowed", "")
 		}
 	}
 }
@@ -100,7 +102,7 @@ func (h *DiditWebhookHandler) handleWebhook(c *fiber.Ctx) error {
 			"path", c.Path(),
 			"remote_ip", c.IP(),
 		)
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook_secret_not_configured"})
+		return httpx.RespondError(c, fiber.StatusServiceUnavailable, "webhook_secret_not_configured", "")
 	}
 
 	if !verifyDiditSignature(h.cfg.DiditWebhookSecret, body, signature, timestamp) {
@@ -111,7 +113,7 @@ func (h *DiditWebhookHandler) handleWebhook(c *fiber.Ctx) error {
 			"signature_present", signature != "",
 			"timestamp_present", timestamp != "",
 		)
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
+		return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_signature", "")
 	}
 
 	slog.Info("Didit webhook signature verification succeeded",
@@ -121,7 +123,7 @@ func (h *DiditWebhookHandler) handleWebhook(c *fiber.Ctx) error {
 
 	var event WebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+		return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 	}
 
 	slog.Info("Didit webhook event parsed",
@@ -134,25 +136,25 @@ func (h *DiditWebhookHandler) handleWebhook(c *fiber.Ctx) error {
 	)
 
 	if event.SessionID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
+		return httpx.RespondError(c, fiber.StatusBadRequest, "missing_session_id", "")
 	}
 	if h.db == nil || h.db.Pool == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 	}
 
 	userID, err := h.lookupUserByKYCSessionID(c.Context(), event.SessionID)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
+		return httpx.RespondError(c, fiber.StatusNotFound, "session_not_found", "")
 	}
 
 	kycStatus, decisionJSON, err := h.resolveDiditStatus(c.Context(), event.SessionID, event.Status, false)
 	if err != nil {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "didit_decision_fetch_failed"})
+		return httpx.RespondError(c, fiber.StatusBadGateway, "didit_decision_fetch_failed", "")
 	}
 
 	if err := h.updateUserKYCStatus(c.Context(), userID, kycStatus, decisionJSON); err != nil {
 		slog.Error("failed to update kyc status", "error", err, "user_id", userID, "status", kycStatus)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+		return httpx.RespondError(c, fiber.StatusInternalServerError, "kyc_update_failed", "")
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
@@ -164,7 +166,7 @@ func (h *DiditWebhookHandler) handleCallback(c *fiber.Ctx) error {
 		sessionID = strings.TrimSpace(c.Query("session_id"))
 	}
 	if sessionID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
+		return httpx.RespondError(c, fiber.StatusBadRequest, "missing_session_id", "")
 	}
 
 	slog.Info("Didit callback received", "session_id", sessionID)
@@ -172,16 +174,16 @@ func (h *DiditWebhookHandler) handleCallback(c *fiber.Ctx) error {
 	kycStatus, decisionJSON, err := h.resolveDiditStatus(c.Context(), sessionID, "", true)
 	if err != nil {
 		slog.Error("didit callback decision fetch failed", "session_id", sessionID, "error", err.Error())
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "didit_decision_fetch_failed"})
+		return httpx.RespondError(c, fiber.StatusBadGateway, "didit_decision_fetch_failed", "")
 	}
 
 	userID, err := h.lookupUserByKYCSessionID(c.Context(), sessionID)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
+		return httpx.RespondError(c, fiber.StatusNotFound, "session_not_found", "")
 	}
 
 	if err := h.updateUserKYCStatus(c.Context(), userID, kycStatus, decisionJSON); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+		return httpx.RespondError(c, fiber.StatusInternalServerError, "kyc_update_failed", "")
 	}
 
 	redirectURL := h.diditCallbackRedirectURL(kycStatus, sessionID)

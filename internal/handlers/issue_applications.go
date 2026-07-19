@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
-	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
-
 
 type IssueApplicationsHandler struct {
 	cfg config.Config
@@ -34,6 +34,14 @@ type applyToIssueRequest struct {
 
 func (h *IssueApplicationsHandler) Apply() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Validate the idempotency key format before anything else so a malformed
+		// header is reported even when downstream dependencies aren't configured.
+		idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
+		if idempotencyKey != "" && len(idempotencyKey) > 255 {
+			// Max 255 characters to fit in the TEXT column and prevent abuse.
+			return httpx.RespondError(c, fiber.StatusBadRequest, "idempotency_key_too_long", "Idempotency-Key header must be 255 characters or less")
+		}
+
 		if h.db == nil || h.db.Pool == nil {
 			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
@@ -54,6 +62,49 @@ func (h *IssueApplicationsHandler) Apply() fiber.Handler {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
+		}
+
+		// Idempotency key support: if Idempotency-Key header is present, check for a cached response.
+		// The key is scoped per-user to prevent cross-user response leaks.
+		if idempotencyKey != "" {
+			// Query idempotency_keys for a cached response. Always include user_id in the WHERE clause
+			// to enforce per-user scoping — never query by idempotency_key alone.
+			var responseStatus int
+			var responseBody string
+			err := h.db.Pool.QueryRow(c.Context(), `
+SELECT response_status, response_body
+FROM idempotency_keys
+WHERE user_id = $1 AND idempotency_key = $2 AND expires_at > now()
+LIMIT 1
+`, userID, idempotencyKey).Scan(&responseStatus, &responseBody)
+
+			if err == nil {
+				// Cache hit: return the stored response without executing the application creation logic.
+				slog.Info("idempotency cache hit",
+					"user_id", userID.String(),
+					"idempotency_key_hash", fmt.Sprintf("%x", hashString(idempotencyKey)[:8]), // Log truncated hash, not the key itself
+					"project_id", projectID.String(),
+					"issue_number", issueNumber,
+				)
+				// Deserialize the stored JSON response body and return it with the original status code.
+				var cachedResponse fiber.Map
+				if jsonErr := json.Unmarshal([]byte(responseBody), &cachedResponse); jsonErr != nil {
+					slog.Error("failed to deserialize cached idempotency response",
+						"user_id", userID.String(),
+						"error", jsonErr,
+					)
+					// If deserialization fails, fall through to re-execute the request rather than failing.
+				} else {
+					return c.Status(responseStatus).JSON(cachedResponse)
+				}
+			} else if !strings.Contains(err.Error(), "no rows") {
+				// Log unexpected database errors but do not fail the request — fall through to execute normally.
+				slog.Warn("idempotency key lookup failed",
+					"user_id", userID.String(),
+					"error", err,
+				)
+			}
+			// Cache miss or lookup error: proceed to normal application creation logic.
 		}
 
 		var req applyToIssueRequest
@@ -148,16 +199,41 @@ SET comments = COALESCE(comments, '[]'::jsonb) || $3::jsonb,
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		// Build success response.
+		successResponse := fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
-		})
+		}
+
+		// If an idempotency key was provided, cache this success response for 24 hours.
+		// Cache writes are best-effort: if the write fails, log the error but do not fail
+		// the request — the application was successfully created and the response has already
+		// been committed to the client.
+		if idempotencyKey != "" {
+			responseBodyJSON, _ := json.Marshal(successResponse)
+			_, insertErr := h.db.Pool.Exec(c.Context(), `
+INSERT INTO idempotency_keys (user_id, idempotency_key, response_status, response_body, created_at, expires_at)
+VALUES ($1, $2, $3, $4, now(), now() + interval '24 hours')
+ON CONFLICT (user_id, idempotency_key) DO NOTHING
+`, userID, idempotencyKey, fiber.StatusOK, string(responseBodyJSON))
+			if insertErr != nil {
+				// Log the error but do not fail the request — the application was created successfully.
+				slog.Warn("failed to write idempotency cache",
+					"user_id", userID.String(),
+					"project_id", projectID.String(),
+					"issue_number", issueNumber,
+					"error", insertErr,
+				)
+			}
+		}
+
+		return c.Status(fiber.StatusOK).JSON(successResponse)
 	}
 }
 
@@ -264,9 +340,9 @@ WHERE project_id = $1 AND number = $2
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
@@ -696,3 +772,9 @@ WHERE project_id = $1 AND number = $2
 	}
 }
 
+// hashString returns the SHA-256 hash of a string for logging purposes.
+// Used to log a non-sensitive reference to idempotency keys without exposing the full key value.
+func hashString(s string) []byte {
+	h := sha256.Sum256([]byte(s))
+	return h[:]
+}

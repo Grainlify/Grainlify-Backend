@@ -13,11 +13,16 @@ import (
 )
 
 type Config struct {
+	// Env is the deployment environment (APP_ENV, default "dev").
 	Env      string
+	// HTTPAddr is the HTTP listen address (HTTP_ADDR, or :PORT if HTTP_ADDR is empty, default ":8080").
 	HTTPAddr string
+	// Log is the log level (LOG_LEVEL, default "info").
 	Log      string
 
+	// DBURL is the PostgreSQL connection string (DB_URL, required in non-dev environments).
 	DBURL       string
+	// AutoMigrate enables automatic database migration at startup (AUTO_MIGRATE, default false).
 	AutoMigrate bool
 
 	// DBMaxConns is the maximum number of connections in the pool (DB_MAX_CONNS, default 10).
@@ -29,8 +34,10 @@ type Config struct {
 	// DBMaxConnIdleTime is the maximum idle time before a connection is closed (DB_MAX_CONN_IDLE_TIME, default 5m).
 	DBMaxConnIdleTime time.Duration
 
+	// JWTSecret is the secret key for signing JWTs (JWT_SECRET, required ≥32 characters in non-dev).
 	JWTSecret string
 
+	// NATSURL is the NATS server URL (NATS_URL, optional, default "").
 	NATSURL string
 
 	// JetStream configuration for durable GitHub webhook event delivery.
@@ -47,78 +54,106 @@ type Config struct {
 	// JetStreamMaxAge is the maximum age of messages retained in the stream (JS_MAX_AGE, default 24h).
 	JetStreamMaxAge time.Duration
 
+	// GitHubOAuthClientID is the GitHub OAuth app client ID (GITHUB_OAUTH_CLIENT_ID, optional).
 	GitHubOAuthClientID           string
+	// GitHubOAuthClientSecret is the GitHub OAuth app client secret (GITHUB_OAUTH_CLIENT_SECRET, optional).
 	GitHubOAuthClientSecret       string
+	// GitHubOAuthRedirectURL is the full OAuth callback URL (GITHUB_OAUTH_REDIRECT_URL, optional).
 	GitHubOAuthRedirectURL        string // Full callback URL (e.g., http://localhost:8080/auth/github/login/callback)
+	// GitHubOAuthSuccessRedirectURL is the URL to redirect to after successful OAuth (GITHUB_OAUTH_SUCCESS_REDIRECT_URL, optional).
 	GitHubOAuthSuccessRedirectURL string
+	// GitHubLoginRedirectURL is the alternative callback URL (GITHUB_LOGIN_REDIRECT_URL, deprecated, use GitHubOAuthRedirectURL, optional).
 	GitHubLoginRedirectURL        string // Alternative callback URL (deprecated, use GitHubOAuthRedirectURL)
+	// GitHubLoginSuccessRedirectURL is the URL to redirect to after successful login (GITHUB_LOGIN_SUCCESS_REDIRECT_URL, optional).
 	GitHubLoginSuccessRedirectURL string
 
 	// GitHub App configuration (for organization installations)
+	// GitHubAppID is the GitHub App ID (GITHUB_APP_ID, numeric, optional).
 	GitHubAppID         string // GitHub App ID (numeric)
+	// GitHubAppSlug is the GitHub App slug (GITHUB_APP_SLUG, e.g., "grainlify", optional).
 	GitHubAppSlug       string // GitHub App slug (e.g., "grainlify")
+	// GitHubAppPrivateKey is the GitHub App private key (GITHUB_APP_PRIVATE_KEY, PEM format, base64 encoded, optional).
 	GitHubAppPrivateKey string // GitHub App private key (PEM format, base64 encoded)
 
-	// Used to validate GitHub webhook signatures (X-Hub-Signature-256).
+	// GitHubWebhookSecret is used to validate GitHub webhook signatures (GITHUB_WEBHOOK_SECRET, X-Hub-Signature-256, optional).
 	GitHubWebhookSecret string
 
-	// Public base URL of this backend, used when registering GitHub webhooks.
+	// PublicBaseURL is the public base URL of this backend (PUBLIC_BASE_URL, used when registering GitHub webhooks, optional).
 	PublicBaseURL string
 
-	// Frontend base URL (e.g., http://localhost:5173 or https://yourdomain.com)
+	// FrontendBaseURL is the frontend base URL (FRONTEND_BASE_URL, e.g., http://localhost:5173 or https://yourdomain.com, optional).
 	// Used for OAuth redirects and CORS configuration
 	FrontendBaseURL string
 
-	// Allowed CORS origins (comma-separated). If empty, uses FrontendBaseURL
+	// CORSOrigins is a comma-separated list of allowed CORS origins (CORS_ORIGINS, optional, defaults to FrontendBaseURL).
 	// Example: "http://localhost:5173,https://grainlify.figma.site"
 	CORSOrigins string
 
-	// CORSAllowPreview enables wildcard matching for *.vercel.app and *.0xo.in origins.
+	// CORSAllowPreview enables wildcard matching for *.vercel.app and *.0xo.in origins (CORS_ALLOW_PREVIEW, default false).
 	// Off by default; only enable when preview deployments need credentialed CORS access.
 	CORSAllowPreview bool
 
-	// Used to encrypt stored OAuth access tokens at rest. Must be 32 bytes base64 (AES-256-GCM key).
+	// TokenEncKeyB64 is used to encrypt stored OAuth access tokens at rest (TOKEN_ENC_KEY_B64, must be 32 bytes base64, required in non-dev).
 	TokenEncKeyB64 string
 
-	// Dev/admin convenience: allow promoting a logged-in user to admin via a shared token.
+	// AdminBootstrapToken is a dev/admin convenience shared token for promoting users to admin (ADMIN_BOOTSTRAP_TOKEN, optional).
 	AdminBootstrapToken string
 
 	// Didit KYC verification
+	// DiditAPIKey is the Didit API key (DIDIT_API_KEY, optional).
 	DiditAPIKey        string
+	// DiditWorkflowID is the Didit workflow ID (DIDIT_WORKFLOW_ID, optional).
 	DiditWorkflowID    string
+	// DiditWebhookSecret is the Didit webhook secret (DIDIT_WEBHOOK_SECRET, optional).
 	DiditWebhookSecret string
 
 	// Soroban configuration
+	// SorobanRPCURL is the Soroban RPC URL (SOROBAN_RPC_URL, optional as a group with other Soroban fields).
 	SorobanRPCURL            string
+	// SorobanNetworkPassphrase is the Soroban network passphrase (SOROBAN_NETWORK_PASSPHRASE, optional).
 	SorobanNetworkPassphrase string
+	// SorobanNetwork is "testnet" or "mainnet" (SOROBAN_NETWORK, default "testnet").
 	SorobanNetwork           string // "testnet" or "mainnet"
+	// SorobanSourceSecret is the Soroban source secret (SOROBAN_SOURCE_SECRET, optional as a group).
 	SorobanSourceSecret      string
+	// EscrowContractID is the escrow contract ID (ESCROW_CONTRACT_ID, optional as a group).
 	EscrowContractID         string
+	// ProgramEscrowContractID is the program escrow contract ID (PROGRAM_ESCROW_CONTRACT_ID, optional as a group).
 	ProgramEscrowContractID  string
+	// TokenContractID is the token contract ID (TOKEN_CONTRACT_ID, optional as a group).
 	TokenContractID          string
 
-	// SyncJobsMaxAttempts is the maximum number of attempts before a sync job is dead-lettered.
-	// Controlled by SYNC_JOBS_MAX_ATTEMPTS, default 5.
+	// SyncJobsMaxAttempts is the maximum number of attempts before a sync job is dead-lettered (SYNC_JOBS_MAX_ATTEMPTS, default 5).
 	SyncJobsMaxAttempts int
-	// SyncJobsBackoffBase is the base duration for exponential backoff between retries.
-	// Controlled by SYNC_JOBS_BACKOFF_BASE, default 30s.
+	// SyncJobsBackoffBase is the base duration for exponential backoff between retries (SYNC_JOBS_BACKOFF_BASE, default 30s).
 	SyncJobsBackoffBase time.Duration
+	// SyncJobsBackoffMax is the maximum duration for exponential backoff between retries.
+	// Controlled by SYNC_JOBS_BACKOFF_MAX, default 1h.
+	SyncJobsBackoffMax time.Duration
+	// SyncJobsFailureAttentionThreshold is the consecutive failure count after which
+	// a sync job is marked dead and requires manual attention.
+	// Controlled by SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD, default 5.
+	SyncJobsFailureAttentionThreshold int
+
+	// ShutdownTimeout is the graceful shutdown drain window before forceful exit.
+	// Controlled by SHUTDOWN_TIMEOUT, default 10s.
+	ShutdownTimeout time.Duration
 
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
+	// WebhookMaxBodyBytes is the maximum request body size in bytes for webhook routes
+	// (WEBHOOK_MAX_BODY_BYTES, default 10485760 / 10MB).
+	WebhookMaxBodyBytes int
 
-	// MetricsToken is the bearer token required to access /metrics. If empty, the endpoint
-	// is unauthenticated — only acceptable when /metrics is firewalled at the network level.
+	// MetricsToken is the bearer token required to access /metrics (METRICS_TOKEN, optional, default "").
+	// If empty, the endpoint is unauthenticated — only acceptable when /metrics is firewalled at the network level.
 	MetricsToken string
 
-	// RateLimitAuthPerMin is the per-minute limit for auth and webhook endpoints.
-	// Controlled by RATE_LIMIT_AUTH_PER_MIN, default 60 requests/minute.
+	// RateLimitAuthPerMin is the per-minute limit for auth and webhook endpoints (RATE_LIMIT_AUTH_PER_MIN, default 60 requests/minute).
 	RateLimitAuthPerMin int
-	// RateLimitPublicPerMin is the per-minute limit for public read endpoints.
-	// Controlled by RATE_LIMIT_PUBLIC_PER_MIN, default 300 requests/minute.
+	// RateLimitPublicPerMin is the per-minute limit for public read endpoints (RATE_LIMIT_PUBLIC_PER_MIN, default 300 requests/minute).
 	RateLimitPublicPerMin int
-	// TrustedProxies contains the IPs or CIDRs that are allowed to supply
-	// X-Forwarded-For values. Controlled by TRUSTED_PROXIES.
+	// TrustedProxies contains the IPs or CIDRs that are allowed to supply X-Forwarded-For values (TRUSTED_PROXIES, default "127.0.0.1,::1").
 	TrustedProxies []string
 }
 
@@ -193,10 +228,14 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
-		SyncJobsMaxAttempts: getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
-		SyncJobsBackoffBase: getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
+		SyncJobsMaxAttempts:               getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
+		SyncJobsBackoffBase:               getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
+		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
+		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
+		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
+		WebhookMaxBodyBytes:   getEnvInt("WEBHOOK_MAX_BODY_BYTES", 10*1024*1024),
 		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
 		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
 		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
@@ -274,11 +313,11 @@ func (c Config) Validate() error {
 
 		// --- Soroban group: all-or-nothing ---
 		sorobanFields := map[string]string{
-			"SOROBAN_RPC_URL":           c.SorobanRPCURL,
-			"SOROBAN_SOURCE_SECRET":     c.SorobanSourceSecret,
-			"ESCROW_CONTRACT_ID":        c.EscrowContractID,
+			"SOROBAN_RPC_URL":            c.SorobanRPCURL,
+			"SOROBAN_SOURCE_SECRET":      c.SorobanSourceSecret,
+			"ESCROW_CONTRACT_ID":         c.EscrowContractID,
 			"PROGRAM_ESCROW_CONTRACT_ID": c.ProgramEscrowContractID,
-			"TOKEN_CONTRACT_ID":         c.TokenContractID,
+			"TOKEN_CONTRACT_ID":          c.TokenContractID,
 		}
 		anySet := false
 		var missing []string

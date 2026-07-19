@@ -13,9 +13,9 @@ func TestValidateCreate(t *testing.T) {
 	futureEnd := time.Now().Add(48 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 
 	tests := []struct {
-		name   string
-		req    oswCreateRequest
-		want   string // expected error code; empty string means pass
+		name string
+		req  oswCreateRequest
+		want string // expected error code; empty string means pass
 	}{
 		{
 			name: "valid minimal",

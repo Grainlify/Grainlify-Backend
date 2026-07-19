@@ -14,9 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
-	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
 
 type ProjectsPublicHandler struct {
@@ -501,7 +501,6 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 		// Exclude special GitHub repositories (owner/.github)
 		conditions = append(conditions, "split_part(p.github_full_name, '/', 2) != '.github'")
 
-
 		// Filter by ecosystem
 		if ecosystem != "" {
 			conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(e.name)) = LOWER($%d)", argPos))
@@ -605,7 +604,8 @@ LIMIT $%d OFFSET $%d
 			var description *string
 
 			if err := rows.Scan(&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount, &createdAt, &updatedAt, &ecosystemName, &ecosystemSlug, &description); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_list_failed", "details": err.Error()})
+				slog.Error("projects list: row scan failed", "error", err.Error())
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
 			}
 
 			// Parse tags JSONB

@@ -29,9 +29,9 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 		"app_name", "grainlify-api",
 	)
 	// Since Fiber/fasthttp enforces BodyLimit at the server level before routing,
-	// the global BodyLimit must accommodate the larger webhook payload size (e.g. 10 MB).
+	// the global BodyLimit must accommodate the larger webhook payload size.
 	// We then enforce the tighter MaxBodyBytes on all other routes via middleware.
-	webhookBodyLimit := 10 * 1024 * 1024 // 10 MB for GitHub webhooks
+	webhookBodyLimit := cfg.WebhookMaxBodyBytes
 	globalBodyLimit := cfg.MaxBodyBytes
 	if globalBodyLimit < webhookBodyLimit {
 		globalBodyLimit = webhookBodyLimit
@@ -90,33 +90,13 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	app.Use(cors.New(corsConfig))
 	app.Use(logger.New())
 
-	// Enforce MAX_BODY_BYTES request body size limit for all routes except the GitHub webhook route
-	app.Use(func(c *fiber.Ctx) error {
-		// A non-positive limit means "no per-route limit configured"; skip the
-		// check so an unset MaxBodyBytes does not reject every request.
-		if cfg.MaxBodyBytes <= 0 {
-			return c.Next()
-		}
-
-		path := c.Path()
-		// Allow larger payloads on the GitHub webhook route
-		if strings.HasPrefix(path, "/webhooks/github") {
-			return c.Next()
-		}
-
-		// Enforce MaxBodyBytes limit by checking Content-Length header first
-		contentLength := c.Request().Header.ContentLength()
-		if contentLength > cfg.MaxBodyBytes {
-			return fiber.ErrRequestEntityTooLarge
-		}
-
-		// Also check the actual read body size in case of chunked encoding or forged headers
-		if len(c.Body()) > cfg.MaxBodyBytes {
-			return fiber.ErrRequestEntityTooLarge
-		}
-
-		return c.Next()
-	})
+	// Enforce request body size limits — standard routes get cfg.MaxBodyBytes,
+	// webhook routes get the larger cfg.WebhookMaxBodyBytes.
+	app.Use(NewBodyLimitMiddleware(BodyLimitConfig{
+		DefaultLimit:    cfg.MaxBodyBytes,
+		WebhookLimit:    cfg.WebhookMaxBodyBytes,
+		WebhookPrefixes: []string{"/webhooks/github", "/webhooks/didit"},
+	}))
 
 	// Routes.
 	// Root handler - also handle POST requests to catch misconfigured webhooks
@@ -141,7 +121,7 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 			"correct_url": "/webhooks/github",
 		})
 	})
-	app.Get("/health", handlers.NewHealth(build))
+	app.Get("/health", handlers.NewHealthWithDB(build, deps.DB))
 	app.Get("/ready", handlers.NewReady(deps.DB, deps.Bus))
 	// Prometheus metrics endpoint — restrict access via network policy or METRICS_TOKEN env var.
 	app.Get("/metrics", metrics.TokenGate(cfg.MetricsToken), metrics.Handler())

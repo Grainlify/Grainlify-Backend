@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/jagadeesh/grainlify/backend/internal/events"
+	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 )
 
 type GitHubWebhookIngestor interface {
@@ -24,9 +26,20 @@ type GitHubWebhookConsumer struct {
 	Sub    *nats.Subscription
 	Ingest GitHubWebhookIngestor
 
+	// ShutdownGracePeriod bounds how long shutdown waits for in-flight message
+	// handlers before cancelling their contexts. Defaults to
+	// defaultShutdownGracePeriod.
+	ShutdownGracePeriod time.Duration
+
+	wg sync.WaitGroup
+
+	processingMu     sync.RWMutex
+	processingCtx    context.Context
+	cancelProcessing context.CancelFunc
+
 	// seenMu guards seenDeliveryIDs.
-	seenMu           sync.Mutex
-	seenDeliveryIDs  map[string]struct{}
+	seenMu          sync.Mutex
+	seenDeliveryIDs map[string]struct{}
 	// maxSeenIDs caps the in-memory set size; eviction drops the oldest by insertion-order
 	// approximation (reset the map when full). Default 0 means no cap.
 	maxSeenIDs int
@@ -38,6 +51,8 @@ const GitHubWebhookQueueGroup = "grainlify-workers"
 // defaultMaxSeenIDs is the default cap for the in-memory seen-set.
 // When the set reaches this size it is cleared (cheap, safe approximation of LRU).
 const defaultMaxSeenIDs = 10_000
+
+const defaultShutdownGracePeriod = 10 * time.Second
 
 func githubWebhookQueueGroup(queue string) string {
 	if queue == "" {
@@ -52,21 +67,76 @@ func (c *GitHubWebhookConsumer) Subscribe(ctx context.Context, nc *nats.Conn, qu
 		return nil
 	}
 	queue = githubWebhookQueueGroup(queue)
+	processingCtx := c.initProcessingContext(ctx)
 
 	sub, err := nc.QueueSubscribe(events.SubjectGitHubWebhookReceived, queue, func(msg *nats.Msg) {
-		c.handleMessage(ctx, msg)
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.handleMessage(processingCtx, msg)
+		}()
 	})
 	if err != nil {
 		return err
 	}
 	c.Sub = sub
 
-	go func() {
-		<-ctx.Done()
-		_ = sub.Unsubscribe()
-	}()
+	go c.drainOnShutdown(ctx, sub)
 
 	return nil
+}
+
+func (c *GitHubWebhookConsumer) initProcessingContext(ctx context.Context) context.Context {
+	c.processingMu.Lock()
+	defer c.processingMu.Unlock()
+
+	if c.cancelProcessing != nil {
+		c.cancelProcessing()
+	}
+	processingCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	c.processingCtx = processingCtx
+	c.cancelProcessing = cancel
+	return processingCtx
+}
+
+func (c *GitHubWebhookConsumer) processingContext(ctx context.Context) context.Context {
+	c.processingMu.RLock()
+	processingCtx := c.processingCtx
+	c.processingMu.RUnlock()
+	if processingCtx != nil {
+		return processingCtx
+	}
+	return ctx
+}
+
+func (c *GitHubWebhookConsumer) shutdownGracePeriod() time.Duration {
+	if c.ShutdownGracePeriod > 0 {
+		return c.ShutdownGracePeriod
+	}
+	return defaultShutdownGracePeriod
+}
+
+func (c *GitHubWebhookConsumer) drainOnShutdown(ctx context.Context, sub *nats.Subscription) {
+	<-ctx.Done()
+	if sub != nil {
+		_ = sub.Unsubscribe()
+	}
+
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), c.shutdownGracePeriod())
+	defer cancelGrace()
+
+	if err := shutdownwait.Wait(graceCtx, &c.wg); err != nil {
+		slog.Warn("github webhook consumer shutdown grace period exceeded; cancelling in-flight messages", "error", err)
+		c.processingMu.RLock()
+		cancelProcessing := c.cancelProcessing
+		c.processingMu.RUnlock()
+		if cancelProcessing != nil {
+			cancelProcessing()
+		}
+		return
+	}
+
+	slog.Info("github webhook consumer drained in-flight messages")
 }
 
 // markSeen returns true if deliveryID has been seen before (duplicate), false if new.
@@ -98,9 +168,14 @@ func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
 }
 
 func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg) {
+	ctx = c.processingContext(ctx)
 	var e events.GitHubWebhookReceived
 	if err := json.Unmarshal(msg.Data, &e); err != nil {
 		slog.Error("bad github webhook event", "error", err)
+		return
+	}
+	if err := e.Validate(); err != nil {
+		slog.Error("invalid github webhook event", "error", err)
 		return
 	}
 
@@ -114,6 +189,14 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 		return
 	}
 	if err := c.Ingest.Ingest(ctx, e); err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("github webhook message processing cancelled",
+				"error", err,
+				"delivery_id", e.DeliveryID,
+				"event", e.Event,
+			)
+			return
+		}
 		slog.Error("webhook ingest failed", "error", err)
 	}
 }
@@ -207,6 +290,14 @@ func (c *GitHubWebhookJetStreamConsumer) handleJetStreamMessage(ctx context.Cont
 			"subject", msg.Subject,
 		)
 		// Ack malformed messages so they don't loop forever.
+		_ = msg.Ack()
+		return
+	}
+	if err := e.Validate(); err != nil {
+		slog.Error("invalid github webhook event; acking to avoid infinite redelivery",
+			"error", err,
+			"subject", msg.Subject,
+		)
 		_ = msg.Ack()
 		return
 	}
