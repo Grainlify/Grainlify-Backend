@@ -34,7 +34,7 @@ func NewBodyLimitMiddleware(cfg BodyLimitConfig) fiber.Handler {
 		}
 
 		contentLength := c.Request().Header.ContentLength()
-		if contentLength > int64(limit) {
+		if int64(contentLength) > int64(limit) {
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "Request body exceeds size limit")
 		}
 
