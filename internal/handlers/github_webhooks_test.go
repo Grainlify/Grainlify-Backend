@@ -115,8 +115,8 @@ func TestVerifyGitHubSignature_EmptyHeader(t *testing.T) {
 }
 
 // assertConstantTimeCompare verifies that verifyGitHubSignature still returns
-// false even when the hex strings are equal length (i.e., it exercises the
-// subtle.ConstantTimeCompare branch rather than short-circuiting on length).
+// false even when the decoded signatures are equal length, exercising the
+// hmac.Equal comparison path rather than only malformed-input rejection.
 func TestVerifyGitHubSignature_ConstantTimeCompareExercised(t *testing.T) {
 	body := []byte(`{"action":"ping"}`)
 	// Construct a header that has the right prefix and right length, but wrong value.
@@ -180,10 +180,10 @@ func TestReceive_InvalidSignature_Returns401(t *testing.T) {
 
 	body := []byte(`{"action":"ping"}`)
 	resp := doRequest(app, body, map[string]string{
-		"Content-Type":            "application/json",
-		"X-GitHub-Event":          "ping",
-		"X-GitHub-Delivery":       "abc-2",
-		"X-Hub-Signature-256":     "sha256=deadbeef",
+		"Content-Type":        "application/json",
+		"X-GitHub-Event":      "ping",
+		"X-GitHub-Delivery":   "abc-2",
+		"X-Hub-Signature-256": "sha256=deadbeef",
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusUnauthorized {
@@ -198,10 +198,10 @@ func TestReceive_ValidSignature_PublishesToBus(t *testing.T) {
 
 	body := []byte(`{"action":"opened","repository":{"full_name":"acme/widget"}}`)
 	resp := doRequest(app, body, map[string]string{
-		"Content-Type":            "application/json",
-		"X-GitHub-Event":          "issues",
-		"X-GitHub-Delivery":       "del-123",
-		"X-Hub-Signature-256":     sign("secret", body),
+		"Content-Type":        "application/json",
+		"X-GitHub-Event":      "issues",
+		"X-GitHub-Delivery":   "del-123",
+		"X-Hub-Signature-256": sign("secret", body),
 	})
 	defer resp.Body.Close()
 
