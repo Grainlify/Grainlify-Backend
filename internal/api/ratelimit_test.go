@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/utils"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/valyala/fasthttp"
 )
 
 func TestRateLimitMiddleware_AuthRoutesPerIP(t *testing.T) {
@@ -60,12 +62,12 @@ func TestRateLimitMiddleware_TrustedProxyForwardedFor(t *testing.T) {
 
 	app := newRateLimitTestApp(cfg, "/auth/nonce")
 
-	firstStatus := rateLimitTestRequest(t, app, "/auth/nonce", "127.0.0.1", "198.51.100.10")
+	firstStatus := rateLimitTestRequestFromRemote(t, app, "/auth/nonce", "127.0.0.1", "198.51.100.10")
 	if firstStatus != fiber.StatusOK {
 		t.Fatalf("first request status = %d, want %d", firstStatus, fiber.StatusOK)
 	}
 
-	secondStatus := rateLimitTestRequest(t, app, "/auth/nonce", "127.0.0.1", "198.51.100.11")
+	secondStatus := rateLimitTestRequestFromRemote(t, app, "/auth/nonce", "127.0.0.1", "198.51.100.11")
 	if secondStatus != fiber.StatusOK {
 		t.Fatalf("second request status = %d, want %d", secondStatus, fiber.StatusOK)
 	}
@@ -118,17 +120,17 @@ func TestRateLimitMiddleware_PerKeyIsolation(t *testing.T) {
 	app := newRateLimitTestApp(cfg, "/auth/nonce")
 	setRateLimitTestTimestamp(1_900_000_100)
 
-	firstClientStatus := rateLimitTestRequest(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.40")
+	firstClientStatus := rateLimitTestRequestFromRemote(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.40")
 	if firstClientStatus != fiber.StatusOK {
 		t.Fatalf("first client initial request status = %d, want %d", firstClientStatus, fiber.StatusOK)
 	}
 
-	firstClientExceededStatus := rateLimitTestRequest(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.40")
+	firstClientExceededStatus := rateLimitTestRequestFromRemote(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.40")
 	if firstClientExceededStatus != fiber.StatusTooManyRequests {
 		t.Fatalf("first client second request status = %d, want %d", firstClientExceededStatus, fiber.StatusTooManyRequests)
 	}
 
-	secondClientStatus := rateLimitTestRequest(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.41")
+	secondClientStatus := rateLimitTestRequestFromRemote(t, app, "/auth/nonce", "127.0.0.1", "203.0.113.41")
 	if secondClientStatus != fiber.StatusOK {
 		t.Fatalf("second client initial request status = %d, want %d", secondClientStatus, fiber.StatusOK)
 	}
@@ -184,6 +186,34 @@ func rateLimitTestRequest(t *testing.T, app *fiber.App, path, remoteIP, forwarde
 		t.Fatalf("request failed: %v", err)
 	}
 	return resp.StatusCode
+}
+
+// rateLimitTestRequestFromRemote fires a single GET directly against the
+// app's compiled fasthttp handler with a genuinely-controlled remote
+// address. app.Test() round-trips the request through httputil.DumpRequest
+// into a raw HTTP byte stream, which does NOT carry Go's
+// http.Request.RemoteAddr field — it's local request metadata, not part of
+// the wire protocol — so every request through app.Test() lands with the
+// same fake remote address regardless of what RemoteAddr is set to. Use
+// this instead of rateLimitTestRequest whenever a test depends on the
+// middleware seeing a specific real remote IP (e.g. to assert trusted-proxy
+// behavior), rather than just on X-Forwarded-For (which travels as a real
+// header and does work via app.Test()).
+func rateLimitTestRequestFromRemote(t *testing.T, app *fiber.App, path, remoteIP, forwardedFor string) int {
+	t.Helper()
+
+	var req fasthttp.Request
+	req.Header.SetMethod(fiber.MethodGet)
+	req.SetRequestURI(path)
+	if forwardedFor != "" {
+		req.Header.Set(fiber.HeaderXForwardedFor, forwardedFor)
+	}
+
+	ctx := new(fasthttp.RequestCtx)
+	ctx.Init(&req, &net.TCPAddr{IP: net.ParseIP(remoteIP), Port: 12345}, nil)
+
+	app.Handler()(ctx)
+	return ctx.Response.StatusCode()
 }
 
 func setRateLimitTestTimestamp(ts uint32) {

@@ -24,6 +24,7 @@ package handlers_test
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 	"github.com/gofiber/fiber/v2/utils"
 	"github.com/jagadeesh/grainlify/backend/internal/api"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/valyala/fasthttp"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -77,6 +79,36 @@ func doEcosystemsRequest(t *testing.T, app *fiber.App, path, remoteIP, forwarded
 // the window boundary without sleeping.
 func setEcosystemsTestTimestamp(ts uint32) {
 	atomic.StoreUint32(&utils.Timestamp, ts)
+}
+
+// doEcosystemsRequestFromRemote fires a single GET directly against the app's
+// compiled fasthttp handler with a genuinely-controlled remote address.
+//
+// app.Test() round-trips the request through httputil.DumpRequest into a raw
+// HTTP byte stream, which does NOT carry Go's http.Request.RemoteAddr field —
+// it's not part of the wire protocol, only local request metadata. Every
+// request that goes through app.Test() therefore lands with the same fake
+// "0.0.0.0:0" remote address regardless of what RemoteAddr is set to, which
+// silently defeats any test that depends on distinguishing between two real
+// remote IPs (as opposed to two X-Forwarded-For values, which travel as a
+// real header and DO work via app.Test()). Invoking app.Handler() directly
+// against a manually-built fasthttp.RequestCtx sidesteps that round trip
+// entirely, so RemoteAddr is exactly what we set it to.
+func doEcosystemsRequestFromRemote(t *testing.T, app *fiber.App, path, remoteIP, forwardedFor string) int {
+	t.Helper()
+
+	var req fasthttp.Request
+	req.Header.SetMethod(fiber.MethodGet)
+	req.SetRequestURI(path)
+	if forwardedFor != "" {
+		req.Header.Set(fiber.HeaderXForwardedFor, forwardedFor)
+	}
+
+	ctx := new(fasthttp.RequestCtx)
+	ctx.Init(&req, &net.TCPAddr{IP: net.ParseIP(remoteIP), Port: 9999}, nil)
+
+	app.Handler()(ctx)
+	return ctx.Response.StatusCode()
 }
 
 // ── /ecosystems (list) tests ──────────────────────────────────────────────────
@@ -297,15 +329,15 @@ func TestEcosystemsPublic_PerIPIsolation(t *testing.T) {
 	ip2 := "203.0.113.71"
 
 	// ip1 exhausts its bucket.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", ip1, ""); s != fiber.StatusOK {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", ip1, ""); s != fiber.StatusOK {
 		t.Fatalf("ip1 first: got %d, want 200", s)
 	}
-	if s := doEcosystemsRequest(t, app, "/ecosystems", ip1, ""); s != fiber.StatusTooManyRequests {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", ip1, ""); s != fiber.StatusTooManyRequests {
 		t.Fatalf("ip1 second: got %d, want 429", s)
 	}
 
 	// ip2 is unaffected.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", ip2, ""); s != fiber.StatusOK {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", ip2, ""); s != fiber.StatusOK {
 		t.Fatalf("ip2 first: got %d, want 200", s)
 	}
 }
@@ -330,13 +362,13 @@ func TestEcosystemsPublic_ProxySpoofing_UntrustedRemoteIgnoresXFF(t *testing.T) 
 	forged := "1.2.3.4"
 
 	// First request exhausts the bucket for the real IP.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", attacker, ""); s != fiber.StatusOK {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", attacker, ""); s != fiber.StatusOK {
 		t.Fatalf("attacker first (no XFF): got %d, want 200", s)
 	}
 
 	// Subsequent request with forged XFF must still be throttled — because
 	// the untrusted remote address is used as the bucket key, not the forged header.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", attacker, forged); s != fiber.StatusTooManyRequests {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", attacker, forged); s != fiber.StatusTooManyRequests {
 		t.Fatalf("attacker with forged XFF: got %d, want 429 (spoofing must not bypass limiter)", s)
 	}
 }
@@ -358,15 +390,15 @@ func TestEcosystemsPublic_ProxySpoofing_TrustedProxyForwardedForIsHonoured(t *te
 	client2 := "198.51.100.11"
 
 	// client1 exhausts its bucket through the trusted proxy.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", trustedProxy, client1); s != fiber.StatusOK {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", trustedProxy, client1); s != fiber.StatusOK {
 		t.Fatalf("client1 first: got %d, want 200", s)
 	}
-	if s := doEcosystemsRequest(t, app, "/ecosystems", trustedProxy, client1); s != fiber.StatusTooManyRequests {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", trustedProxy, client1); s != fiber.StatusTooManyRequests {
 		t.Fatalf("client1 second: got %d, want 429", s)
 	}
 
 	// client2 through the same proxy is in a separate bucket.
-	if s := doEcosystemsRequest(t, app, "/ecosystems", trustedProxy, client2); s != fiber.StatusOK {
+	if s := doEcosystemsRequestFromRemote(t, app, "/ecosystems", trustedProxy, client2); s != fiber.StatusOK {
 		t.Fatalf("client2 first: got %d, want 200", s)
 	}
 }
