@@ -72,7 +72,7 @@ func knownGoodScValSymbolBytes() []byte {
 
 func knownGoodScValAddressBytes() []byte {
 	// 32-byte all-zero contract hash → valid ScvAddress/contract variant.
-	var id xdr.Hash
+	var id xdr.ContractId
 	addr := xdr.ScAddress{
 		Type:       xdr.ScAddressTypeScAddressTypeContract,
 		ContractId: &id,
