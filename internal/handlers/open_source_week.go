@@ -201,10 +201,32 @@ func validateCreate(req oswCreateRequest) string {
 	}
 	startAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt))
 	endAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt))
+
+	// All time comparisons explicitly happen in a single consistent timezone (UTC).
+	startAt = startAt.UTC()
+	endAt = endAt.UTC()
+
 	if !endAt.After(startAt) {
 		return "end_at_must_be_after_start_at"
 	}
 	return ""
+}
+
+// IsTimeInCampaignWindow determines whether the given 'now' time falls within the campaign window defined by startAt and endAt.
+// All time comparisons are strictly done in UTC.
+// The campaign window is inclusive of the start time and exclusive of the end time: [startAt, endAt).
+// Thus:
+// - exactly at startAt: active (true)
+// - one second before startAt: inactive (false)
+// - exactly at endAt: inactive (false)
+// - one second after endAt: inactive (false)
+// - inside the window: active (true)
+func IsTimeInCampaignWindow(now, startAt, endAt time.Time) bool {
+	nowUTC := now.UTC()
+	startUTC := startAt.UTC()
+	endUTC := endAt.UTC()
+
+	return (nowUTC.Equal(startUTC) || nowUTC.After(startUTC)) && nowUTC.Before(endUTC)
 }
 
 func (h *OpenSourceWeekAdminHandler) Create() fiber.Handler {
@@ -228,6 +250,10 @@ func (h *OpenSourceWeekAdminHandler) Create() fiber.Handler {
 		}
 		startAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.StartAt))
 		endAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(req.EndAt))
+
+		// Explicitly convert to UTC before database persistence to align with our timezone convention.
+		startAt = startAt.UTC()
+		endAt = endAt.UTC()
 
 		var id uuid.UUID
 		err := h.db.Pool.QueryRow(c.Context(), `
