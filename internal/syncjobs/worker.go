@@ -337,6 +337,11 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			return err
 		}
 		if len(items) == 0 {
+			slog.Info("sync issues completed",
+				"project_id", projectID,
+				"repo", fullName,
+				"total_issues", totalIssues,
+			)
 			return nil
 		}
 
@@ -426,9 +431,10 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 		}
 	}
 
-	slog.Info("sync issues completed",
+	slog.Warn("sync issues hit pagination cap, results may be incomplete",
 		"project_id", projectID,
 		"repo", fullName,
+		"pages_fetched", 50,
 		"total_issues", totalIssues,
 	)
 	return nil
@@ -504,6 +510,12 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 `, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt)
 		}
 	}
+	slog.Warn("sync PRs hit pagination cap, results may be incomplete",
+		"project_id", projectID,
+		"repo", fullName,
+		"pages_fetched", 50,
+		"total_prs", totalPRs,
+	)
 	return nil
 }
 
