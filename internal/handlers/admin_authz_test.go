@@ -56,17 +56,15 @@ func TestAdminRoutes_AuthorizationCoverage(t *testing.T) {
 
 	routesTested := 0
 
-	for _, route := range app.GetRoutes(true) { // true includes HEAD/OPTIONS but we can filter by method
+	for _, route := range app.GetRoutes(true) {
 		if !strings.HasPrefix(route.Path, "/admin/") {
 			continue
 		}
 		
-		// Skip methods that are just CORS/framework boilerplate if they don't have our handlers
 		if route.Method == "HEAD" || route.Method == "OPTIONS" {
 			continue
 		}
 
-		// Bootstrap is a special admin-related route that explicitly allows non-admins to promote themselves
 		if route.Path == "/admin/bootstrap" {
 			continue
 		}
@@ -74,10 +72,6 @@ func TestAdminRoutes_AuthorizationCoverage(t *testing.T) {
 		routesTested++
 		
 		t.Run(route.Method+" "+route.Path, func(t *testing.T) {
-			// Replace any path parameters like :id with a valid-looking UUID to ensure 
-			// if it reaches the handler, it doesn't fail on UUID parsing before we know auth passed.
-			// However, testing with literal ":id" is usually fine because auth middleware runs first.
-			// But for the positive test, a valid UUID is safer.
 			testPath := strings.ReplaceAll(route.Path, ":id", contributorID.String())
 
 			// 1. Unauthenticated -> 401
@@ -108,7 +102,6 @@ func TestAdminRoutes_AuthorizationCoverage(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Expected 403 for demoted admin")
 
 			// 5. Valid admin -> Should NOT be 401 or 403
-			body := http.NoBody
 			if route.Method == "PUT" || route.Method == "POST" {
 				req = httptest.NewRequest(route.Method, testPath, strings.NewReader(`{"role":"maintainer","name":"Test Event","date":"2023-01-01T00:00:00Z"}`))
 				req.Header.Set("Content-Type", "application/json")
@@ -124,6 +117,5 @@ func TestAdminRoutes_AuthorizationCoverage(t *testing.T) {
 		})
 	}
 	
-	// Ensure we actually tested routes (regression guard against router changes hiding routes)
 	require.GreaterOrEqual(t, routesTested, 2, "Should have tested at least 2 admin routes (ListUsers, SetUserRole)")
 }
