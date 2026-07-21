@@ -460,14 +460,13 @@ func (h *UserProfileHandler) ContributionActivity() fiber.Handler {
 		}
 
 		// Get pagination parameters
-		limit := c.QueryInt("limit", 50)
-		if limit > 100 {
-			limit = 100 // Cap at 100 for performance
+		p, err := ParsePagination(c, 50, 100)
+		if err != nil {
+			// response already written by ParsePagination on error
+			return nil
 		}
-		offset := c.QueryInt("offset", 0)
 
 		var githubLogin *string
-		var err error
 
 		// Check if user_id or login is provided in query params (for viewing other users)
 		userIDParam := c.Query("user_id")
@@ -505,8 +504,8 @@ WHERE user_id = $1
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{
 				"activities": []fiber.Map{},
 				"total":      0,
-				"limit":      limit,
-				"offset":     offset,
+				"limit":      p.Limit,
+				"offset":     p.Offset,
 			})
 		}
 
@@ -545,7 +544,7 @@ WHERE pr.author_login = $1 AND p.status = 'verified' AND pr.created_at_github IS
 
 ORDER BY created_at_github DESC
 LIMIT $2 OFFSET $3
-`, *githubLogin, limit, offset)
+`, *githubLogin, p.Limit, p.Offset)
 		if err != nil {
 			slog.Error("failed to fetch contribution activity", "error", err, "github_login", *githubLogin)
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "activity_fetch_failed", "")
@@ -608,8 +607,8 @@ SELECT
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"activities": activities,
 			"total":      total,
-			"limit":      limit,
-			"offset":     offset,
+			"limit":      p.Limit,
+			"offset":     p.Offset,
 		})
 	}
 }
