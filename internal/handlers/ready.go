@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
