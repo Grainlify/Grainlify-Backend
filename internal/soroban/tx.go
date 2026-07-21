@@ -3,6 +3,7 @@ package soroban
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
@@ -201,17 +202,9 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 	
 	// Try hex first (64 hex chars = 32 bytes)
 	if len(contractID) == 64 {
-		// Parse hex string
-		var err error
-		for i := 0; i < 32; i++ {
-			var b byte
-			_, err = fmt.Sscanf(contractID[i*2:i*2+2], "%02x", &b)
-			if err != nil {
-				break
-			}
-			hash[i] = b
-		}
-		if err == nil {
+		decoded, err := hex.DecodeString(contractID)
+		if err == nil && len(decoded) == 32 {
+			copy(hash[:], decoded)
 			contractId := xdr.ContractId(hash)
 			return xdr.ScAddress{
 				Type:        xdr.ScAddressTypeScAddressTypeContract,
