@@ -78,7 +78,7 @@ func rateLimitModeForPath(path string) rateLimitMode {
 	case strings.HasPrefix(path, "/auth") || strings.HasPrefix(path, "/webhooks"):
 		return rateLimitModeAuth
 	case strings.HasPrefix(path, "/projects"), path == "/leaderboard", path == "/stats/landing",
-		path == "/ecosystems", path == "/open-source-week/events", path == "/profile/public":
+		strings.HasPrefix(path, "/ecosystems"), path == "/open-source-week/events", path == "/profile/public":
 		return rateLimitModePublic
 	default:
 		return rateLimitModeNone

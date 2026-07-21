@@ -189,3 +189,84 @@ func rateLimitTestRequest(t *testing.T, app *fiber.App, path, remoteIP, forwarde
 func setRateLimitTestTimestamp(ts uint32) {
 	atomic.StoreUint32(&utils.Timestamp, ts)
 }
+
+// ── Ecosystems-specific path routing tests ────────────────────────────────────
+// These complement the handler-level tests in internal/handlers/ecosystems_public_test.go
+// by directly exercising rateLimitModeForPath at the routing layer so we have a
+// unit-level assertion that both /ecosystems (list) and /ecosystems/:id (detail)
+// resolve to rateLimitModePublic and not rateLimitModeNone.
+
+func TestRateLimitModeForPath_EcosystemsListIsPublic(t *testing.T) {
+	if got := rateLimitModeForPath("/ecosystems"); got != rateLimitModePublic {
+		t.Fatalf("rateLimitModeForPath(%q) = %v, want rateLimitModePublic", "/ecosystems", got)
+	}
+}
+
+func TestRateLimitModeForPath_EcosystemsDetailIsPublic(t *testing.T) {
+	paths := []string{
+		"/ecosystems/00000000-0000-0000-0000-000000000001",
+		"/ecosystems/some-slug",
+		"/ecosystems/abc",
+	}
+	for _, p := range paths {
+		if got := rateLimitModeForPath(p); got != rateLimitModePublic {
+			t.Errorf("rateLimitModeForPath(%q) = %v, want rateLimitModePublic", p, got)
+		}
+	}
+}
+
+// TestRateLimitMiddleware_EcosystemsListTriggered429 is an integration-style
+// test that fires the full middleware stack against /ecosystems and asserts 429.
+func TestRateLimitMiddleware_EcosystemsListTriggered429(t *testing.T) {
+	const limit = 2
+	cfg := config.Config{
+		RateLimitPublicPerMin: limit,
+		TrustedProxies:        []string{"127.0.0.1"},
+	}
+	app := newRateLimitTestApp(cfg, "/ecosystems")
+	setRateLimitTestTimestamp(1_900_200_000)
+
+	clientIP := "203.0.113.90"
+	for i := 0; i < limit; i++ {
+		if s := rateLimitTestRequest(t, app, "/ecosystems", clientIP, ""); s != fiber.StatusOK {
+			t.Fatalf("request %d: got %d, want 200", i+1, s)
+		}
+	}
+	if s := rateLimitTestRequest(t, app, "/ecosystems", clientIP, ""); s != fiber.StatusTooManyRequests {
+		t.Fatalf("request limit+1: got %d, want 429", s)
+	}
+}
+
+// TestRateLimitMiddleware_EcosystemsDetailTriggered429 is the critical regression
+// guard: the detail path /ecosystems/:id must also trigger 429.  Before the fix
+// it resolved to rateLimitModeNone and was completely unprotected.
+func TestRateLimitMiddleware_EcosystemsDetailTriggered429(t *testing.T) {
+	const limit = 2
+	cfg := config.Config{
+		RateLimitPublicPerMin: limit,
+		TrustedProxies:        []string{"127.0.0.1"},
+	}
+	// Use a dynamic route so Fiber resolves :id correctly.
+	app := fiber.New(fiber.Config{
+		ProxyHeader:             fiber.HeaderXForwardedFor,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
+	})
+	app.Use(NewRateLimitMiddleware(cfg))
+	app.Get("/ecosystems/:id", func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusOK)
+	})
+
+	setRateLimitTestTimestamp(1_900_200_100)
+	clientIP := "203.0.113.91"
+	detailPath := "/ecosystems/00000000-0000-0000-0000-000000000099"
+
+	for i := 0; i < limit; i++ {
+		if s := rateLimitTestRequest(t, app, detailPath, clientIP, ""); s != fiber.StatusOK {
+			t.Fatalf("request %d on detail: got %d, want 200", i+1, s)
+		}
+	}
+	if s := rateLimitTestRequest(t, app, detailPath, clientIP, ""); s != fiber.StatusTooManyRequests {
+		t.Fatalf("request limit+1 on detail: got %d, want 429", s)
+	}
+}
