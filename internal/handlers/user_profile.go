@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"net/url"
+	"unicode"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -16,6 +18,69 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
+
+// maxLengths defines allowed lengths for profile fields.
+var maxLengths = map[string]int{
+    "first_name": 256,
+    "last_name":  256,
+    "location":   256,
+    "website":    256,
+    "bio":        1024,
+    "telegram":   256,
+    "linkedin":   256,
+    "whatsapp":   256,
+    "twitter":    256,
+    "discord":    256,
+}
+
+type profileUpdateRequest struct {
+    FirstName *string `json:"first_name,omitempty"`
+    LastName  *string `json:"last_name,omitempty"`
+    Location  *string `json:"location,omitempty"`
+    Website   *string `json:"website,omitempty"`
+    Bio       *string `json:"bio,omitempty"`
+    Telegram  *string `json:"telegram,omitempty"`
+    LinkedIn  *string `json:"linkedin,omitempty"`
+    WhatsApp  *string `json:"whatsapp,omitempty"`
+    Twitter   *string `json:"twitter,omitempty"`
+    Discord   *string `json:"discord,omitempty"`
+}
+
+// validateProfileInput checks length, control characters and URL scheme.
+func validateProfileInput(req *profileUpdateRequest) error {
+    check := func(name string, val *string) error {
+        if val == nil {
+            return nil
+        }
+        s := strings.TrimSpace(*val)
+        if max, ok := maxLengths[name]; ok && len(s) > max {
+            return fmt.Errorf("field_too_long:%s", name)
+        }
+        for _, r := range s {
+            if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+                return fmt.Errorf("invalid_field:%s", name)
+            }
+        }
+        if name == "website" && s != "" {
+            u, err := url.Parse(s)
+            if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+                return fmt.Errorf("invalid_url:%s", name)
+            }
+        }
+        return nil
+    }
+    if err := check("first_name", req.FirstName); err != nil { return err }
+    if err := check("last_name", req.LastName); err != nil { return err }
+    if err := check("location", req.Location); err != nil { return err }
+    if err := check("website", req.Website); err != nil { return err }
+    if err := check("bio", req.Bio); err != nil { return err }
+    if err := check("telegram", req.Telegram); err != nil { return err }
+    if err := check("linkedin", req.LinkedIn); err != nil { return err }
+    if err := check("whatsapp", req.WhatsApp); err != nil { return err }
+    if err := check("twitter", req.Twitter); err != nil { return err }
+    if err := check("discord", req.Discord); err != nil { return err }
+    return nil
+}
 
 type UserProfileHandler struct {
 	cfg config.Config
@@ -1233,21 +1298,14 @@ func (h *UserProfileHandler) UpdateProfile() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
-		var req struct {
-			FirstName *string `json:"first_name,omitempty"`
-			LastName  *string `json:"last_name,omitempty"`
-			Location  *string `json:"location,omitempty"`
-			Website   *string `json:"website,omitempty"`
-			Bio       *string `json:"bio,omitempty"`
-			Telegram  *string `json:"telegram,omitempty"`
-			LinkedIn  *string `json:"linkedin,omitempty"`
-			WhatsApp  *string `json:"whatsapp,omitempty"`
-			Twitter   *string `json:"twitter,omitempty"`
-			Discord   *string `json:"discord,omitempty"`
-		}
+		var req profileUpdateRequest
 
 		if err := c.BodyParser(&req); err != nil {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
+		}
+
+		if err := validateProfileInput(&req); err != nil {
+			return httpx.RespondError(c, fiber.StatusBadRequest, "validation_failed", err.Error())
 		}
 
 		// Build update query dynamically based on provided fields
