@@ -204,10 +204,14 @@ WHERE github_full_name = $1
 	} else if action == "added" && e.Event == "installation_repositories" {
 		// Repositories were added back to installation - restore them
 		if installationPayload.RepositoriesAdded != nil {
+			slog.Info("adding repositories to installation",
+				"count", len(installationPayload.RepositoriesAdded),
+				"installation_id", installationID,
+			)
 			for _, repo := range installationPayload.RepositoriesAdded {
 				repoFullName := strings.TrimSpace(repo.FullName)
 				if repoFullName != "" {
-					_, _ = i.Pool.Exec(ctx, `
+					result, err := i.Pool.Exec(ctx, `
 UPDATE projects
 SET deleted_at = NULL,
     status = 'verified',
@@ -216,6 +220,22 @@ WHERE github_full_name = $1
   AND github_app_installation_id = $2
   AND deleted_at IS NOT NULL
 `, repoFullName, installationID)
+					if err != nil {
+						slog.Error("failed to restore project", "repo", repoFullName, "error", err)
+						continue
+					}
+					rowsAffected := result.RowsAffected()
+					if rowsAffected > 0 {
+						slog.Info("restored project for installation",
+							"repo", repoFullName,
+							"installation_id", installationID,
+						)
+					} else {
+						slog.Warn("no project found to restore",
+							"repo", repoFullName,
+							"installation_id", installationID,
+						)
+					}
 				}
 			}
 		}
