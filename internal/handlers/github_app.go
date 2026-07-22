@@ -22,12 +22,19 @@ import (
 )
 
 type GitHubAppHandler struct {
-	cfg config.Config
-	db  *db.DB
+	cfg              config.Config
+	db               *db.DB
+	onProjectChanged func(projectID string) // callback to invalidate cache on project operations
 }
 
 func NewGitHubAppHandler(cfg config.Config, d *db.DB) *GitHubAppHandler {
 	return &GitHubAppHandler{cfg: cfg, db: d}
+}
+
+// SetCacheInvalidator sets the callback to invalidate the projects public cache
+// when projects are created or verified via GitHub App installation.
+func (h *GitHubAppHandler) SetCacheInvalidator(fn func(projectID string)) {
+	h.onProjectChanged = fn
 }
 
 // StartInstallation generates a GitHub App installation URL
@@ -441,4 +448,12 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 		"skipped", len(repos)-createdCount-updatedCount,
 		"installation_id", installationID,
 	)
+
+	// Invalidate cache since projects were created/updated
+	if (createdCount > 0 || updatedCount > 0) && h.onProjectChanged != nil {
+		// Since we may have updated many projects, invalidate all caches
+		// (calling InvalidateProject for each would be inefficient).
+		// We use a sentinel to signal "invalidate everything".
+		h.onProjectChanged("")
+	}
 }

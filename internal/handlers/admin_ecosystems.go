@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"net/url"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -15,11 +16,19 @@ import (
 )
 
 type EcosystemsAdminHandler struct {
-	db *db.DB
+	db                 *db.DB
+	onEcosystemChanged func() // callback to invalidate cache on ecosystem CUD operations
 }
 
 func NewEcosystemsAdminHandler(d *db.DB) *EcosystemsAdminHandler {
 	return &EcosystemsAdminHandler{db: d}
+}
+
+// SetCacheInvalidator sets the callback to invalidate the projects public cache
+// when ecosystems are created, updated, or deleted.  This must be called after
+// both the admin handler and the projects public handler are constructed.
+func (h *EcosystemsAdminHandler) SetCacheInvalidator(fn func()) {
+	h.onEcosystemChanged = fn
 }
 
 func (h *EcosystemsAdminHandler) List() fiber.Handler {
@@ -173,6 +182,39 @@ type ecosystemUpsertRequest struct {
 	Technologies json.RawMessage `json:"technologies"` // ["..."]
 }
 
+// validateEcosystemInput validates the upsert request.
+// isUpdate indicates whether this is an update (partial) request.
+func validateEcosystemInput(req *ecosystemUpsertRequest, isUpdate bool) error {
+    // Name is required on create.
+    name := strings.TrimSpace(req.Name)
+    if !isUpdate && name == "" {
+        return errors.New("name_required")
+    }
+    if name != "" {
+        // Ensure generated slug is not empty.
+        slug := normalizeSlug(name)
+        if slug == "" {
+            return errors.New("invalid_slug")
+        }
+    }
+    // Description length limit (example: 1000 chars).
+    if len(req.Description) > 1000 {
+        return errors.New("description_too_long")
+    }
+    // Validate URLs if provided.
+    if strings.TrimSpace(req.WebsiteURL) != "" {
+        if _, err := url.ParseRequestURI(strings.TrimSpace(req.WebsiteURL)); err != nil {
+            return errors.New("website_url_invalid")
+        }
+    }
+    if strings.TrimSpace(req.LogoURL) != "" {
+        if _, err := url.ParseRequestURI(strings.TrimSpace(req.LogoURL)); err != nil {
+            return errors.New("logo_url_invalid")
+        }
+    }
+    return nil
+}
+
 func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -182,15 +224,12 @@ func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 		if err := c.BodyParser(&req); err != nil {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
-		name := strings.TrimSpace(req.Name)
-		if name == "" {
-			return httpx.RespondError(c, fiber.StatusBadRequest, "name_required", "")
+		if err := validateEcosystemInput(&req, false); err != nil {
+			return httpx.RespondError(c, fiber.StatusBadRequest, err.Error(), "")
 		}
+
 		// Auto-generate slug from name (users never see/type slug)
-		slug := normalizeSlug(name)
-		if slug == "" {
-			return httpx.RespondError(c, fiber.StatusBadRequest, "name_must_contain_valid_characters", "")
-		}
+		slug := normalizeSlug(req.Name)
 		status := strings.TrimSpace(req.Status)
 		if status == "" {
 			status = "active"
@@ -212,6 +251,13 @@ func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 			technologiesJSON = []byte("[]")
 		}
 
+		var exists bool
+		_ = h.db.Pool.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM ecosystems WHERE slug = $1)`, slug).Scan(&exists)
+		if exists {
+			return httpx.RespondError(c, fiber.StatusConflict, "slug_collision", "")
+		}
+
+
 		var id uuid.UUID
 		err := h.db.Pool.QueryRow(c.Context(), `
 INSERT INTO ecosystems (slug, name, description, website_url, logo_url, status, about, links, key_areas, technologies)
@@ -220,6 +266,10 @@ RETURNING id
 `, slug, name, strings.TrimSpace(req.Description), strings.TrimSpace(req.WebsiteURL), strings.TrimSpace(req.LogoURL), status, strings.TrimSpace(req.About), linksJSON, keyAreasJSON, technologiesJSON).Scan(&id)
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_create_failed", "")
+		}
+		// Invalidate projects cache since ecosystem list changed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
 		}
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id.String()})
 	}
@@ -252,6 +302,12 @@ func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 			slug := normalizeSlug(name)
 			if slug == "" {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "name_must_contain_valid_characters", "")
+			}
+			
+			var exists bool
+			_ = h.db.Pool.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM ecosystems WHERE slug = $1 AND id != $2)`, slug, ecoID).Scan(&exists)
+			if exists {
+				return httpx.RespondError(c, fiber.StatusConflict, "slug_collision", "")
 			}
 			slugVal = &slug
 		}
@@ -291,6 +347,10 @@ WHERE id = $1
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_update_failed", "")
 		}
+		// Invalidate projects cache since ecosystem metadata changed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
+		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -320,6 +380,10 @@ func (h *EcosystemsAdminHandler) Delete() fiber.Handler {
 		}
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_delete_failed", "")
+		}
+		// Invalidate projects cache since ecosystem was removed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}

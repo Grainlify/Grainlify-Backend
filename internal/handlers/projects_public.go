@@ -23,6 +23,11 @@ type ProjectsPublicHandler struct {
 	db  *db.DB
 	cfg config.Config
 
+	// cache is the short-TTL response cache for all public project endpoints.
+	// It is safe to call its methods concurrently.  A nil cache disables caching
+	// (e.g. when TTL is 0 or in tests that want live DB responses).
+	cache *ProjectsCache
+
 	// GitHub App enrichment helpers (best-effort).
 	appClient  *github.GitHubAppClient
 	tokenMu    sync.Mutex
@@ -32,10 +37,23 @@ type ProjectsPublicHandler struct {
 	}
 }
 
+// defaultProjectsCacheTTL is the out-of-the-box TTL for the public projects
+// response cache.  Short enough to reflect admin edits promptly via the
+// invalidation hooks; long enough to absorb browse-page traffic spikes.
+const defaultProjectsCacheTTL = 30 * time.Second
+
 func NewProjectsPublicHandler(cfg config.Config, d *db.DB) *ProjectsPublicHandler {
+	stopCh := make(chan struct{}) // lives for the process lifetime; never closed
+	return newProjectsPublicHandler(cfg, d, NewProjectsCache(defaultProjectsCacheTTL, stopCh))
+}
+
+// newProjectsPublicHandler is the internal constructor used by tests so they
+// can inject a custom cache (or nil to disable caching).
+func newProjectsPublicHandler(cfg config.Config, d *db.DB, cache *ProjectsCache) *ProjectsPublicHandler {
 	h := &ProjectsPublicHandler{
-		db:  d,
-		cfg: cfg,
+		db:    d,
+		cfg:   cfg,
+		cache: cache,
 		tokenCache: map[string]struct {
 			token     string
 			expiresAt time.Time
@@ -52,6 +70,28 @@ func NewProjectsPublicHandler(cfg config.Config, d *db.DB) *ProjectsPublicHandle
 		}
 	}
 	return h
+}
+
+// InvalidateAll clears every cached entry.  Call this after any structural
+// change (e.g. ecosystem rename) that could affect multiple list responses.
+func (h *ProjectsPublicHandler) InvalidateAll() {
+	if h.cache != nil {
+		h.cache.InvalidateAll()
+	}
+}
+
+// InvalidateProject clears the cached detail entry for projectID and all
+// list/recommended/filter variants.  Call this after any per-project write
+// (metadata update, verification change).  If projectID is empty, invalidates
+// everything (used for batch operations like GitHub App installation sync).
+func (h *ProjectsPublicHandler) InvalidateProject(projectID string) {
+	if h.cache != nil {
+		if projectID == "" {
+			h.cache.InvalidateAll()
+		} else {
+			h.cache.InvalidateProject(projectID)
+		}
+	}
 }
 
 func (h *ProjectsPublicHandler) installationToken(ctx context.Context, installationID string) string {
@@ -474,197 +514,179 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
-		// Parse query parameters
-		ecosystem := strings.TrimSpace(c.Query("ecosystem"))
-		language := strings.TrimSpace(c.Query("language"))
-		category := strings.TrimSpace(c.Query("category"))
-		tagsParam := strings.TrimSpace(c.Query("tags"))
+		// Cache key: stable sort of all query params so ?a=1&b=2 and ?b=2&a=1 hit the same entry.
+		cacheKey := "list:" + c.OriginalURL()
 
-		p, err := ParsePagination(c, 50, 200)
+		if h.cache != nil {
+			body, err := h.cache.Do(cacheKey, "list", func() ([]byte, error) {
+				return h.listFetch(c)
+			})
+			if err != nil {
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+			}
+			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+			return c.Status(fiber.StatusOK).Send(body)
+		}
+
+		body, err := h.listFetch(c)
 		if err != nil {
-			// response already written by ParsePagination on error
-			return nil
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
 		}
-		limit, offset := p.Limit, p.Offset
+		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+		return c.Status(fiber.StatusOK).Send(body)
+	}
+}
 
-		// Build WHERE clause and args
-		var conditions []string
-		var args []any
-		argPos := 1
+func (h *ProjectsPublicHandler) listFetch(c *fiber.Ctx) ([]byte, error) {
+	ecosystem := strings.TrimSpace(c.Query("ecosystem"))
+	language := strings.TrimSpace(c.Query("language"))
+	category := strings.TrimSpace(c.Query("category"))
+	tagsParam := strings.TrimSpace(c.Query("tags"))
 
-		// Only show verified projects that have completed setup (have metadata)
-		conditions = append(conditions, "p.status = 'verified'")
-		conditions = append(conditions, "p.needs_metadata = false")
-		// Never show private repos (they are soft-deleted)
-		conditions = append(conditions, "p.deleted_at IS NULL")
+	p, err := ParsePagination(c, 50, 200)
+	if err != nil {
+		return nil, err
+	}
+	limit, offset := p.Limit, p.Offset
 
-		// Exclude special GitHub repositories (owner/.github)
-		conditions = append(conditions, "split_part(p.github_full_name, '/', 2) != '.github'")
+	var conditions []string
+	var args []any
+	argPos := 1
 
-		// Filter by ecosystem
-		if ecosystem != "" {
-			conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(e.name)) = LOWER($%d)", argPos))
-			args = append(args, ecosystem)
-			argPos++
-		}
+	conditions = append(conditions, "p.status = 'verified'")
+	conditions = append(conditions, "p.needs_metadata = false")
+	conditions = append(conditions, "p.deleted_at IS NULL")
+	conditions = append(conditions, "split_part(p.github_full_name, '/', 2) != '.github'")
 
-		// Filter by language
-		if language != "" {
-			conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(p.language)) = LOWER($%d)", argPos))
-			args = append(args, language)
-			argPos++
-		}
+	if ecosystem != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(e.name)) = LOWER($%d)", argPos))
+		args = append(args, ecosystem)
+		argPos++
+	}
+	if language != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(p.language)) = LOWER($%d)", argPos))
+		args = append(args, language)
+		argPos++
+	}
+	if category != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(p.category)) = LOWER($%d)", argPos))
+		args = append(args, category)
+		argPos++
+	}
 
-		// Filter by category
-		if category != "" {
-			conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(p.category)) = LOWER($%d)", argPos))
-			args = append(args, category)
-			argPos++
-		}
-
-		// Filter by tags (must have ALL specified tags)
-		var tags []string
-		if tagsParam != "" {
-			for _, tag := range strings.Split(tagsParam, ",") {
-				tag = strings.TrimSpace(tag)
-				if tag != "" {
-					tags = append(tags, tag)
-				}
+	var tags []string
+	if tagsParam != "" {
+		for _, tag := range strings.Split(tagsParam, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				tags = append(tags, tag)
 			}
 		}
-		if len(tags) > 0 {
-			// Use JSONB containment operator @> to check if tags array contains all specified tags
-			conditions = append(conditions, fmt.Sprintf("p.tags @> $%d::jsonb", argPos))
-			tagsJSON, _ := json.Marshal(tags)
-			args = append(args, string(tagsJSON))
-			argPos++
-		}
+	}
+	if len(tags) > 0 {
+		conditions = append(conditions, fmt.Sprintf("p.tags @> $%d::jsonb", argPos))
+		tagsJSON, _ := json.Marshal(tags)
+		args = append(args, string(tagsJSON))
+		argPos++
+	}
 
-		whereClause := strings.Join(conditions, " AND ")
-
-		// Build query
-		query := fmt.Sprintf(`
-SELECT 
-  p.id,
-  p.github_full_name,
-  p.github_app_installation_id,
-  p.language,
-  p.tags,
-  p.category,
-  p.stars_count,
-  p.forks_count,
-  (
-    SELECT COUNT(*)
-    FROM github_issues gi
-    WHERE gi.project_id = p.id AND gi.state = 'open'
-  ) AS open_issues_count,
-  (
-    SELECT COUNT(*)
-    FROM github_pull_requests gpr
-    WHERE gpr.project_id = p.id AND gpr.state = 'open'
-  ) AS open_prs_count,
-  (
-    SELECT COUNT(DISTINCT a.author_login)
-    FROM (
-      SELECT author_login FROM github_issues WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
-      UNION
-      SELECT author_login FROM github_pull_requests WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
-    ) a
-  ) AS contributors_count,
-  p.created_at,
-  p.updated_at,
-  e.name AS ecosystem_name,
-  e.slug AS ecosystem_slug,
-  p.description
+	whereClause := strings.Join(conditions, " AND ")
+	query := fmt.Sprintf(`
+SELECT
+  p.id, p.github_full_name, p.github_app_installation_id,
+  p.language, p.tags, p.category, p.stars_count, p.forks_count,
+  (SELECT COUNT(*) FROM github_issues gi WHERE gi.project_id = p.id AND gi.state = 'open') AS open_issues_count,
+  (SELECT COUNT(*) FROM github_pull_requests gpr WHERE gpr.project_id = p.id AND gpr.state = 'open') AS open_prs_count,
+  (SELECT COUNT(DISTINCT a.author_login) FROM (
+    SELECT author_login FROM github_issues WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
+    UNION
+    SELECT author_login FROM github_pull_requests WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
+  ) a) AS contributors_count,
+  p.created_at, p.updated_at,
+  e.name AS ecosystem_name, e.slug AS ecosystem_slug, p.description
 FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE %s
 ORDER BY p.created_at DESC
 LIMIT $%d OFFSET $%d
 `, whereClause, argPos, argPos+1)
-		args = append(args, limit, offset)
+	args = append(args, limit, offset)
 
-		rows, err := h.db.Pool.Query(c.Context(), query, args...)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
-		}
-		defer rows.Close()
+	rows, err := h.db.Pool.Query(c.Context(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-		var out []fiber.Map
-		for rows.Next() {
-			var id uuid.UUID
-			var fullName string
-			var installationID *string
-			var language, category *string
-			var tagsJSON []byte
-			var starsCount, forksCount *int
-			var openIssuesCount, openPRsCount, contributorsCount int
-			var createdAt, updatedAt time.Time
-			var ecosystemName, ecosystemSlug *string
-			var description *string
+	var out []fiber.Map
+	for rows.Next() {
+		var id uuid.UUID
+		var fullName string
+		var installationID *string
+		var lang, cat *string
+		var tagsJSON []byte
+		var starsCount, forksCount *int
+		var openIssuesCount, openPRsCount, contributorsCount int
+		var createdAt, updatedAt time.Time
+		var ecosystemName, ecosystemSlug *string
+		var description *string
 
-			if err := rows.Scan(&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount, &createdAt, &updatedAt, &ecosystemName, &ecosystemSlug, &description); err != nil {
-				slog.Error("projects list: row scan failed", "error", err.Error())
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
-			}
-
-			// Parse tags JSONB
-			var tags []string
-			if len(tagsJSON) > 0 {
-				_ = json.Unmarshal(tagsJSON, &tags)
-			}
-
-			// Default to 0 if nil
-			stars := 0
-			if starsCount != nil {
-				stars = *starsCount
-			}
-			forks := 0
-			if forksCount != nil {
-				forks = *forksCount
-			}
-
-			descVal := ""
-			if description != nil {
-				descVal = *description
-			}
-
-			out = append(out, fiber.Map{
-				"id":                 id.String(),
-				"github_full_name":   fullName,
-				"language":           language,
-				"tags":               tags,
-				"category":           category,
-				"stars_count":        stars,
-				"forks_count":        forks,
-				"contributors_count": contributorsCount,
-				"open_issues_count":  openIssuesCount,
-				"open_prs_count":     openPRsCount,
-				"ecosystem_name":     ecosystemName,
-				"ecosystem_slug":     ecosystemSlug,
-				"description":        descVal,
-				"created_at":         createdAt,
-				"updated_at":         updatedAt,
-			})
+		if err := rows.Scan(&id, &fullName, &installationID, &lang, &tagsJSON, &cat,
+			&starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount,
+			&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug, &description); err != nil {
+			slog.Error("projects list: row scan failed", "error", err.Error())
+			return nil, err
 		}
 
-		// Get total count for pagination
-		countQuery := fmt.Sprintf(`
-SELECT COUNT(*)
-FROM projects p
+		var rowTags []string
+		if len(tagsJSON) > 0 {
+			_ = json.Unmarshal(tagsJSON, &rowTags)
+		}
+		stars := 0
+		if starsCount != nil {
+			stars = *starsCount
+		}
+		forks := 0
+		if forksCount != nil {
+			forks = *forksCount
+		}
+		descVal := ""
+		if description != nil {
+			descVal = *description
+		}
+
+		out = append(out, fiber.Map{
+			"id":                 id.String(),
+			"github_full_name":   fullName,
+			"language":           lang,
+			"tags":               rowTags,
+			"category":           cat,
+			"stars_count":        stars,
+			"forks_count":        forks,
+			"contributors_count": contributorsCount,
+			"open_issues_count":  openIssuesCount,
+			"open_prs_count":     openPRsCount,
+			"ecosystem_name":     ecosystemName,
+			"ecosystem_slug":     ecosystemSlug,
+			"description":        descVal,
+			"created_at":         createdAt,
+			"updated_at":         updatedAt,
+		})
+	}
+
+	countQuery := fmt.Sprintf(`
+SELECT COUNT(*) FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE %s
 `, whereClause)
-		countArgs := args[:len(args)-2] // Remove limit and offset
+	countArgs := args[:len(args)-2]
 
-		var total int
-		if err := h.db.Pool.QueryRow(c.Context(), countQuery, countArgs...).Scan(&total); err != nil {
-			// If count fails, just return results without total
-			total = len(out)
-		}
-
-		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("projects", out, p, total))
+	var total int
+	if err := h.db.Pool.QueryRow(c.Context(), countQuery, countArgs...).Scan(&total); err != nil {
+		total = len(out)
 	}
+
+	return json.Marshal(buildPaginatedResponse("projects", out, p, total))
 }
 
 // Recommended returns top projects ordered by contributors count, enriched with GitHub data.
@@ -677,14 +699,33 @@ func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
-		p, err := ParsePagination(c, 8, 20)
-		if err != nil {
-			// response already written by ParsePagination on error
-			return nil
+		cacheKey := "recommended:" + c.OriginalURL()
+		if h.cache != nil {
+			body, err := h.cache.Do(cacheKey, "recommended", func() ([]byte, error) {
+				return h.recommendedFetch(c)
+			})
+			if err != nil {
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
+			}
+			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+			return c.Status(fiber.StatusOK).Send(body)
 		}
+		body, err := h.recommendedFetch(c)
+		if err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
+		}
+		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+		return c.Status(fiber.StatusOK).Send(body)
+	}
+}
 
-		// Query top projects by contributors count
-		query := `
+func (h *ProjectsPublicHandler) recommendedFetch(c *fiber.Ctx) ([]byte, error) {
+	p, err := ParsePagination(c, 8, 20)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `
 SELECT 
   p.id,
   p.github_full_name,
@@ -722,74 +763,69 @@ WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = fals
 ORDER BY contributors_count DESC, p.stars_count DESC, p.created_at DESC
 LIMIT $1 OFFSET $2
 `
-		rows, err := h.db.Pool.Query(c.Context(), query, p.Limit, p.Offset)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
-		}
-		defer rows.Close()
+	rows, err := h.db.Pool.Query(c.Context(), query, p.Limit, p.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-		var out []fiber.Map
-		for rows.Next() {
-			var id uuid.UUID
-			var fullName string
-			var installationID *string
-			var language, category *string
-			var tagsJSON []byte
-			var starsCount, forksCount *int
-			var openIssuesCount, openPRsCount, contributorsCount int
-			var createdAt, updatedAt time.Time
-			var ecosystemName, ecosystemSlug *string
+	var out []fiber.Map
+	for rows.Next() {
+		var id uuid.UUID
+		var fullName string
+		var installationID *string
+		var language, category *string
+		var tagsJSON []byte
+		var starsCount, forksCount *int
+		var openIssuesCount, openPRsCount, contributorsCount int
+		var createdAt, updatedAt time.Time
+		var ecosystemName, ecosystemSlug *string
 
-			if err := rows.Scan(&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount, &createdAt, &updatedAt, &ecosystemName, &ecosystemSlug); err != nil {
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_scan_failed", "")
-			}
-
-			var tags []string
-			if len(tagsJSON) > 0 {
-				_ = json.Unmarshal(tagsJSON, &tags)
-			}
-
-			stars := 0
-			if starsCount != nil {
-				stars = *starsCount
-			}
-			forks := 0
-			if forksCount != nil {
-				forks = *forksCount
-			}
-
-			description := ""
-
-			out = append(out, fiber.Map{
-				"id":                 id.String(),
-				"github_full_name":   fullName,
-				"language":           language,
-				"tags":               tags,
-				"category":           category,
-				"stars_count":        stars,
-				"forks_count":        forks,
-				"contributors_count": contributorsCount,
-				"open_issues_count":  openIssuesCount,
-				"open_prs_count":     openPRsCount,
-				"ecosystem_name":     ecosystemName,
-				"ecosystem_slug":     ecosystemSlug,
-				"description":        description,
-				"created_at":         createdAt,
-				"updated_at":         updatedAt,
-			})
+		if err := rows.Scan(&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount, &openIssuesCount, &openPRsCount, &contributorsCount, &createdAt, &updatedAt, &ecosystemName, &ecosystemSlug); err != nil {
+			return nil, err
 		}
 
-		// Get total count for pagination
-		var total int
-		if err := h.db.Pool.QueryRow(c.Context(), `
+		var tags []string
+		if len(tagsJSON) > 0 {
+			_ = json.Unmarshal(tagsJSON, &tags)
+		}
+		stars := 0
+		if starsCount != nil {
+			stars = *starsCount
+		}
+		forks := 0
+		if forksCount != nil {
+			forks = *forksCount
+		}
+
+		out = append(out, fiber.Map{
+			"id":                 id.String(),
+			"github_full_name":   fullName,
+			"language":           language,
+			"tags":               tags,
+			"category":           category,
+			"stars_count":        stars,
+			"forks_count":        forks,
+			"contributors_count": contributorsCount,
+			"open_issues_count":  openIssuesCount,
+			"open_prs_count":     openPRsCount,
+			"ecosystem_name":     ecosystemName,
+			"ecosystem_slug":     ecosystemSlug,
+			"description":        "",
+			"created_at":         createdAt,
+			"updated_at":         updatedAt,
+		})
+	}
+
+	var total int
+	if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT COUNT(*) FROM projects p
 WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false AND split_part(p.github_full_name, '/', 2) != '.github'
 `).Scan(&total); err != nil {
-			total = len(out)
-		}
-
-		return c.Status(fiber.StatusOK).JSON(PaginatedResponse("projects", out, p, total))
+		total = len(out)
 	}
+
+	return json.Marshal(buildPaginatedResponse("projects", out, p, total))
 }
 
 // FilterOptions returns available filter values (languages, categories, tags) from verified projects.
@@ -799,82 +835,97 @@ func (h *ProjectsPublicHandler) FilterOptions() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
-		// Get distinct languages (only from projects that completed setup / appear on Browse; exclude private)
-		langRows, err := h.db.Pool.Query(c.Context(), `
+		cacheKey := "filters:" + c.OriginalURL()
+		if h.cache != nil {
+			body, err := h.cache.Do(cacheKey, "filters", func() ([]byte, error) {
+				return h.filterOptionsFetch(c)
+			})
+			if err != nil {
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
+			}
+			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+			return c.Status(fiber.StatusOK).Send(body)
+		}
+		body, err := h.filterOptionsFetch(c)
+		if err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
+		}
+		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+		return c.Status(fiber.StatusOK).Send(body)
+	}
+}
+
+func (h *ProjectsPublicHandler) filterOptionsFetch(c *fiber.Ctx) ([]byte, error) {
+	langRows, err := h.db.Pool.Query(c.Context(), `
 SELECT DISTINCT language
 FROM projects
 WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND language IS NOT NULL AND language != ''
 ORDER BY language
 `)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
-		}
-		defer langRows.Close()
+	if err != nil {
+		return nil, err
+	}
+	defer langRows.Close()
 
-		var languages []string
-		for langRows.Next() {
-			var lang string
-			if err := langRows.Scan(&lang); err == nil {
-				languages = append(languages, lang)
-			}
+	var languages []string
+	for langRows.Next() {
+		var lang string
+		if err := langRows.Scan(&lang); err == nil {
+			languages = append(languages, lang)
 		}
+	}
 
-		// Get distinct categories (only from projects that completed setup / appear on Browse; exclude private)
-		catRows, err := h.db.Pool.Query(c.Context(), `
+	catRows, err := h.db.Pool.Query(c.Context(), `
 SELECT DISTINCT category
 FROM projects
 WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND category IS NOT NULL AND category != ''
 ORDER BY category
 `)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
-		}
-		defer catRows.Close()
+	if err != nil {
+		return nil, err
+	}
+	defer catRows.Close()
 
-		var categories []string
-		for catRows.Next() {
-			var cat string
-			if err := catRows.Scan(&cat); err == nil {
-				categories = append(categories, cat)
-			}
+	var categories []string
+	for catRows.Next() {
+		var cat string
+		if err := catRows.Scan(&cat); err == nil {
+			categories = append(categories, cat)
 		}
+	}
 
-		// Get all unique tags from verified projects that completed setup / appear on Browse; exclude private
-		tagRows, err := h.db.Pool.Query(c.Context(), `
+	tagRows, err := h.db.Pool.Query(c.Context(), `
 SELECT DISTINCT jsonb_array_elements_text(tags) AS tag
 FROM projects
 WHERE status = 'verified' AND needs_metadata = false AND deleted_at IS NULL AND tags IS NOT NULL AND jsonb_array_length(tags) > 0
 ORDER BY tag
 `)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
-		}
-		defer tagRows.Close()
-
-		tagMap := make(map[string]bool)
-		for tagRows.Next() {
-			var tag string
-			if err := tagRows.Scan(&tag); err == nil && tag != "" {
-				tagMap[tag] = true
-			}
-		}
-		var tags []string
-		for tag := range tagMap {
-			tags = append(tags, tag)
-		}
-		// Sort tags
-		for i := 0; i < len(tags)-1; i++ {
-			for j := i + 1; j < len(tags); j++ {
-				if tags[i] > tags[j] {
-					tags[i], tags[j] = tags[j], tags[i]
-				}
-			}
-		}
-
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"languages":  languages,
-			"categories": categories,
-			"tags":       tags,
-		})
+	if err != nil {
+		return nil, err
 	}
-}
+	defer tagRows.Close()
+
+	tagMap := make(map[string]bool)
+	for tagRows.Next() {
+		var tag string
+		if err := tagRows.Scan(&tag); err == nil && tag != "" {
+			tagMap[tag] = true
+		}
+	}
+	var tags []string
+	for tag := range tagMap {
+		tags = append(tags, tag)
+	}
+	for i := 0; i < len(tags)-1; i++ {
+		for j := i + 1; j < len(tags); j++ {
+			if tags[i] > tags[j] {
+				tags[i], tags[j] = tags[j], tags[i]
+			}
+		}
+	}
+
+	return json.Marshal(fiber.Map{
+		"languages":  languages,
+		"categories": categories,
+		"tags":       tags,
+	})

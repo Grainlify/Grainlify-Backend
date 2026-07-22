@@ -18,8 +18,10 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 )
 
-func diditSign(secret string, body []byte) string {
+func diditSign(secret string, body []byte, timestamp string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(strings.TrimSpace(timestamp)))
+	_, _ = mac.Write([]byte("."))
 	_, _ = mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -39,28 +41,32 @@ func doDiditRequest(app *fiber.App, body []byte, headers map[string]string) *htt
 
 func TestVerifyDiditSignature_ValidRawBody(t *testing.T) {
 	body := []byte(` { "session_id": "abc", "status": "Approved" } `)
-	if !verifyDiditSignature("secret", body, diditSign("secret", body), diditNowTimestamp()) {
+	ts := diditNowTimestamp()
+	if !verifyDiditSignature("secret", body, diditSign("secret", body, ts), ts) {
 		t.Fatal("expected valid raw-body signature to pass")
 	}
 }
 
 func TestVerifyDiditSignature_Sha256PrefixAccepted(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	if !verifyDiditSignature("secret", body, "sha256="+diditSign("secret", body), diditNowTimestamp()) {
+	ts := diditNowTimestamp()
+	if !verifyDiditSignature("secret", body, "sha256="+diditSign("secret", body, ts), ts) {
 		t.Fatal("expected sha256= prefixed signature to pass")
 	}
 }
 
 func TestVerifyDiditSignature_WrongSecret(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	if verifyDiditSignature("secret", body, diditSign("wrong", body), diditNowTimestamp()) {
+	ts := diditNowTimestamp()
+	if verifyDiditSignature("secret", body, diditSign("wrong", body, ts), ts) {
 		t.Fatal("expected wrong-secret signature to fail")
 	}
 }
 
 func TestVerifyDiditSignature_WrongBody(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	if verifyDiditSignature("secret", body, diditSign("secret", []byte(`{"session_id":"tampered"}`)), diditNowTimestamp()) {
+	ts := diditNowTimestamp()
+	if verifyDiditSignature("secret", body, diditSign("secret", []byte(`{"session_id":"tampered"}`), ts), ts) {
 		t.Fatal("expected tampered body signature to fail")
 	}
 }
@@ -68,14 +74,14 @@ func TestVerifyDiditSignature_WrongBody(t *testing.T) {
 func TestVerifyDiditSignature_StaleTimestamp(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
 	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
-	if verifyDiditSignature("secret", body, diditSign("secret", body), stale) {
+	if verifyDiditSignature("secret", body, diditSign("secret", body, stale), stale) {
 		t.Fatal("expected stale timestamp signature to fail")
 	}
 }
 
 func TestVerifyDiditSignature_MissingTimestamp(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	if verifyDiditSignature("secret", body, diditSign("secret", body), "") {
+	if verifyDiditSignature("secret", body, diditSign("secret", body, diditNowTimestamp()), "") {
 		t.Fatal("expected missing timestamp signature to fail")
 	}
 }
@@ -135,10 +141,11 @@ func TestDiditReceive_StaleTimestamp_Returns401(t *testing.T) {
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"session_id":"abc"}`)
+	stale := strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10)
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  strconv.FormatInt(time.Now().Add(-10*time.Minute).Unix(), 10),
-		"X-Signature":  diditSign("secret", body),
+		"X-Timestamp":  stale,
+		"X-Signature":  diditSign("secret", body, stale),
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusUnauthorized {
@@ -152,10 +159,11 @@ func TestDiditReceive_ValidSignature_ReachesDBCheck(t *testing.T) {
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"session_id":"abc"}`)
+	ts := diditNowTimestamp()
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  diditNowTimestamp(),
-		"X-Signature":  diditSign("secret", body),
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign("secret", body, ts),
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusServiceUnavailable {
@@ -169,10 +177,11 @@ func TestDiditReceive_InvalidJSONAfterSignature_Returns400(t *testing.T) {
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"session_id":`)
+	ts := diditNowTimestamp()
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  diditNowTimestamp(),
-		"X-Signature":  diditSign("secret", body),
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign("secret", body, ts),
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusBadRequest {
@@ -186,10 +195,11 @@ func TestDiditReceive_MissingSessionIDAfterSignature_Returns400(t *testing.T) {
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"status":"Approved"}`)
+	ts := diditNowTimestamp()
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  diditNowTimestamp(),
-		"X-Signature":  diditSign("secret", body),
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign("secret", body, ts),
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusBadRequest {
@@ -242,10 +252,11 @@ func TestDiditReceive_ValidSignatureWithSha256Prefix(t *testing.T) {
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"session_id":"abc","status":"Approved"}`)
+	ts := diditNowTimestamp()
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  diditNowTimestamp(),
-		"X-Signature":  "sha256=" + diditSign("secret", body),
+		"X-Timestamp":  ts,
+		"X-Signature":  "sha256=" + diditSign("secret", body, ts),
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusServiceUnavailable {
@@ -271,7 +282,8 @@ func TestResolveDiditStatus_WebhookFallsBackToSignedBodyWhenAPIFails(t *testing.
 
 func TestVerifyDiditSignature_EmptySecretReturnsFalse(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	if verifyDiditSignature("", body, diditSign("secret", body), diditNowTimestamp()) {
+	ts := diditNowTimestamp()
+	if verifyDiditSignature("", body, diditSign("secret", body, ts), ts) {
 		t.Fatal("expected empty secret to fail")
 	}
 }
@@ -279,7 +291,7 @@ func TestVerifyDiditSignature_EmptySecretReturnsFalse(t *testing.T) {
 func TestVerifyDiditSignature_FutureTimestampRejected(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
 	future := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
-	if verifyDiditSignature("secret", body, diditSign("secret", body), future) {
+	if verifyDiditSignature("secret", body, diditSign("secret", body, future), future) {
 		t.Fatal("expected future timestamp to fail")
 	}
 }
@@ -294,10 +306,11 @@ func TestDiditReceive_ValidSignatureButMissingDiditClient_FallsBackToBodyStatus(
 	app.Post("/webhooks/didit", h.Receive())
 
 	body := []byte(`{"session_id":"abc","status":"Approved"}`)
+	ts := diditNowTimestamp()
 	resp := doDiditRequest(app, body, map[string]string{
 		"Content-Type": "application/json",
-		"X-Timestamp":  diditNowTimestamp(),
-		"X-Signature":  diditSign("secret", body),
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign("secret", body, ts),
 	})
 	defer resp.Body.Close()
 	// Should get 503 because DB is nil, but signature was valid
@@ -308,7 +321,8 @@ func TestDiditReceive_ValidSignatureButMissingDiditClient_FallsBackToBodyStatus(
 
 func TestVerifyDiditSignature_ConstantTimeCompareExercised(t *testing.T) {
 	body := []byte(`{"session_id":"abc"}`)
-	correctSig := diditSign("secret", body)
+	ts := diditNowTimestamp()
+	correctSig := diditSign("secret", body, ts)
 	// Flip the last nibble to create a signature of same length but different content
 	runes := []rune(correctSig)
 	if runes[len(runes)-1] == '0' {
@@ -320,8 +334,41 @@ func TestVerifyDiditSignature_ConstantTimeCompareExercised(t *testing.T) {
 	if len(wrongSig) != len(correctSig) {
 		t.Fatal("prerequisite: signatures must be same length")
 	}
-	if verifyDiditSignature("secret", body, wrongSig, diditNowTimestamp()) {
+	if verifyDiditSignature("secret", body, wrongSig, ts) {
 		t.Fatal("expected near-miss signature to fail (constant-time compare)")
+	}
+}
+
+func TestVerifyDiditSignature_ReplayWithNewTimestampRejected(t *testing.T) {
+	secret := "secret"
+	body := []byte(`{"session_id":"abc","status":"Approved"}`)
+	ts1 := diditNowTimestamp()
+	sig1 := diditSign(secret, body, ts1)
+
+	// Original request with matching timestamp should pass signature check
+	if !verifyDiditSignature(secret, body, sig1, ts1) {
+		t.Fatal("expected original (body, signature, timestamp) triple to pass")
+	}
+
+	// Replay attempt with a newly-generated timestamp should fail signature check
+	ts2 := strconv.FormatInt(time.Now().Unix()+1, 10)
+	if verifyDiditSignature(secret, body, sig1, ts2) {
+		t.Fatal("expected replayed request with new timestamp to fail signature check")
+	}
+
+	// Test full HTTP handler rejection on replay
+	h := NewDiditWebhookHandler(config.Config{DiditWebhookSecret: secret}, nil)
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Post("/webhooks/didit", h.Receive())
+
+	resp := doDiditRequest(app, body, map[string]string{
+		"Content-Type": "application/json",
+		"X-Timestamp":  ts2,
+		"X-Signature":  sig1,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("want 401 on replayed request with substituted timestamp, got %d", resp.StatusCode)
 	}
 }
 
