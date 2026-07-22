@@ -132,9 +132,10 @@ func (c *Client) ListPRsPage(ctx context.Context, accessToken string, fullName s
 
 // IssueComment represents a comment on a GitHub issue.
 type IssueComment struct {
-	ID        int64  `json:"id"`
-	Body      string `json:"body"`
-	User      struct {
+	ID      int64  `json:"id"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	User    struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	CreatedAt string `json:"created_at"`

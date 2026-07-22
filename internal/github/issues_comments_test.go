@@ -284,21 +284,20 @@ func TestCreateIssueComment_BurstSimulation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rewrite := &urlRewriteTransport{
-		replace: "https://api.github.com",
-		with:    srv.URL,
-	}
-
 	results := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		go func(n int) {
 			rt := NewRateLimitTransport(nil)
-			rt.Base = http.DefaultTransport
 			rt.MaxRetries = 3
 			rt.MaxWait = 50 * time.Millisecond
-			rewrite.base = rt
+			// Each goroutine gets its own urlRewriteTransport to avoid a data race
+			// on the shared rewrite.base field.
 			cl := &Client{
-				HTTP:      &http.Client{Transport: &urlRewriteTransport{base: rt, replace: rewrite.replace, with: rewrite.with}},
+				HTTP: &http.Client{Transport: &urlRewriteTransport{
+					base:    rt,
+					replace: "https://api.github.com",
+					with:    srv.URL,
+				}},
 				UserAgent: "test",
 			}
 			_, err := cl.CreateIssueComment(context.Background(), "tok", "owner/repo", n+1, "burst")
@@ -460,6 +459,169 @@ func TestCreateIssueComment_PrimaryRateLimit_NoRetryAfter(t *testing.T) {
 	// 1 initial + 2 retries = 3 total.
 	if atomic.LoadInt64(&calls) != 3 {
 		t.Fatalf("want 3 calls, got %d", calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CreateIssueComment — 429 (Too Many Requests) variants
+// ---------------------------------------------------------------------------
+
+// TestCreateIssueComment_429WithRetryAfter verifies that a 429 response with
+// Retry-After is treated as a secondary rate limit (same as 403+Retry-After).
+// GitHub may use either status code for secondary limits.
+func TestCreateIssueComment_429WithRetryAfter(t *testing.T) {
+	var calls int64
+	srv := serverSequence(
+		// First call: 429 with Retry-After (secondary limit via status 429).
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&calls, 1)
+			w.Header().Set("Retry-After", "0") // 0s for test speed
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprintln(w, `{"message":"secondary rate limit"}`)
+		},
+		// Second call: success.
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&calls, 1)
+			validCommentResponse(55, "ok")(w, r)
+		},
+	)
+	defer srv.Close()
+
+	c := commentClient(srv, 3, 50*time.Millisecond)
+	c.HTTP.Transport = &urlRewriteTransport{
+		base:    c.HTTP.Transport,
+		replace: "https://api.github.com",
+		with:    srv.URL,
+	}
+
+	got, err := c.CreateIssueComment(context.Background(), "tok", "owner/repo", 1, "body")
+	if err != nil {
+		t.Fatalf("want success after 429 retry, got %v", err)
+	}
+	if got.ID != 55 {
+		t.Fatalf("want ID 55, got %d", got.ID)
+	}
+	if atomic.LoadInt64(&calls) != 2 {
+		t.Fatalf("want 2 calls, got %d", calls)
+	}
+}
+
+// TestCreateIssueComment_429Exhausted verifies that a persistent 429+Retry-After
+// response returns ErrSecondaryRateLimit once all retries are exhausted.
+func TestCreateIssueComment_429Exhausted(t *testing.T) {
+	var calls int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintln(w, `{"message":"secondary rate limit"}`)
+	}))
+	defer srv.Close()
+
+	c := commentClient(srv, 2, 50*time.Millisecond) // 2 retries → 3 total calls
+	c.HTTP.Transport = &urlRewriteTransport{
+		base:    c.HTTP.Transport,
+		replace: "https://api.github.com",
+		with:    srv.URL,
+	}
+
+	_, err := c.CreateIssueComment(context.Background(), "tok", "owner/repo", 1, "body")
+	if !IsSecondaryRateLimited(err) {
+		t.Fatalf("want ErrSecondaryRateLimit for exhausted 429, got %v", err)
+	}
+	if atomic.LoadInt64(&calls) != 3 {
+		t.Fatalf("want 3 calls, got %d", calls)
+	}
+}
+
+// TestCreateIssueComment_429WithoutRetryAfter verifies that a bare 429 (no
+// Retry-After, no X-RateLimit-Remaining:0) is not retried by the transport and
+// is NOT classified as a secondary rate limit — it is an unrecognised 4xx.
+func TestCreateIssueComment_429WithoutRetryAfter(t *testing.T) {
+	var calls int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		// Bare 429 — no rate-limit indicator headers.
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintln(w, `{"message":"too many requests"}`)
+	}))
+	defer srv.Close()
+
+	c := commentClient(srv, 3, 50*time.Millisecond)
+	c.HTTP.Transport = &urlRewriteTransport{
+		base:    c.HTTP.Transport,
+		replace: "https://api.github.com",
+		with:    srv.URL,
+	}
+
+	_, err := c.CreateIssueComment(context.Background(), "tok", "owner/repo", 1, "body")
+	if err == nil {
+		t.Fatal("want error on bare 429, got nil")
+	}
+	if IsSecondaryRateLimited(err) {
+		t.Fatal("bare 429 without Retry-After must NOT be secondary rate limit")
+	}
+	// Transport does not retry bare 429 (no rate-limit headers) → exactly 1 call.
+	if atomic.LoadInt64(&calls) != 1 {
+		t.Fatalf("want 1 call (no retry on bare 429), got %d", calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CreateIssueComment — HTMLURL is populated on success
+// ---------------------------------------------------------------------------
+
+// TestCreateIssueComment_HTMLURLPopulated verifies that the HTMLURL field
+// returned by GitHub is propagated into the IssueComment result.
+func TestCreateIssueComment_HTMLURLPopulated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		now := time.Now().UTC().Format(time.RFC3339)
+		fmt.Fprintf(w,
+			`{"id":100,"body":"hi","user":{"login":"bot"},"html_url":"https://github.com/owner/repo/issues/1#issuecomment-100","created_at":%q,"updated_at":%q}`,
+			now, now)
+	}))
+	defer srv.Close()
+
+	c := commentClient(srv, 1, 50*time.Millisecond)
+	c.HTTP.Transport = &urlRewriteTransport{
+		base:    c.HTTP.Transport,
+		replace: "https://api.github.com",
+		with:    srv.URL,
+	}
+
+	got, err := c.CreateIssueComment(context.Background(), "tok", "owner/repo", 1, "hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "https://github.com/owner/repo/issues/1#issuecomment-100"
+	if got.HTMLURL != want {
+		t.Fatalf("HTMLURL = %q, want %q", got.HTMLURL, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DeleteIssueComment — additional validation
+// ---------------------------------------------------------------------------
+
+// TestDeleteIssueComment_InvalidFullName verifies that an unparseable full name
+// returns an error for delete, same as create.
+func TestDeleteIssueComment_InvalidFullName(t *testing.T) {
+	c := NewClient()
+	err := c.DeleteIssueComment(context.Background(), "tok", "noslash", 1)
+	if err == nil {
+		t.Fatal("want error for invalid full name in delete, got nil")
+	}
+}
+
+// TestDeleteIssueComment_MissingToken verifies that an empty access token
+// returns an error, consistent with CreateIssueComment.
+func TestDeleteIssueComment_MissingToken(t *testing.T) {
+	c := NewClient()
+	err := c.DeleteIssueComment(context.Background(), "", "owner/repo", 1)
+	if err == nil || err.Error() != "missing github access token" {
+		t.Fatalf("want missing-token error, got %v", err)
 	}
 }
 

@@ -4,18 +4,31 @@
 // always backed by RateLimitTransport (see NewClient in api.go).  The transport
 // transparently retries 403/429 rate-limit responses — honoring Retry-After for
 // secondary limits and X-RateLimit-Reset for primary limits — up to
-// DefaultMaxRetries times.
+// DefaultMaxRetries times before returning the final response to the caller.
 //
-// When the transport exhausts all retries and returns the final rate-limit
-// response, the functions here detect that condition and wrap the error as
-// ErrSecondaryRateLimit so callers can distinguish "throttled" from "auth
-// failure" (both surface as 403 from GitHub).
+// Rate-limit response classification:
 //
-// Callers that need to check for rate limiting:
+//   - Secondary rate limit: 403 or 429 with a Retry-After header present.
+//     The transport retries these and, when retries are exhausted, the
+//     functions here surface ErrSecondaryRateLimit so callers can distinguish
+//     "throttled" from "auth failure" (both may appear as 403 from GitHub).
+//
+//   - Primary rate limit: 403 or 429 with X-RateLimit-Remaining: 0 (no
+//     Retry-After).  The transport retries these too; on exhaustion the raw
+//     4xx response is returned as a non-rate-limit error.
+//
+//   - Auth/permission failure: bare 403 with no rate-limit headers.  The
+//     transport does not retry these; checkCommentRateLimit delegates to
+//     parseGitHubAPIError.
+//
+//   - 5xx (GitHub outage): not retried by RateLimitTransport.  Callers are
+//     responsible for higher-level retry on server errors.
+//
+// Callers that need to distinguish throttling from other errors:
 //
 //	comment, err := client.CreateIssueComment(ctx, tok, "owner/repo", 42, "body")
 //	if github.IsSecondaryRateLimited(err) {
-//	    // back off or queue for later
+//	    // back off or queue for later; Retry-After value is in err.Error()
 //	}
 package github
 
@@ -155,6 +168,7 @@ func (c *Client) CreateIssueComment(ctx context.Context, accessToken string, ful
 		User: struct {
 			Login string `json:"login"`
 		}{Login: out.User.Login},
+		HTMLURL:   out.HTMLURL,
 		CreatedAt: out.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: out.UpdatedAt.UTC().Format(time.RFC3339),
 	}, nil
@@ -170,6 +184,9 @@ func (c *Client) DeleteIssueComment(ctx context.Context, accessToken string, ful
 	owner, repo, err := splitFullName(fullName)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return fmt.Errorf("missing github access token")
 	}
 	if commentID <= 0 {
 		return fmt.Errorf("invalid comment id")
