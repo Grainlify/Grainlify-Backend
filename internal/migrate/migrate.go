@@ -2,10 +2,12 @@ package migrate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +71,11 @@ func NeedsMigration(ctx context.Context, pool db.DBPool) (bool, error) {
 	if err != nil {
 		slog.Warn("could not load migration files, assuming migrations needed", "error", err)
 		return true, nil
+	}
+	// Verify checksums of already applied migrations
+	if err := verifyChecksums(pool, src); err != nil {
+		// Fail fast on checksum mismatch
+		return false, fmt.Errorf("migration checksum verification failed: %w", err)
 	}
 
 	latestVersion, err := getLatestMigrationVersion(src)
@@ -232,6 +239,8 @@ func Up(ctx context.Context, pool db.DBPool, allowIrreversible bool) error {
 			"dirty", dirty,
 		)
 	}
+	// Store the starting version for later checksum updates
+	oldVersion := version
 
 	// Collect pending migration versions for logging and irreversible checks.
 	pendingVersions, err := collectPendingVersions(src, version, err)
@@ -322,6 +331,18 @@ func Up(ctx context.Context, pool db.DBPool, allowIrreversible bool) error {
 			slog.Info("migrations completed successfully",
 				"new_version", newVersion,
 			)
+			// Update checksum records for any new migrations applied
+			for v := oldVersion + 1; v <= newVersion; v++ {
+				chk, err := migrations.ComputeChecksum(v)
+				if err != nil {
+					slog.Error("failed to compute checksum", "version", v, "error", err)
+					continue
+				}
+				_, err = pool.Exec(context.Background(), `INSERT INTO migration_checksums (version, checksum) VALUES ($1, $2) ON CONFLICT (version) DO UPDATE SET checksum = EXCLUDED.checksum`, v, chk)
+				if err != nil {
+					slog.Error("failed to store checksum", "version", v, "error", err)
+				}
+			}
 		} else {
 			slog.Info("migrations completed successfully")
 		}
@@ -469,4 +490,60 @@ func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
+
+// verifyChecksums ensures that applied migrations have matching checksums.
+// It creates the migration_checksums table if it does not exist.
+// For each applied migration version, it computes the checksum and compares
+// it with the stored value, inserting a new record if absent.
+// Returns an error if any checksum mismatches.
+func verifyChecksums(pool db.DBPool, src source.Driver) error {
+    // Ensure checksum table exists.
+    _, err := pool.Exec(context.Background(), `
+        CREATE TABLE IF NOT EXISTS migration_checksums (
+            version bigint PRIMARY KEY,
+            checksum text NOT NULL
+        )
+    `)
+    if err != nil {
+        return fmt.Errorf("create migration_checksums table: %w", err)
+    }
+
+    // Get applied migration versions (non‑dirty).
+    rows, err := pool.Query(context.Background(), `
+        SELECT version FROM schema_migrations WHERE dirty = false
+    `)
+    if err != nil {
+        return fmt.Errorf("query applied migrations: %w", err)
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var version uint
+        if err := rows.Scan(&version); err != nil {
+            return fmt.Errorf("scan version: %w", err)
+        }
+        // Compute current checksum.
+        chk, err := migrations.ComputeChecksum(version)
+        if err != nil {
+            return fmt.Errorf("compute checksum for version %d: %w", version, err)
+        }
+        var stored string
+        err = pool.QueryRow(context.Background(), `SELECT checksum FROM migration_checksums WHERE version = $1`, version).Scan(&stored)
+        if err != nil {
+            // No stored checksum – insert it.
+            _, err = pool.Exec(context.Background(), `INSERT INTO migration_checksums (version, checksum) VALUES ($1, $2)`, version, chk)
+            if err != nil {
+                return fmt.Errorf("store checksum for version %d: %w", version, err)
+            }
+            continue
+        }
+        if stored != chk {
+            return fmt.Errorf("checksum mismatch for migration %d: expected %s, got %s", version, stored, chk)
+        }
+    }
+    if rows.Err() != nil {
+        return fmt.Errorf("iteration error: %w", rows.Err())
+    }
+    return nil
+}
 
