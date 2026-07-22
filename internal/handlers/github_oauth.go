@@ -18,7 +18,6 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
-	"github.com/jagadeesh/grainlify/backend/internal/cryptox"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
@@ -322,14 +321,6 @@ WHERE state = $1
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "token_exchange_failed", "")
 		}
 
-		encKey, err := cryptox.KeyFromB64(h.cfg.TokenEncKeyB64)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "token_encryption_not_configured", "")
-		}
-		encToken, err := cryptox.EncryptAESGCM(encKey, []byte(tr.AccessToken))
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "token_encrypt_failed", "")
-		}
 
 		gh := github.NewClient()
 		u, err := gh.GetUser(c.Context(), tr.AccessToken)
@@ -369,19 +360,20 @@ RETURNING id, role
 			return httpx.RespondError(c, fiber.StatusBadRequest, "wrong_state_kind", "")
 		}
 
-		_, err = h.db.Pool.Exec(c.Context(), `
-INSERT INTO github_accounts (user_id, github_user_id, login, avatar_url, access_token, token_type, scope)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (user_id) DO UPDATE SET
-  github_user_id = EXCLUDED.github_user_id,
-  login = EXCLUDED.login,
-  avatar_url = EXCLUDED.avatar_url,
-  access_token = EXCLUDED.access_token,
-  token_type = EXCLUDED.token_type,
-  scope = EXCLUDED.scope,
-  updated_at = now()
-`, userID, u.ID, u.Login, u.AvatarURL, encToken, tr.TokenType, tr.Scope)
+		err = github.StoreLinkedAccount(
+			c.Context(),
+			h.db.Pool,
+			userID,
+			u.ID,
+			u.Login,
+			u.AvatarURL,
+			tr.AccessToken,
+			tr.TokenType,
+			tr.Scope,
+			h.cfg.TokenEncKeyB64,
+		)
 		if err != nil {
+			slog.Error("failed to store github account", "error", err, "user_id", userID)
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_upsert_failed", "")
 		}
 
