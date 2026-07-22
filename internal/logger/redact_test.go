@@ -7,6 +7,48 @@ import (
 	"testing"
 )
 
+func TestRedactMapAllSensitiveKeywords(t *testing.T) {
+	t.Parallel()
+
+	keywords := []string{
+		"address",
+		"amount",
+		"email",
+		"secret",
+		"token",
+		"password",
+		"private_key",
+		"privatekey",
+		"signature",
+		"sig",
+		"authorization",
+		"cookie",
+		"jwt",
+		"api_key",
+		"apikey",
+		"credential",
+	}
+
+	payload := make(map[string]interface{})
+	for _, kw := range keywords {
+		payload["test_"+kw+"_val"] = "sensitive-" + kw
+	}
+
+	redacted := RedactMap(payload)
+
+	for _, kw := range keywords {
+		key := "test_" + kw + "_val"
+		got, ok := redacted[key]
+		if !ok {
+			t.Errorf("key %q missing in redacted output", key)
+			continue
+		}
+		if got != "[REDACTED]" {
+			t.Errorf("key %q with keyword %q was not redacted: got %v, want %q", key, kw, got, "[REDACTED]")
+		}
+	}
+}
+
 func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 	t.Parallel()
 
@@ -16,6 +58,14 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 		"person@example.com",
 		"super-secret-value",
 		"ghp_token_value",
+		"my-pass-123",
+		"priv-key-content",
+		"sig_abc_123",
+		"Bearer xyz123",
+		"session_id=123",
+		"eyJhbGciOi...",
+		"secret_api_key",
+		"user_cred_data",
 	}
 
 	payload := map[string]interface{}{
@@ -24,9 +74,17 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 			"nestedAmount": secretValues[1],
 			"profile": map[string]interface{}{
 				"ContactEmail": secretValues[2],
-				"credentials": map[string]interface{}{
-					"apiSECRET":    secretValues[3],
-					"SessionToken": secretValues[4],
+				"user_info": map[string]interface{}{
+					"apiSECRET":        secretValues[3],
+					"SessionToken":     secretValues[4],
+					"UserPassword":     secretValues[5],
+					"my_private_key":   secretValues[6],
+					"DigitalSignature": secretValues[7],
+					"Authorization":    secretValues[8],
+					"SessionCookie":    secretValues[9],
+					"UserJWT":          secretValues[10],
+					"X_API_KEY":        secretValues[11],
+					"UserCredential":   secretValues[12],
 				},
 			},
 		},
@@ -48,17 +106,26 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 	assertPathEquals(t, redacted, []interface{}{"ADDRESS"}, "[REDACTED]")
 	assertPathEquals(t, redacted, []interface{}{"metadata", "nestedAmount"}, "[REDACTED]")
 	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "ContactEmail"}, "[REDACTED]")
-	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "credentials", "apiSECRET"}, "[REDACTED]")
-	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "credentials", "SessionToken"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "apiSECRET"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "SessionToken"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "UserPassword"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "my_private_key"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "DigitalSignature"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "Authorization"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "SessionCookie"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "UserJWT"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "X_API_KEY"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "UserCredential"}, "[REDACTED]")
 }
 
 func TestRedactMapLeavesNonSensitiveFieldsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	payload := map[string]interface{}{
-		"userID":     "user-123",
-		"status":     "active",
-		"retryCount": 3,
+		"project_name": "Grainlify",
+		"userID":       "user-123",
+		"status":       "active",
+		"retryCount":   3,
 		"metadata": map[string]interface{}{
 			"requestID": "req-456",
 			"enabled":   true,

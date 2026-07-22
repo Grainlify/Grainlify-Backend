@@ -4,6 +4,25 @@ import (
 	"strings"
 )
 
+var sensitiveKeySubstrings = []string{
+	"address",
+	"amount",
+	"email",
+	"secret",
+	"token",
+	"password",
+	"private_key",
+	"privatekey",
+	"signature",
+	"sig",
+	"authorization",
+	"cookie",
+	"jwt",
+	"api_key",
+	"apikey",
+	"credential",
+}
+
 // RedactString redacts a sensitive string, replacing it with a placeholder.
 // It retains the first 4 characters for identification if the string is long enough.
 // This is useful for redacting secrets, tokens, or PII.
@@ -18,8 +37,7 @@ func RedactString(s string) string {
 }
 
 // RedactMap takes a map of arguments and returns a new map where values
-// associated with sensitive keys (like "address", "amount", "secret", "token", "email")
-// are redacted. Nested maps are also processed.
+// associated with sensitive keys are redacted. Nested maps are also processed.
 func RedactMap(m map[string]interface{}) map[string]interface{} {
 	if m == nil {
 		return nil
@@ -27,11 +45,14 @@ func RedactMap(m map[string]interface{}) map[string]interface{} {
 	out := make(map[string]interface{}, len(m))
 	for k, v := range m {
 		kLower := strings.ToLower(k)
-		if strings.Contains(kLower, "address") ||
-			strings.Contains(kLower, "amount") ||
-			strings.Contains(kLower, "email") ||
-			strings.Contains(kLower, "secret") ||
-			strings.Contains(kLower, "token") {
+		isSensitive := false
+		for _, keyword := range sensitiveKeySubstrings {
+			if strings.Contains(kLower, keyword) {
+				isSensitive = true
+				break
+			}
+		}
+		if isSensitive {
 			out[k] = "[REDACTED]"
 		} else if nestedMap, ok := v.(map[string]interface{}); ok {
 			out[k] = RedactMap(nestedMap)
