@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/jagadeesh/grainlify/backend/internal/events"
+	"github.com/jagadeesh/grainlify/backend/internal/liveness"
 	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 )
 
@@ -25,6 +26,10 @@ type GitHubWebhookIngestor interface {
 type GitHubWebhookConsumer struct {
 	Sub    *nats.Subscription
 	Ingest GitHubWebhookIngestor
+
+	// LivenessTracker is updated on every successfully handled message so that
+	// the /healthz endpoint can detect whether the worker is making progress.
+	LivenessTracker *liveness.Tracker
 
 	// ShutdownGracePeriod bounds how long shutdown waits for in-flight message
 	// handlers before cancelling their contexts. Defaults to
@@ -198,6 +203,10 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 			return
 		}
 		slog.Error("webhook ingest failed", "error", err)
+		return
+	}
+	if c.LivenessTracker != nil {
+		c.LivenessTracker.Tick()
 	}
 }
 

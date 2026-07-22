@@ -149,6 +149,15 @@ type Config struct {
 	// If empty, the endpoint is unauthenticated — only acceptable when /metrics is firewalled at the network level.
 	MetricsToken string
 
+	// WorkerLivenessAddr is the HTTP listen address for the worker liveness
+	// endpoint (WORKER_LIVENESS_ADDR, default ":9091"). Set to empty to disable
+	// the liveness HTTP server entirely (useful for local dev without a port).
+	WorkerLivenessAddr string
+	// WorkerLivenessStaleThreshold is how long without a tick before the
+	// liveness endpoint reports stale (WORKER_LIVENESS_STALE_THRESHOLD, default 30s).
+	// Should be at least 2× the expected worker tick interval.
+	WorkerLivenessStaleThreshold time.Duration
+
 	// RateLimitAuthPerMin is the per-minute limit for auth and webhook endpoints (RATE_LIMIT_AUTH_PER_MIN, default 60 requests/minute).
 	RateLimitAuthPerMin int
 	// RateLimitPublicPerMin is the per-minute limit for public read endpoints (RATE_LIMIT_PUBLIC_PER_MIN, default 300 requests/minute).
@@ -240,6 +249,9 @@ func Load() Config {
 		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
 		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
 		MetricsToken:          strings.TrimSpace(getEnv("METRICS_TOKEN", "")),
+
+		WorkerLivenessAddr:             getEnv("WORKER_LIVENESS_ADDR", ":9091"),
+		WorkerLivenessStaleThreshold:   getEnvDuration("WORKER_LIVENESS_STALE_THRESHOLD", 30*time.Second),
 	}
 }
 
