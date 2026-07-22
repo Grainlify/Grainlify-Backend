@@ -189,3 +189,95 @@ func rateLimitTestRequest(t *testing.T, app *fiber.App, path, remoteIP, forwarde
 func setRateLimitTestTimestamp(ts uint32) {
 	atomic.StoreUint32(&utils.Timestamp, ts)
 }
+
+func TestRateLimitModeForPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want rateLimitMode
+	}{
+		// Explicitly exempt paths.
+		{"health", "/health", rateLimitModeNone},
+		{"ready", "/ready", rateLimitModeNone},
+		{"root", "/", rateLimitModeNone},
+
+		// Explicitly listed auth-bucket paths.
+		{"auth prefix", "/auth/nonce", rateLimitModeAuth},
+		{"webhooks prefix", "/webhooks/spotflow", rateLimitModeAuth},
+
+		// Explicitly listed public-bucket paths.
+		{"projects prefix", "/projects", rateLimitModePublic},
+		{"projects nested", "/projects/123/issues/1/apply", rateLimitModePublic},
+		{"leaderboard", "/leaderboard", rateLimitModePublic},
+		{"stats landing", "/stats/landing", rateLimitModePublic},
+		{"ecosystems", "/ecosystems", rateLimitModePublic},
+		{"open source week events", "/open-source-week/events", rateLimitModePublic},
+		{"profile public", "/profile/public", rateLimitModePublic},
+
+		// Previously unlisted paths that used to fall open to
+		// rateLimitModeNone; they must now fail closed to
+		// rateLimitModeAuth.
+		{"kyc start", "/kyc/start", rateLimitModeAuth},
+		{"kyc status", "/kyc/status", rateLimitModeAuth},
+		{"admin bootstrap", "/admin/bootstrap", rateLimitModeAuth},
+		{"admin users", "/admin/users", rateLimitModeAuth},
+		{"admin ecosystems", "/admin/ecosystems", rateLimitModeAuth},
+		{"admin open source week events", "/admin/open-source-week/events", rateLimitModeAuth},
+		{"profile write", "/profile", rateLimitModeAuth},
+		{"profile update", "/profile/update", rateLimitModeAuth},
+		{"unknown top-level route", "/some-brand-new-route", rateLimitModeAuth},
+		{"nested unknown path", "/foo/bar/baz", rateLimitModeAuth},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rateLimitModeForPath(tt.path)
+			if got != tt.want {
+				t.Fatalf("rateLimitModeForPath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRateLimitMiddleware_UnlistedRouteFailsClosed(t *testing.T) {
+	cfg := config.Config{
+		RateLimitAuthPerMin:   1,
+		RateLimitPublicPerMin: 3,
+		TrustedProxies:        []string{"127.0.0.1"},
+	}
+
+	// "/kyc/start" is not explicitly listed in rateLimitModeForPath, so it
+	// must fall back to the auth bucket rather than being exempt.
+	app := newRateLimitTestApp(cfg, "/kyc/start")
+
+	firstStatus := rateLimitTestRequest(t, app, "/kyc/start", "203.0.113.60", "")
+	if firstStatus != fiber.StatusOK {
+		t.Fatalf("first request status = %d, want %d", firstStatus, fiber.StatusOK)
+	}
+
+	secondStatus := rateLimitTestRequest(t, app, "/kyc/start", "203.0.113.60", "")
+	if secondStatus != fiber.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want %d (unlisted route should be rate limited, not exempt)", secondStatus, fiber.StatusTooManyRequests)
+	}
+}
+
+func TestRateLimitModeForPath_DefaultIsNotNone(t *testing.T) {
+	// Guard against regression: the fallback branch must never silently
+	// exempt traffic again. Only the three explicit paths below are
+	// permitted to resolve to rateLimitModeNone.
+	exempt := map[string]bool{
+		"/health": true,
+		"/ready":  true,
+		"/":       true,
+	}
+
+	unlisted := []string{"/kyc/start", "/admin/bootstrap", "/profile", "/some/future/route"}
+	for _, path := range unlisted {
+		if exempt[path] {
+			continue
+		}
+		if got := rateLimitModeForPath(path); got == rateLimitModeNone {
+			t.Fatalf("rateLimitModeForPath(%q) = rateLimitModeNone, want a rate-limited mode", path)
+		}
+	}
+}

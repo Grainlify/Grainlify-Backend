@@ -81,7 +81,7 @@ func rateLimitModeForPath(path string) rateLimitMode {
 		path == "/ecosystems", path == "/open-source-week/events", path == "/profile/public":
 		return rateLimitModePublic
 	default:
-		return rateLimitModeNone
+		return rateLimitModeAuth
 	}
 }
 
