@@ -99,6 +99,16 @@ var (
 		Name:      "repo_metadata_cache_total",
 		Help:      "Total number of GitHub repo-metadata cache lookups by result (hit, miss, bypass).",
 	}, []string{"result"})
+
+	// ProjectsPublicCache counts cache hits and misses for the public projects endpoints
+	// (List, Recommended, FilterOptions, Get).  The "route" label identifies which
+	// handler was called; the "result" label is "hit" or "miss".
+	ProjectsPublicCache = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "grainlify",
+		Subsystem: "projects",
+		Name:      "public_cache_total",
+		Help:      "Total number of public projects cache lookups by route and result (hit, miss).",
+	}, []string{"route", "result"})
 )
 
 // NormalizePath replaces dynamic path segments (UUIDs, numeric IDs) with ":id"

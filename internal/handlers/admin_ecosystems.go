@@ -15,11 +15,19 @@ import (
 )
 
 type EcosystemsAdminHandler struct {
-	db *db.DB
+	db                 *db.DB
+	onEcosystemChanged func() // callback to invalidate cache on ecosystem CUD operations
 }
 
 func NewEcosystemsAdminHandler(d *db.DB) *EcosystemsAdminHandler {
 	return &EcosystemsAdminHandler{db: d}
+}
+
+// SetCacheInvalidator sets the callback to invalidate the projects public cache
+// when ecosystems are created, updated, or deleted.  This must be called after
+// both the admin handler and the projects public handler are constructed.
+func (h *EcosystemsAdminHandler) SetCacheInvalidator(fn func()) {
+	h.onEcosystemChanged = fn
 }
 
 func (h *EcosystemsAdminHandler) List() fiber.Handler {
@@ -221,6 +229,10 @@ RETURNING id
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_create_failed", "")
 		}
+		// Invalidate projects cache since ecosystem list changed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
+		}
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id.String()})
 	}
 }
@@ -291,6 +303,10 @@ WHERE id = $1
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_update_failed", "")
 		}
+		// Invalidate projects cache since ecosystem metadata changed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
+		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -320,6 +336,10 @@ func (h *EcosystemsAdminHandler) Delete() fiber.Handler {
 		}
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_delete_failed", "")
+		}
+		// Invalidate projects cache since ecosystem was removed
+		if h.onEcosystemChanged != nil {
+			h.onEcosystemChanged()
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
