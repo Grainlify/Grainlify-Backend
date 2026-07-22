@@ -282,16 +282,19 @@ func diditDecisionData(decision didit.SessionDecisionResponse) map[string]interf
 	return combinedData
 }
 
-// verifyDiditSignature validates Didit's HMAC-SHA256 signature over the raw body.
+// verifyDiditSignature validates Didit's HMAC-SHA256 signature over the timestamp and raw body.
 func verifyDiditSignature(secret string, body []byte, signatureHeader string, timestampHeader string) bool {
-	if strings.TrimSpace(secret) == "" || strings.TrimSpace(signatureHeader) == "" {
+	ts := strings.TrimSpace(timestampHeader)
+	if strings.TrimSpace(secret) == "" || strings.TrimSpace(signatureHeader) == "" || ts == "" {
 		return false
 	}
-	if !diditTimestampFresh(timestampHeader) {
+	if !diditTimestampFresh(ts) {
 		return false
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(ts))
+	_, _ = mac.Write([]byte("."))
 	_, _ = mac.Write(body)
 	wantHex := hex.EncodeToString(mac.Sum(nil))
 
