@@ -13,6 +13,20 @@ jobs:
   build-and-test:
     name: Build, Vet, Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: grainlify_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,6 +44,6 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        # TEST_DB_URL is intentionally left unset: DB-dependent integration tests
-        # detect its absence and skip themselves rather than failing.
+        env:
+          TEST_DB_URL: postgres://postgres:postgres@localhost:5432/grainlify_test?sslmode=disable
         run: go test -count=1 -cover ./...
