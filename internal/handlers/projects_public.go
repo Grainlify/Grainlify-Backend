@@ -929,3 +929,4 @@ ORDER BY tag
 		"categories": categories,
 		"tags":       tags,
 	})
+}
