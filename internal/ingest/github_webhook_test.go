@@ -17,10 +17,14 @@ package ingest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/ingest"
@@ -629,3 +633,135 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, ev.DeliveryID)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Mock DBPool unit tests for handleInstallationEvent added branch error & warning logging
+// ---------------------------------------------------------------------------
+
+type mockDBPool struct {
+	execFunc func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (m *mockDBPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if m.execFunc != nil {
+		return m.execFunc(ctx, sql, args...)
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+
+func (m *mockDBPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, nil
+}
+
+func (m *mockDBPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return nil
+}
+
+func (m *mockDBPool) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+
+func (m *mockDBPool) Ping(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockDBPool) Close() {}
+
+func (m *mockDBPool) Config() *pgxpool.Config {
+	return nil
+}
+
+func TestIngest_InstallationRepositoriesAdded_ExecError(t *testing.T) {
+	ctx := context.Background()
+	var executedRepos []string
+
+	mockPool := &mockDBPool{
+		execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			if strings.Contains(sql, "UPDATE projects") {
+				repoName := args[0].(string)
+				executedRepos = append(executedRepos, repoName)
+				if repoName == "acme/failing-repo" {
+					return pgconn.CommandTag{}, errors.New("db connection failure")
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+
+	ing := &ingest.GitHubWebhookIngestor{Pool: mockPool}
+
+	payload := mustJSON(t, map[string]any{
+		"action": "added",
+		"installation": map[string]any{
+			"id": json.Number("123"),
+		},
+		"repositories_added": []map[string]any{
+			{"full_name": "acme/failing-repo"},
+			{"full_name": "acme/successful-repo"},
+		},
+	})
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: "",
+		Event:      "installation_repositories",
+		Action:     "added",
+		Payload:    payload,
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Ingest returned error: %v", err)
+	}
+
+	if len(executedRepos) != 2 {
+		t.Fatalf("expected 2 Exec calls for repos, got %d", len(executedRepos))
+	}
+	if executedRepos[0] != "acme/failing-repo" || executedRepos[1] != "acme/successful-repo" {
+		t.Errorf("unexpected executed repos order/content: %v", executedRepos)
+	}
+}
+
+func TestIngest_InstallationRepositoriesAdded_ZeroRowsAffected(t *testing.T) {
+	ctx := context.Background()
+	var executedRepos []string
+
+	mockPool := &mockDBPool{
+		execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			if strings.Contains(sql, "UPDATE projects") {
+				repoName := args[0].(string)
+				executedRepos = append(executedRepos, repoName)
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			}
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		},
+	}
+
+	ing := &ingest.GitHubWebhookIngestor{Pool: mockPool}
+
+	payload := mustJSON(t, map[string]any{
+		"action": "added",
+		"installation": map[string]any{
+			"id": json.Number("123"),
+		},
+		"repositories_added": []map[string]any{
+			{"full_name": "acme/nonexistent-repo"},
+		},
+	})
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: "",
+		Event:      "installation_repositories",
+		Action:     "added",
+		Payload:    payload,
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Ingest returned error: %v", err)
+	}
+
+	if len(executedRepos) != 1 {
+		t.Fatalf("expected 1 Exec call for repo, got %d", len(executedRepos))
+	}
+	if executedRepos[0] != "acme/nonexistent-repo" {
+		t.Errorf("unexpected executed repo: %s", executedRepos[0])
+	}
+}
+
