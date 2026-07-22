@@ -49,8 +49,8 @@ func RedactMap(m map[string]interface{}) map[string]interface{} {
 			out[k] = "[REDACTED]"
 		} else if nestedMap, ok := v.(map[string]interface{}); ok {
 			out[k] = RedactMap(nestedMap)
-		} else if nestedSlice, ok := v.([]interface{}); ok {
-			out[k] = redactSlice(nestedSlice)
+		} else if slice, ok := v.([]interface{}); ok {
+			out[k] = redactSlice(slice)
 		} else {
 			out[k] = v
 		}
@@ -58,63 +58,20 @@ func RedactMap(m map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func redactSlice(s []interface{}) []interface{} {
-	if s == nil {
+// redactSlice processes a slice, recursively redacting any map[string]interface{} elements.
+func redactSlice(slice []interface{}) []interface{} {
+	if slice == nil {
 		return nil
 	}
-	out := make([]interface{}, len(s))
-	for i, v := range s {
-		if m, ok := v.(map[string]interface{}); ok {
-			out[i] = RedactMap(m)
-		} else if sl, ok := v.([]interface{}); ok {
-			out[i] = redactSlice(sl)
+	out := make([]interface{}, len(slice))
+	for i, v := range slice {
+		if nestedMap, ok := v.(map[string]interface{}); ok {
+			out[i] = RedactMap(nestedMap)
+		} else if nestedSlice, ok := v.([]interface{}); ok {
+			out[i] = redactSlice(nestedSlice)
 		} else {
 			out[i] = v
 		}
 	}
-	return out
-}
-
-// RedactError returns a string representation of the error with sensitive information redacted.
-func RedactError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return RedactErrorString(err.Error())
-}
-
-// RedactErrorString scans a string for JSON blocks or sensitive plain-text values and redacts them.
-func RedactErrorString(s string) string {
-	if s == "" {
-		return ""
-	}
-
-	out := s
-	// Look for JSON objects and redact them
-	for {
-		start := strings.Index(out, "{")
-		if start == -1 {
-			break
-		}
-		end := strings.LastIndex(out, "}")
-		if end == -1 || end < start {
-			break
-		}
-
-		jsonStr := out[start : end+1]
-		var m map[string]interface{}
-		if err := json.Unmarshal([]byte(jsonStr), &m); err == nil {
-			redactedM := RedactMap(m)
-			redactedJSON, err := json.Marshal(redactedM)
-			if err == nil {
-				out = out[:start] + string(redactedJSON) + out[end+1:]
-				break
-			}
-		}
-		break
-	}
-
-	// Fallback/additional pass using regex replacement for sensitive values
-	out = redactRegex.ReplaceAllString(out, `$1$2"[REDACTED]"`)
 	return out
 }
