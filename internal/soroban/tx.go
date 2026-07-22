@@ -50,6 +50,7 @@ func (tb *TransactionBuilder) BuildAndSubmit(ctx context.Context, operations []t
 			IncrementSequenceNum: true,
 			BaseFee:              txnbuild.MinBaseFee,
 			Operations:           operations,
+			Preconditions:        txnbuild.Preconditions{TimeBounds: txnbuild.NewTimeout(60)},
 		},
 	)
 	if err != nil {
