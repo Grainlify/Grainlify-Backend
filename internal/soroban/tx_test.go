@@ -20,7 +20,7 @@ func TestEncodeContractAddress(t *testing.T) {
 
 	knownContractID := xdr.ContractId(knownHash)
 	knownAddress := xdr.ScAddress{
-		Type:        xdr.ScAddressTypeScAddressTypeContract,
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
 		ContractId: &knownContractID,
 	}
 
@@ -32,10 +32,10 @@ func TestEncodeContractAddress(t *testing.T) {
 	wrongLenB64 := base64.StdEncoding.EncodeToString(wrongLenBytes)
 
 	tests := []struct {
-		name      string
-		input     string
-		wantAddr  xdr.ScAddress
-		wantErr   bool
+		name     string
+		input    string
+		wantAddr xdr.ScAddress
+		wantErr  bool
 	}{
 		{
 			name:     "valid 64-char hex",
