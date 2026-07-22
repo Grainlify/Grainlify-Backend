@@ -2,12 +2,10 @@ package migrate
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"time"
