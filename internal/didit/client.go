@@ -16,6 +16,22 @@ const BaseURL = "https://verification.didit.me/v2"
 
 var ErrMalformedResponse = errors.New("malformed didit response")
 
+// APIError represents a non-2xx response from the Didit API.
+// The raw response body is available via Body but is intentionally
+// excluded from Error() to prevent PII leaking into logs.
+type APIError struct {
+	StatusCode int
+	Message    string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("didit API error: status %d, error: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("didit API error: status %d", e.StatusCode)
+}
+
 type Client struct {
 	HTTP         *http.Client
 	APIKey       string
@@ -99,18 +115,15 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (C
 			errMsg = errBody.Detail
 		}
 		if errMsg == "" {
-			errMsg = string(bodyBytes)
-		}
-		if errMsg == "" {
-			errMsg = "unknown error"
+			errMsg = "unexpected error"
 		}
 
-		return CreateSessionResponse{}, fmt.Errorf("didit create session failed: status %d, error: %s, body: %s", resp.StatusCode, errMsg, string(bodyBytes))
+		return CreateSessionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errMsg, Body: string(bodyBytes)}
 	}
 
 	var result CreateSessionResponse
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return CreateSessionResponse{}, fmt.Errorf("decode response: %w, body: %s", err, string(bodyBytes))
+		return CreateSessionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("decode response: %s", err), Body: string(bodyBytes)}
 	}
 
 	return result, nil
@@ -185,13 +198,13 @@ func (c *Client) getSessionDecisionOnce(ctx context.Context, sessionID string) (
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(bodyBytes, &errBody)
-		return SessionDecisionResponse{}, fmt.Errorf("didit get decision failed: status %d, error: %s, body: %s", resp.StatusCode, errBody.Error, string(bodyBytes))
+		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errBody.Error, Body: string(bodyBytes)}
 	}
 
 	// First, unmarshal into a generic map to capture all fields
 	var rawMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
-		return SessionDecisionResponse{}, fmt.Errorf("decode response: %w, body: %s", err, string(bodyBytes))
+		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("decode response: %s", err), Body: string(bodyBytes)}
 	}
 
 	// Extract known fields
