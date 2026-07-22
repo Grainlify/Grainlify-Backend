@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+	"github.com/jagadeesh/grainlify/backend/internal/logger"
 )
 
 // extractKYCInfo extracts structured information from Didit response data
@@ -268,7 +269,7 @@ WHERE id = $1
 			Callback:   callbackURL,
 		})
 		if err != nil {
-			slog.Error("didit create session failed", "error", err, "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID)
+			slog.Error("didit create session failed", "error", logger.RedactError(err), "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   "kyc_session_create_failed",
 				"message": err.Error(),
@@ -295,7 +296,7 @@ WHERE id = $3
 `, sessionResp.SessionID, sessionDataJSON, userID)
 		if err != nil {
 			slog.Error("failed to store kyc session in database",
-				"error", err,
+				"error", logger.RedactError(err),
 				"user_id", userID,
 				"session_id", sessionResp.SessionID,
 				"kyc_data_size", len(sessionDataJSON),
@@ -335,7 +336,7 @@ func (h *KYCHandler) Status() fiber.Handler {
 
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			slog.Error("failed to parse user id", "sub", sub, "error", err)
+			slog.Error("failed to parse user id", "sub", sub, "error", logger.RedactError(err))
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
@@ -352,7 +353,7 @@ FROM users
 WHERE id = $1
 `, userID).Scan(&kycStatus, &kycSessionID, &kycVerifiedAt, &kycData)
 		if err != nil {
-			slog.Error("failed to fetch kyc status from database", "user_id", userID, "error", err, "error_type", fmt.Sprintf("%T", err))
+			slog.Error("failed to fetch kyc status from database", "user_id", userID, "error", logger.RedactError(err), "error_type", fmt.Sprintf("%T", err))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   "kyc_status_fetch_failed",
 				"message": err.Error(),
@@ -400,7 +401,7 @@ WHERE id = $1
 				}
 				slog.Warn("didit api call failed",
 					"session_id", *kycSessionID,
-					"error", err.Error(),
+					"error", logger.RedactError(err),
 					"current_status", currentStatusStr,
 					"error_type", fmt.Sprintf("%T", err))
 
@@ -441,7 +442,7 @@ WHERE id = $2
 `, expiredStatus, userID)
 					if updateErr != nil {
 						slog.Error("failed to mark session as expired in database",
-							"error", updateErr,
+							"error", logger.RedactError(updateErr),
 							"user_id", userID,
 							"session_id", deletedSessionID,
 							"error_type", fmt.Sprintf("%T", updateErr))
@@ -467,7 +468,7 @@ WHERE id = $2
 					}
 					slog.Warn("didit api error but session may still exist",
 						"session_id", *kycSessionID,
-						"error", err.Error(),
+						"error", logger.RedactError(err),
 						"current_status", currentStatusStr)
 				}
 			} else {
@@ -475,9 +476,12 @@ WHERE id = $2
 				newStatus := mapDiditStatus(decision.Status)
 
 				// Log the full decision structure for debugging
-				decisionJSONDebug, _ := json.Marshal(decision.Decision)
-				dataJSONDebug, _ := json.Marshal(decision.Data)
-				extraFieldsJSON, _ := json.Marshal(decision.ExtraFields)
+				redactedDecision := logger.RedactMap(decision.Decision)
+				redactedData := logger.RedactMap(decision.Data)
+				redactedExtraFields := logger.RedactMap(decision.ExtraFields)
+				decisionJSONDebug, _ := json.Marshal(redactedDecision)
+				dataJSONDebug, _ := json.Marshal(redactedData)
+				extraFieldsJSON, _ := json.Marshal(redactedExtraFields)
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
@@ -526,7 +530,7 @@ SET kyc_status = $1,
 WHERE id = $3
 `, newStatus, decisionJSON, userID)
 					if updateErr != nil {
-						slog.Error("failed to update kyc status", "error", updateErr, "user_id", userID, "old_status", oldStatusStr, "new_status", newStatus)
+						slog.Error("failed to update kyc status", "error", logger.RedactError(updateErr), "user_id", userID, "old_status", oldStatusStr, "new_status", newStatus)
 					} else {
 						kycStatus = &newStatus
 						// Update kycData with latest decision data
