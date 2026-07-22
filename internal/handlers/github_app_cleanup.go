@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -96,20 +97,45 @@ WHERE github_app_installation_id IS NOT NULL
 	}
 }
 
-// checkSingleInstallation checks if a single installation is still active
-func (h *GitHubAppCleanupHandler) checkSingleInstallation(ctx context.Context, appClient *github.GitHubAppClient, installationID string) {
-	// Try to get an installation token - if this fails with 404, the installation was deleted
-	_, err := appClient.GetInstallationToken(ctx, installationID)
-	if err != nil {
-		// Check if error is 404 (installation not found)
-		errStr := err.Error()
-		if contains(errStr, "404") || contains(errStr, "Not Found") || contains(errStr, "not found") {
-			slog.Info("installation no longer exists, marking projects as deleted",
-				"installation_id", installationID,
-			)
+// installationTokenGetter is an interface that allows GetInstallationToken to be
+// mocked in tests without standing up a real GitHub App client.
+type installationTokenGetter interface {
+	GetInstallationToken(ctx context.Context, installationID string) (string, error)
+}
 
-			// Mark all projects from this installation as deleted
-			result, err := h.pool.Exec(ctx, `
+// checkSingleInstallation checks if a single installation is still active.
+//
+// Detection strategy:
+//   - If GetInstallationToken returns an error that wraps github.ErrInstallationNotFound
+//     (i.e. an HTTP 404 from GitHub), the installation is genuinely gone and projects
+//     are marked deleted.
+//   - Any other error (network failure, 5xx, auth/permission error, etc.) is treated as
+//     a transient failure: we log a warning and leave projects untouched to avoid
+//     mass-deleting real, still-active projects.
+//   - No error means the installation is healthy; nothing to do.
+func (h *GitHubAppCleanupHandler) checkSingleInstallation(ctx context.Context, appClient installationTokenGetter, installationID string) {
+	_, err := appClient.GetInstallationToken(ctx, installationID)
+	if err == nil {
+		// Installation is still active — nothing to do.
+		return
+	}
+
+	if !errors.Is(err, github.ErrInstallationNotFound) {
+		// Transient or unrelated error (network, 5xx, auth, etc.).
+		// Do NOT mark projects as deleted — log and continue.
+		slog.Warn("failed to check installation status",
+			"installation_id", installationID,
+			"error", err,
+		)
+		return
+	}
+
+	// HTTP 404 confirmed: the installation was uninstalled.
+	slog.Info("installation no longer exists, marking projects as deleted",
+		"installation_id", installationID,
+	)
+
+	result, dbErr := h.pool.Exec(ctx, `
 UPDATE projects
 SET deleted_at = now(),
     status = 'rejected',
@@ -117,44 +143,16 @@ SET deleted_at = now(),
 WHERE github_app_installation_id = $1
   AND deleted_at IS NULL
 `, installationID)
-			if err != nil {
-				slog.Error("failed to mark projects as deleted",
-					"installation_id", installationID,
-					"error", err,
-				)
-				return
-			}
-
-			rowsAffected := result.RowsAffected()
-			slog.Info("marked projects as deleted",
-				"installation_id", installationID,
-				"rows_affected", rowsAffected,
-			)
-		} else {
-			// Other error (network, auth, etc.) - log but don't delete
-			slog.Warn("failed to check installation status",
-				"installation_id", installationID,
-				"error", err,
-			)
-		}
+	if dbErr != nil {
+		slog.Error("failed to mark projects as deleted",
+			"installation_id", installationID,
+			"error", dbErr,
+		)
+		return
 	}
-	// If GetInstallationToken succeeds, installation is still active - do nothing
-}
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-			(len(s) > len(substr) &&
-				(s[:len(substr)] == substr ||
-					s[len(s)-len(substr):] == substr ||
-					containsSubstring(s, substr))))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	slog.Info("marked projects as deleted",
+		"installation_id", installationID,
+		"rows_affected", result.RowsAffected(),
+	)
 }
