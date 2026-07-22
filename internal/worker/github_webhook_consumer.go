@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/jagadeesh/grainlify/backend/internal/events"
+	"github.com/jagadeesh/grainlify/backend/internal/liveness"
 	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 )
 
@@ -26,6 +28,10 @@ type GitHubWebhookConsumer struct {
 	Sub    *nats.Subscription
 	Ingest GitHubWebhookIngestor
 
+	// LivenessTracker is updated on every successfully handled message so that
+	// the /healthz endpoint can detect whether the worker is making progress.
+	LivenessTracker *liveness.Tracker
+
 	// ShutdownGracePeriod bounds how long shutdown waits for in-flight message
 	// handlers before cancelling their contexts. Defaults to
 	// defaultShutdownGracePeriod.
@@ -37,9 +43,10 @@ type GitHubWebhookConsumer struct {
 	processingCtx    context.Context
 	cancelProcessing context.CancelFunc
 
-	// seenMu guards seenDeliveryIDs.
-	seenMu          sync.Mutex
-	seenDeliveryIDs map[string]struct{}
+	// seenMu guards seenDeliveryIDs and seenDeliveryList.
+	seenMu           sync.Mutex
+	seenDeliveryIDs  map[string]*list.Element
+	seenDeliveryList *list.List
 	// maxSeenIDs caps the in-memory set size; eviction drops the oldest by insertion-order
 	// approximation (reset the map when full). Default 0 means no cap.
 	maxSeenIDs int
@@ -149,7 +156,8 @@ func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
 	defer c.seenMu.Unlock()
 
 	if c.seenDeliveryIDs == nil {
-		c.seenDeliveryIDs = make(map[string]struct{})
+		c.seenDeliveryIDs = make(map[string]*list.Element)
+		c.seenDeliveryList = list.New()
 	}
 
 	if _, ok := c.seenDeliveryIDs[deliveryID]; ok {
@@ -160,10 +168,18 @@ func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
 	if cap == 0 {
 		cap = defaultMaxSeenIDs
 	}
-	if len(c.seenDeliveryIDs) >= cap {
-		c.seenDeliveryIDs = make(map[string]struct{})
+
+	elem := c.seenDeliveryList.PushBack(deliveryID)
+	c.seenDeliveryIDs[deliveryID] = elem
+
+	if c.seenDeliveryList.Len() > cap {
+		oldest := c.seenDeliveryList.Front()
+		if oldest != nil {
+			c.seenDeliveryList.Remove(oldest)
+			delete(c.seenDeliveryIDs, oldest.Value.(string))
+		}
 	}
-	c.seenDeliveryIDs[deliveryID] = struct{}{}
+
 	return false
 }
 
@@ -198,6 +214,10 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 			return
 		}
 		slog.Error("webhook ingest failed", "error", err)
+		return
+	}
+	if c.LivenessTracker != nil {
+		c.LivenessTracker.Tick()
 	}
 }
 

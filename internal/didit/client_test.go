@@ -149,3 +149,96 @@ func TestGetSessionDecisionStopsAtMaxPollsWhenStillPending(t *testing.T) {
 		t.Fatalf("expected exactly max polls, got %d", got)
 	}
 }
+
+const mockPII = "John Passport-A12345678"
+
+func TestCreateSessionErrorDoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":"invalid document","detail":"%s"}`, mockPII)
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(server).CreateSession(context.Background(), CreateSessionRequest{
+		WorkflowID: "wf-1",
+		VendorData: "user-1",
+	})
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, mockPII) {
+		t.Fatalf("Error() must not contain PII, got: %s", errStr)
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", apiErr.StatusCode)
+	}
+	if apiErr.Message != "invalid document" {
+		t.Fatalf("expected message 'invalid document', got %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Body, mockPII) {
+		t.Fatalf("Body should still contain raw response with PII")
+	}
+}
+
+func TestGetSessionDecisionErrorDoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, `{"error":"session not found","detail":"%s"}`, mockPII)
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(server).GetSessionDecision(context.Background(), "session-missing")
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, mockPII) {
+		t.Fatalf("Error() must not contain PII, got: %s", errStr)
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", apiErr.StatusCode)
+	}
+	if apiErr.Message != "session not found" {
+		t.Fatalf("expected message 'session not found', got %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Body, mockPII) {
+		t.Fatalf("Body should still contain raw response with PII")
+	}
+}
+
+func TestCreateSessionSuccessUnchanged(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"session_id":"sess-abc","url":"https://example.com/verify"}`)
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(server).CreateSession(context.Background(), CreateSessionRequest{
+		WorkflowID: "wf-1",
+		VendorData: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.SessionID != "sess-abc" {
+		t.Fatalf("expected session_id sess-abc, got %q", resp.SessionID)
+	}
+	if resp.URL != "https://example.com/verify" {
+		t.Fatalf("expected url, got %q", resp.URL)
+	}
+}

@@ -51,6 +51,7 @@ func (tb *TransactionBuilder) BuildAndSubmit(ctx context.Context, operations []t
 			IncrementSequenceNum: true,
 			BaseFee:              txnbuild.MinBaseFee,
 			Operations:           operations,
+			Preconditions:        txnbuild.Preconditions{TimeBounds: txnbuild.NewTimeout(60)},
 		},
 	)
 	if err != nil {
@@ -199,7 +200,7 @@ func (tb *TransactionBuilder) WaitForConfirmation(ctx context.Context, txHash st
 func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 	// Contract ID is typically a hex string (64 chars) or base64
 	var hash xdr.Hash
-	
+
 	// Try hex first (64 hex chars = 32 bytes)
 	if len(contractID) == 64 {
 		decoded, err := hex.DecodeString(contractID)
@@ -207,7 +208,7 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 			copy(hash[:], decoded)
 			contractId := xdr.ContractId(hash)
 			return xdr.ScAddress{
-				Type:        xdr.ScAddressTypeScAddressTypeContract,
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
 				ContractId: &contractId,
 			}, nil
 		}
@@ -225,7 +226,7 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 
 	contractId := xdr.ContractId(hash)
 	return xdr.ScAddress{
-		Type:        xdr.ScAddressTypeScAddressTypeContract,
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
 		ContractId: &contractId,
 	}, nil
 }

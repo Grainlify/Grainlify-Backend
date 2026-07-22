@@ -476,3 +476,41 @@ func TestGitHubWebhookConsumer_MarkSeenIsConcurrentlySafe(t *testing.T) {
 		<-done
 	}
 }
+
+// TestGitHubWebhookConsumer_MarkSeenEvictsOldest verifies that when the cap is hit,
+// only the oldest element is evicted (FIFO/LRU-style), rather than the whole history.
+func TestGitHubWebhookConsumer_MarkSeenEvictsOldest(t *testing.T) {
+	ingestor := &recordingIngestor{}
+	consumer := &GitHubWebhookConsumer{
+		Ingest:     ingestor,
+		maxSeenIDs: 3, // very small cap for testing
+	}
+	ctx := context.Background()
+
+	// Fill the cap
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-1", "issues"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-2", "issues"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-3", "issues"))
+
+	// Re-submitting id-1, id-2, id-3 at this point would be treated as duplicates
+	// and skipped by ingestor.
+	// Now insert a 4th ID. This should evict id-1, but keep id-2 and id-3.
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-4", "issues"))
+
+	// We've processed 4 distinct messages so far.
+	if ingestor.count != 4 {
+		t.Fatalf("expected 4 messages processed, got %d", ingestor.count)
+	}
+
+	// Resubmit id-2. It should STILL be recognized as a duplicate and NOT processed.
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-2", "issues"))
+	if ingestor.count != 4 {
+		t.Fatalf("expected id-2 to be duplicate (count stays 4), got %d", ingestor.count)
+	}
+
+	// Resubmit id-1. It should be treated as NEW because it was evicted.
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-1", "issues"))
+	if ingestor.count != 5 {
+		t.Fatalf("expected id-1 to be processed again as it was evicted, got count=%d", ingestor.count)
+	}
+}

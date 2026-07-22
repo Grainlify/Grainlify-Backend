@@ -21,12 +21,20 @@ import (
 )
 
 type ProjectsHandler struct {
-	cfg config.Config
-	db  *db.DB
+	cfg                 config.Config
+	db                  *db.DB
+	onProjectChanged    func(projectID string) // callback to invalidate cache on project CUD operations
 }
 
 func NewProjectsHandler(cfg config.Config, d *db.DB) *ProjectsHandler {
 	return &ProjectsHandler{cfg: cfg, db: d}
+}
+
+// SetCacheInvalidator sets the callback to invalidate the projects public cache
+// when projects are created, updated, or deleted.  This must be called after
+// both the projects handler and the projects public handler are constructed.
+func (h *ProjectsHandler) SetCacheInvalidator(fn func(projectID string)) {
+	h.onProjectChanged = fn
 }
 
 type createProjectRequest struct {
@@ -446,6 +454,10 @@ WHERE id = $1
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "metadata_update_failed", "")
 		}
 
+		// Invalidate projects cache since project metadata changed
+		if h.onProjectChanged != nil {
+			h.onProjectChanged(projectID.String())
+		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -542,6 +554,10 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, repo.StargazersCount, repo.ForksCount)
+		// Invalidate cache since project is now verified and visible
+		if h.onProjectChanged != nil {
+			h.onProjectChanged(projectID.String())
+		}
 		return
 	}
 
@@ -577,6 +593,10 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, wh.ID, webhookURL, repo.StargazersCount, repo.ForksCount)
+	// Invalidate cache since project is now verified and visible
+	if h.onProjectChanged != nil {
+		h.onProjectChanged(projectID.String())
+	}
 }
 
 func (h *ProjectsHandler) recordProjectError(ctx context.Context, projectID uuid.UUID, msg string) {
