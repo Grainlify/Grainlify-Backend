@@ -2,6 +2,7 @@ package logger
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -58,6 +59,12 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 		"person@example.com",
 		"super-secret-value",
 		"ghp_token_value",
+		"Alice",
+		"Smith",
+		"Alice Smith",
+		"1990-01-01",
+		"AB123456C",
+		"+1234567890",
 		"my-pass-123",
 		"priv-key-content",
 		"sig_abc_123",
@@ -77,15 +84,21 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 				"user_info": map[string]interface{}{
 					"apiSECRET":        secretValues[3],
 					"SessionToken":     secretValues[4],
-					"UserPassword":     secretValues[5],
-					"my_private_key":   secretValues[6],
-					"DigitalSignature": secretValues[7],
-					"Authorization":    secretValues[8],
-					"SessionCookie":    secretValues[9],
-					"UserJWT":          secretValues[10],
-					"X_API_KEY":        secretValues[11],
-					"UserCredential":   secretValues[12],
+					"UserPassword":     secretValues[11],
+					"my_private_key":   secretValues[12],
+					"DigitalSignature": secretValues[13],
+					"Authorization":    secretValues[14],
+					"SessionCookie":    secretValues[15],
+					"UserJWT":          secretValues[16],
+					"X_API_KEY":        secretValues[17],
+					"UserCredential":   secretValues[18],
 				},
+				"firstName":   secretValues[5],
+				"lastName":    secretValues[6],
+				"fullName":    secretValues[7],
+				"dob":         secretValues[8],
+				"documentNum": secretValues[9],
+				"phone":       secretValues[10],
 			},
 		},
 	}
@@ -116,6 +129,34 @@ func TestRedactMapRedactsSensitiveKeysRegardlessOfCaseAndDepth(t *testing.T) {
 	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "UserJWT"}, "[REDACTED]")
 	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "X_API_KEY"}, "[REDACTED]")
 	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "user_info", "UserCredential"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "firstName"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "lastName"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "fullName"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "dob"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "documentNum"}, "[REDACTED]")
+	assertPathEquals(t, redacted, []interface{}{"metadata", "profile", "phone"}, "[REDACTED]")
+}
+
+func TestRedactErrorRedactsSensitiveValuesInMessage(t *testing.T) {
+	t.Parallel()
+
+	err := errors.New(`kyc lookup failed: email="person@example.com" not found`)
+	got := RedactError(err)
+
+	if strings.Contains(got, "person@example.com") {
+		t.Fatalf("RedactError left the email in the message: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("RedactError did not redact the sensitive value: %q", got)
+	}
+}
+
+func TestRedactErrorHandlesNil(t *testing.T) {
+	t.Parallel()
+
+	if got := RedactError(nil); got != "" {
+		t.Fatalf("RedactError(nil) = %q, want empty string", got)
+	}
 }
 
 func TestRedactMapLeavesNonSensitiveFieldsUnchanged(t *testing.T) {
