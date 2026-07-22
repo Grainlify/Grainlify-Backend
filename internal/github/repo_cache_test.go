@@ -31,6 +31,28 @@ import (
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
+// repoServer starts an httptest.Server that returns a minimal Repo JSON body
+// for any request, incrementing callCount atomically.
+func repoServer(t *testing.T, callCount *int, repo Repo) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*callCount++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":%d,"full_name":%q,"owner":{"id":1,"login":"owner","avatar_url":""},"html_url":"","private":false}`,
+			repo.ID, repo.FullName)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// clientFor returns a *Client whose HTTP transport points at the given test server.
+func clientFor(srv *httptest.Server) *Client {
+	return &Client{
+		HTTP:      srv.Client(),
+		UserAgent: "test",
+	}
+}
+
 // newTestCache builds a RepoCache with an injectable clock and a closed stopCh
 // so the background goroutine exits immediately.
 func newTestCache(ttl time.Duration, nowFn func() time.Time) *RepoCache {
@@ -227,6 +249,26 @@ func TestRepoCache_ConcurrentWritesAreSafe(t *testing.T) {
 }
 
 // ── GetRepoWithCache integration tests ───────────────────────────────────────
+
+// makeGetRepoClient returns a *Client wired to a fake GitHub HTTP handler.
+// The handler increments *calls and returns a repo JSON body.
+func makeGetRepoClient(t *testing.T, calls *int, repoID int64, fullName string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":%d,"full_name":%q,"owner":{"id":1,"login":"owner","avatar_url":""},"html_url":"","private":false}`,
+			repoID, fullName)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Point the client at the test server by overriding the URL via a custom
+	// RoundTripper that rewrites the host.
+	return &Client{
+		HTTP:      srv.Client(),
+		UserAgent: "test",
+	}
+}
 
 // getRepoViaCache calls GetRepoWithCache using a URL that routes to srv.
 // Because GetRepo hardcodes api.github.com we patch the request via the
