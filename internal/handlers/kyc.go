@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -182,12 +183,12 @@ WHERE id = $1
 				decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
 				if err != nil {
 					// Check if error indicates session not found/deleted
-					errMsg := strings.ToLower(err.Error())
-					if strings.Contains(errMsg, "404") ||
-						strings.Contains(errMsg, "not found") ||
-						strings.Contains(errMsg, "not_found") ||
-						strings.Contains(errMsg, "invalid") ||
-						strings.Contains(errMsg, "deleted") {
+					var apiErr *didit.APIError
+					if errors.As(err, &apiErr) && (apiErr.StatusCode == 404 ||
+						strings.Contains(strings.ToLower(apiErr.Message), "not found") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "not_found") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "invalid") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "deleted")) {
 						// Session was deleted in Didit dashboard - mark as expired and allow new session
 						_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE users
@@ -393,7 +394,6 @@ WHERE id = $1
 			decision, err := h.didit.GetSessionDecision(c.Context(), *kycSessionID)
 			if err != nil {
 				// If API call fails, check if it's because session was deleted
-				errMsg := strings.ToLower(err.Error())
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
@@ -405,19 +405,21 @@ WHERE id = $1
 					"error_type", fmt.Sprintf("%T", err))
 
 				// Check if error indicates session not found, deleted, or invalid
-				// Check for various error patterns that indicate session doesn't exist
-				// The error format from Didit client is: "didit get decision failed: status 404, error: ..., body: ..."
-				isDeleted := strings.Contains(errMsg, "status 404") ||
-					strings.Contains(errMsg, "status: 404") ||
-					strings.Contains(errMsg, "404") ||
-					strings.Contains(errMsg, "not found") ||
-					strings.Contains(errMsg, "not_found") ||
-					strings.Contains(errMsg, "invalid") ||
-					strings.Contains(errMsg, "deleted") ||
-					strings.Contains(errMsg, "does not exist") ||
-					strings.Contains(errMsg, "doesn't exist") ||
-					strings.Contains(errMsg, "no such") ||
-					strings.Contains(errMsg, "not available")
+				// Use errors.As to inspect typed APIError without relying on string formatting
+				var apiErr *didit.APIError
+				msgLower := ""
+				if errors.As(err, &apiErr) {
+					msgLower = strings.ToLower(apiErr.Message)
+				}
+				isDeleted := (errors.As(err, &apiErr) && apiErr.StatusCode == 404) ||
+					strings.Contains(msgLower, "not found") ||
+					strings.Contains(msgLower, "not_found") ||
+					strings.Contains(msgLower, "invalid") ||
+					strings.Contains(msgLower, "deleted") ||
+					strings.Contains(msgLower, "does not exist") ||
+					strings.Contains(msgLower, "doesn't exist") ||
+					strings.Contains(msgLower, "no such") ||
+					strings.Contains(msgLower, "not available")
 
 				if isDeleted {
 					previousStatusStr := "nil"
