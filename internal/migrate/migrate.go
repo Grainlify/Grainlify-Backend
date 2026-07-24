@@ -2,12 +2,10 @@ package migrate
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -153,27 +151,47 @@ func Up(ctx context.Context, pool db.DBPool, allowIrreversible bool) error {
 	sqlDB := stdlib.OpenDB(*pool.Config().ConnConfig)
 	defer sqlDB.Close()
 
-	// Add random jitter (0-2 seconds) to avoid thundering herd problem
-	// This helps when multiple instances start simultaneously
+	// Add random jitter (0-2 seconds) to avoid thundering herd problem.
+	// This helps when multiple instances start simultaneously.
+	// Uses a context-aware sleep so cancellation aborts the wait promptly.
 	jitter := time.Duration(rand.Intn(2000)) * time.Millisecond
 	if jitter > 0 {
 		slog.Info("adding random jitter before migration", "jitter_ms", jitter.Milliseconds())
-		time.Sleep(jitter)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(jitter):
+		}
 	}
 
-	// Retry driver creation with simple fixed delay
-	// The driver creation itself can fail if another instance is holding the lock
+	// Retry driver creation with simple fixed delay.
+	// The driver creation itself can fail if another instance is holding the lock.
+	// This retry/sleep logic is context-aware: a cancelled or expired ctx aborts
+	// the loop promptly. (The underlying golang-migrate library calls made later —
+	// migrate.Up/Down/Steps — are not context-aware; see the _ = ctx comment below.)
 	maxDriverRetries := 10
 	var db database.Driver
 	for driverAttempt := 1; driverAttempt <= maxDriverRetries; driverAttempt++ {
+		// Check for cancellation before each attempt so an already-cancelled
+		// context is caught immediately rather than only between sleep iterations.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if driverAttempt > 1 {
-			// Simple fixed delay: 500ms between attempts
-			// No exponential backoff, no timeouts
+			// Context-aware sleep: aborts promptly on cancellation or deadline
+			// instead of blocking for the full 500ms fixed delay.
 			slog.Info("retrying postgres driver creation",
 				"attempt", driverAttempt,
 				"max_retries", maxDriverRetries,
 			)
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 
 		slog.Info("creating postgres migration driver", "attempt", driverAttempt)
@@ -264,7 +282,9 @@ func Up(ctx context.Context, pool db.DBPool, allowIrreversible bool) error {
 		}
 	}
 
-	// migrate.Up() is not context-aware; we still accept ctx for future evolutions.
+	// The underlying golang-migrate library's migrate.Up() call is not context-aware,
+	// so ctx cannot interrupt the actual migration SQL execution. The driver-creation
+	// retry loop above (which this package controls) does respect ctx cancellation.
 	_ = ctx
 
 	slog.Info("running database migrations")
