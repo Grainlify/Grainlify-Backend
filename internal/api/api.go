@@ -155,8 +155,14 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	authGroup.Get("/github/callback", ghOAuth.CallbackUnified())
 	authGroup.Get("/github/status", auth.RequireAuth(cfg.JWTSecret), ghOAuth.Status())
 
+	// Public projects list with filtering (constructed early: referenced by the
+	// GitHub App cache-invalidation wiring below).
+	projectsPublic := handlers.NewProjectsPublicHandler(cfg, deps.DB)
+
 	// GitHub App installation endpoints
 	ghApp := handlers.NewGitHubAppHandler(cfg, deps.DB)
+	// Wire cache invalidation: GitHub App repo sync invalidates public cache
+	ghApp.SetCacheInvalidator(projectsPublic.InvalidateProject)
 	authGroup.Post("/github/app/install/start", auth.RequireAuth(cfg.JWTSecret), ghApp.StartInstallation())
 	app.Get("/auth/github/app/install/callback", ghApp.HandleInstallationCallback())
 
@@ -184,12 +190,13 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	app.Get("/stats/landing", landingStats.Get())
 
 	// Public projects list with filtering
-	projectsPublic := handlers.NewProjectsPublicHandler(cfg, deps.DB)
 	app.Get("/projects", projectsPublic.List())
 	app.Get("/projects/recommended", projectsPublic.Recommended())
 	app.Get("/projects/filters", projectsPublic.FilterOptions())
 
 	projects := handlers.NewProjectsHandler(cfg, deps.DB)
+	// Wire cache invalidation: project updates invalidate the public cache
+	projects.SetCacheInvalidator(projectsPublic.InvalidateProject)
 	app.Post("/projects", auth.RequireAuth(cfg.JWTSecret), projects.Create())
 	// IMPORTANT: /projects/mine and /projects/pending-setup must come BEFORE /projects/:id to avoid route conflict
 	app.Get("/projects/mine", auth.RequireAuth(cfg.JWTSecret), projects.Mine())
@@ -226,6 +233,9 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), admin.SetUserRole())
 
 	ecosystemsAdmin := handlers.NewEcosystemsAdminHandler(deps.DB)
+	// Wire cache invalidation: ecosystem CUD operations invalidate all public project cache entries
+	// since ecosystem name/slug appears in every project list response.
+	ecosystemsAdmin.SetCacheInvalidator(projectsPublic.InvalidateAll)
 	adminGroup.Get("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.List())
 	adminGroup.Get("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.GetByID())
 	adminGroup.Post("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.Create())

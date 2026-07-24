@@ -5,12 +5,35 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// ErrInstallationNotFound is the sentinel error returned by GetInstallationToken when
+// the GitHub App installation no longer exists (HTTP 404). Callers should detect this
+// condition with errors.Is(err, github.ErrInstallationNotFound) rather than matching
+// substrings in the error message.
+var ErrInstallationNotFound = errors.New("github app installation not found")
+
+// InstallationNotFoundError wraps ErrInstallationNotFound and carries the raw HTTP
+// status code so callers can distinguish a genuine 404 from other error types.
+type InstallationNotFoundError struct {
+	InstallationID string
+	StatusCode     int
+}
+
+func (e *InstallationNotFoundError) Error() string {
+	return fmt.Sprintf("github app installation %s not found (HTTP %d)", e.InstallationID, e.StatusCode)
+}
+
+// Unwrap makes errors.Is(err, ErrInstallationNotFound) work for wrapped errors.
+func (e *InstallationNotFoundError) Unwrap() error {
+	return ErrInstallationNotFound
+}
 
 // Clock provides the current time, allowing for testability
 type Clock interface {
@@ -122,6 +145,12 @@ func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installation
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
+		if resp.StatusCode == http.StatusNotFound {
+			return "", &InstallationNotFoundError{
+				InstallationID: installationID,
+				StatusCode:     resp.StatusCode,
+			}
+		}
 		return "", fmt.Errorf("failed to get installation token: status %d, error: %v", resp.StatusCode, errBody)
 	}
 

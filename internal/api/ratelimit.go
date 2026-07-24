@@ -87,7 +87,7 @@ func rateLimitModeForPath(path string) rateLimitMode {
 		strings.HasPrefix(path, "/ecosystems"), path == "/open-source-week/events", path == "/profile/public":
 		return rateLimitModePublic
 	default:
-		return rateLimitModeNone
+		return rateLimitModeAuth
 	}
 }
 

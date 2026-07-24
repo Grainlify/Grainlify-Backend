@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+	"github.com/jagadeesh/grainlify/backend/internal/logger"
 )
 
 // extractKYCInfo extracts structured information from Didit response data
@@ -182,12 +184,12 @@ WHERE id = $1
 				decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
 				if err != nil {
 					// Check if error indicates session not found/deleted
-					errMsg := strings.ToLower(err.Error())
-					if strings.Contains(errMsg, "404") ||
-						strings.Contains(errMsg, "not found") ||
-						strings.Contains(errMsg, "not_found") ||
-						strings.Contains(errMsg, "invalid") ||
-						strings.Contains(errMsg, "deleted") {
+					var apiErr *didit.APIError
+					if errors.As(err, &apiErr) && (apiErr.StatusCode == 404 ||
+						strings.Contains(strings.ToLower(apiErr.Message), "not found") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "not_found") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "invalid") ||
+						strings.Contains(strings.ToLower(apiErr.Message), "deleted")) {
 						// Session was deleted in Didit dashboard - mark as expired and allow new session
 						_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE users
@@ -268,7 +270,7 @@ WHERE id = $1
 			Callback:   callbackURL,
 		})
 		if err != nil {
-			slog.Error("didit create session failed", "error", err, "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID)
+			slog.Error("didit create session failed", "error", logger.RedactError(err), "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   "kyc_session_create_failed",
 				"message": err.Error(),
@@ -295,7 +297,7 @@ WHERE id = $3
 `, sessionResp.SessionID, sessionDataJSON, userID)
 		if err != nil {
 			slog.Error("failed to store kyc session in database",
-				"error", err,
+				"error", logger.RedactError(err),
 				"user_id", userID,
 				"session_id", sessionResp.SessionID,
 				"kyc_data_size", len(sessionDataJSON),
@@ -335,7 +337,7 @@ func (h *KYCHandler) Status() fiber.Handler {
 
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			slog.Error("failed to parse user id", "sub", sub, "error", err)
+			slog.Error("failed to parse user id", "sub", sub, "error", logger.RedactError(err))
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
@@ -352,7 +354,7 @@ FROM users
 WHERE id = $1
 `, userID).Scan(&kycStatus, &kycSessionID, &kycVerifiedAt, &kycData)
 		if err != nil {
-			slog.Error("failed to fetch kyc status from database", "user_id", userID, "error", err, "error_type", fmt.Sprintf("%T", err))
+			slog.Error("failed to fetch kyc status from database", "user_id", userID, "error", logger.RedactError(err), "error_type", fmt.Sprintf("%T", err))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   "kyc_status_fetch_failed",
 				"message": err.Error(),
@@ -393,31 +395,32 @@ WHERE id = $1
 			decision, err := h.didit.GetSessionDecision(c.Context(), *kycSessionID)
 			if err != nil {
 				// If API call fails, check if it's because session was deleted
-				errMsg := strings.ToLower(err.Error())
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
 				}
 				slog.Warn("didit api call failed",
 					"session_id", *kycSessionID,
-					"error", err.Error(),
+					"error", logger.RedactError(err),
 					"current_status", currentStatusStr,
 					"error_type", fmt.Sprintf("%T", err))
 
 				// Check if error indicates session not found, deleted, or invalid
-				// Check for various error patterns that indicate session doesn't exist
-				// The error format from Didit client is: "didit get decision failed: status 404, error: ..., body: ..."
-				isDeleted := strings.Contains(errMsg, "status 404") ||
-					strings.Contains(errMsg, "status: 404") ||
-					strings.Contains(errMsg, "404") ||
-					strings.Contains(errMsg, "not found") ||
-					strings.Contains(errMsg, "not_found") ||
-					strings.Contains(errMsg, "invalid") ||
-					strings.Contains(errMsg, "deleted") ||
-					strings.Contains(errMsg, "does not exist") ||
-					strings.Contains(errMsg, "doesn't exist") ||
-					strings.Contains(errMsg, "no such") ||
-					strings.Contains(errMsg, "not available")
+				// Use errors.As to inspect typed APIError without relying on string formatting
+				var apiErr *didit.APIError
+				msgLower := ""
+				if errors.As(err, &apiErr) {
+					msgLower = strings.ToLower(apiErr.Message)
+				}
+				isDeleted := (errors.As(err, &apiErr) && apiErr.StatusCode == 404) ||
+					strings.Contains(msgLower, "not found") ||
+					strings.Contains(msgLower, "not_found") ||
+					strings.Contains(msgLower, "invalid") ||
+					strings.Contains(msgLower, "deleted") ||
+					strings.Contains(msgLower, "does not exist") ||
+					strings.Contains(msgLower, "doesn't exist") ||
+					strings.Contains(msgLower, "no such") ||
+					strings.Contains(msgLower, "not available")
 
 				if isDeleted {
 					previousStatusStr := "nil"
@@ -441,7 +444,7 @@ WHERE id = $2
 `, expiredStatus, userID)
 					if updateErr != nil {
 						slog.Error("failed to mark session as expired in database",
-							"error", updateErr,
+							"error", logger.RedactError(updateErr),
 							"user_id", userID,
 							"session_id", deletedSessionID,
 							"error_type", fmt.Sprintf("%T", updateErr))
@@ -467,7 +470,7 @@ WHERE id = $2
 					}
 					slog.Warn("didit api error but session may still exist",
 						"session_id", *kycSessionID,
-						"error", err.Error(),
+						"error", logger.RedactError(err),
 						"current_status", currentStatusStr)
 				}
 			} else {
@@ -475,9 +478,12 @@ WHERE id = $2
 				newStatus := mapDiditStatus(decision.Status)
 
 				// Log the full decision structure for debugging
-				decisionJSONDebug, _ := json.Marshal(decision.Decision)
-				dataJSONDebug, _ := json.Marshal(decision.Data)
-				extraFieldsJSON, _ := json.Marshal(decision.ExtraFields)
+				redactedDecision := logger.RedactMap(decision.Decision)
+				redactedData := logger.RedactMap(decision.Data)
+				redactedExtraFields := logger.RedactMap(decision.ExtraFields)
+				decisionJSONDebug, _ := json.Marshal(redactedDecision)
+				dataJSONDebug, _ := json.Marshal(redactedData)
+				extraFieldsJSON, _ := json.Marshal(redactedExtraFields)
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
@@ -526,7 +532,7 @@ SET kyc_status = $1,
 WHERE id = $3
 `, newStatus, decisionJSON, userID)
 					if updateErr != nil {
-						slog.Error("failed to update kyc status", "error", updateErr, "user_id", userID, "old_status", oldStatusStr, "new_status", newStatus)
+						slog.Error("failed to update kyc status", "error", logger.RedactError(updateErr), "user_id", userID, "old_status", oldStatusStr, "new_status", newStatus)
 					} else {
 						kycStatus = &newStatus
 						// Update kycData with latest decision data

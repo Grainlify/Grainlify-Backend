@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -108,4 +109,41 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 		return TokenResponse{}, fmt.Errorf("token exchange returned empty token")
 	}
 	return tr, nil
+}
+
+
+// Test helpers to override endpoints for mocking
+
+var apiBase = "https://api.github.com"
+
+// GetTokenEndpoint returns the current token endpoint URL (for tests).
+func GetTokenEndpoint() string {
+	return tokenEndpoint
+}
+
+// SetTokenEndpoint sets the token endpoint URL (for tests).
+func SetTokenEndpoint(endpoint string) {
+	tokenEndpoint = endpoint
+}
+
+// GetAPIBase returns the current API base URL (for tests).
+func GetAPIBase() string {
+	return apiBase
+}
+
+// SetAPIBase sets the API base URL (for tests).
+func SetAPIBase(base string) {
+	apiBase = base
+}
+
+
+// EncodeStateWithRedirect is a test helper that encodes a CSRF token and redirect
+// URI into a state parameter matching the format used by handlers/github_oauth.go.
+// Format: base64(csrf_token + "|" + redirect_uri)
+func EncodeStateWithRedirect(csrfToken, redirectURI string) string {
+	if redirectURI == "" {
+		return csrfToken
+	}
+	stateData := csrfToken + "|" + redirectURI
+	return base64.RawURLEncoding.EncodeToString([]byte(stateData))
 }

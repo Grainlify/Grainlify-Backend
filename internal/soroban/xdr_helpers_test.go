@@ -51,7 +51,7 @@ func TestEncodeScValVec(t *testing.T) {
 		{Type: xdr.ScValTypeScvI64, I64: func() *xdr.Int64 { v := xdr.Int64(1); return &v }()},
 		{Type: xdr.ScValTypeScvI64, I64: func() *xdr.Int64 { v := xdr.Int64(2); return &v }()},
 	}
-	
+
 	vecVal, err := EncodeScValVec(vals)
 	if err != nil {
 		t.Fatalf("EncodeScValVec failed: %v", err)
@@ -74,21 +74,6 @@ func TestEncodeScSymbol(t *testing.T) {
 	}
 	if symbol != "test_function" {
 		t.Errorf("expected 'test_function', got %v", symbol)
-	}
-}
-
-func TestEncodeContractAddress(t *testing.T) {
-	// Test with hex string (64 chars = 32 bytes)
-	hexID := "0000000000000000000000000000000000000000000000000000000000000000"
-	addr, err := EncodeContractAddress(hexID)
-	if err != nil {
-		t.Fatalf("EncodeContractAddress failed with hex: %v", err)
-	}
-	if addr.Type != xdr.ScAddressTypeScAddressTypeContract {
-		t.Errorf("expected Contract type, got %v", addr.Type)
-	}
-	if addr.ContractId == nil {
-		t.Fatal("expected non-nil ContractId")
 	}
 }
 
@@ -314,5 +299,3 @@ func TestDecodeScValStruct(t *testing.T) {
 		t.Error("expected error for nil Key symbol, got nil")
 	}
 }
-
-

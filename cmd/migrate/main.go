@@ -14,6 +14,7 @@ import (
 
 func main() {
 	allowIrreversibleFlag := flag.Bool("allow-irreversible", false, "allow irreversible migrations to run")
+	dryRunFlag := flag.Bool("dry-run", false, "list pending migrations without applying them")
 	flag.Parse()
 
 	config.LoadDotenv()
@@ -45,6 +46,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer d.Close()
+
+	if *dryRunFlag {
+		pending, err := migrate.PendingMigrations(ctx, d.Pool)
+		if err != nil {
+			slog.Error("dry-run failed", "error", err)
+			os.Exit(1)
+		}
+		for _, p := range pending {
+			// Use os.Stdout directly to bypass slog for scriptable output
+			_, _ = os.Stdout.WriteString(p.Name + "\t" + p.Checksum + "\n")
+		}
+		os.Exit(0)
+	}
 
 	if err := migrate.Up(ctx, d.Pool, allowIrreversible); err != nil {
 		slog.Error("migrate up failed", "error", err)

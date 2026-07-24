@@ -64,7 +64,14 @@ func (ec *EscrowContract) Init(ctx context.Context, adminAddress, tokenAddress s
 		return nil, fmt.Errorf("failed to submit transaction: %w", err)
 	}
 
-	return result, nil
+	// Wait for confirmation
+	confirmed, err := ec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
+	if err != nil {
+		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
+		return result, nil
+	}
+
+	return confirmed, nil
 }
 
 // LockFunds locks funds for a specific bounty

@@ -59,6 +59,16 @@ If an irreversible migration is blocked, a clear error is returned:
 migration 7 is marked irreversible; use --allow-irreversible or set MIGRATE_ALLOW_IRREVERSIBLE=1
 ```
 
+## Previewing migrations
+
+To see which migrations would run without actually applying them, use the `--dry-run` flag:
+
+```
+go run ./cmd/migrate --dry-run
+```
+
+This will print out pending migrations (filename and checksum) one per line and exit. It is safe to use in scripts as it does not open any transactions or modify the database.
+
 ## Adding a new migration
 
 1. Create `migrations/NNNNNN_description.up.sql` with the forward SQL.

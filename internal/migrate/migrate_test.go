@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -239,14 +240,18 @@ func TestNeedsMigration_BehindLatest(t *testing.T) {
 func TestNeedsMigration_UpToDate(t *testing.T) {
 	pool := setupTestPool(t)
 	dropSchemaMigrations(t, pool)
-	insertSchemaMigrations(t, pool, 28, false)
+	
+	src, _ := iofs.New(migrations.FS, ".")
+	latest, _ := getLatestMigrationVersion(src)
+
+	insertSchemaMigrations(t, pool, latest, false)
 
 	needs, err := NeedsMigration(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("NeedsMigration: %v", err)
 	}
 	if needs {
-		t.Fatal("expected false — version 28 == latest 28")
+		t.Fatalf("expected false — version %d == latest %d", latest, latest)
 	}
 }
 
@@ -261,5 +266,113 @@ func TestNeedsMigration_Dirty(t *testing.T) {
 	}
 	if !needs {
 		t.Fatal("expected true — dirty flag set, regardless of version")
+	}
+}
+
+// TestUp_CancelledContextAbortsRetryLoop verifies that passing a pre-cancelled (or
+// very-short-deadline) context to Up causes the driver-creation retry loop to return
+// promptly with the context error, rather than running all 10 attempts × 500 ms = 5 s.
+func TestUp_CancelledContextAbortsRetryLoop(t *testing.T) {
+	// We need a non-nil pool whose Config().ConnConfig is valid enough for
+	// stdlib.OpenDB to succeed but whose resulting *sql.DB will make
+	// postgres.WithInstance fail (because there's no real PostgreSQL listening).
+	// pgxpool.ParseConfig gives us a valid *pgx.ConnConfig without dialing.
+	cfg, err := pgxpool.ParseConfig("postgresql://nouser:nopass@127.0.0.1:1/nodb?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		// Some environments reject pool creation without a live server; skip rather than fail.
+		t.Skipf("pgxpool.NewWithConfig: %v", err)
+	}
+	defer pool.Close()
+
+	// Pre-cancel the context before calling Up.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err = Up(ctx, pool, true)
+	elapsed := time.Since(start)
+
+	// The function must return quickly (well under one full retry delay of 500 ms).
+	const maxAllowed = 400 * time.Millisecond
+	if elapsed > maxAllowed {
+		t.Errorf("Up with cancelled ctx took %v; expected < %v (retry loop not aborting promptly)", elapsed, maxAllowed)
+	}
+
+	// It must return the context error, not some driver or migration error.
+	if err == nil {
+		t.Fatal("expected an error from Up with cancelled ctx, got nil")
+	}
+	if err != context.Canceled {
+		// Allow wrapped errors too.
+		if !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Errorf("expected context.Canceled (or wrapped), got: %v", err)
+		}
+	}
+}
+
+func TestPendingMigrations_NoTable(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending migrations when no schema_migrations table exists")
+	}
+	if pending[0].Version != 1 {
+		t.Fatalf("first pending version: got %d, want 1", pending[0].Version)
+	}
+}
+
+func TestPendingMigrations_BehindLatest(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	insertSchemaMigrations(t, pool, 5, false)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending migrations when behind latest")
+	}
+	if pending[0].Version != 6 {
+		t.Fatalf("first pending version: got %d, want 6", pending[0].Version)
+	}
+}
+
+func TestPendingMigrations_UpToDate(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	
+	src, _ := iofs.New(migrations.FS, ".")
+	latest, _ := getLatestMigrationVersion(src)
+
+	insertSchemaMigrations(t, pool, latest, false)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected 0 pending migrations, got %d", len(pending))
+	}
+}
+
+func TestPendingMigrations_Dirty(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	insertSchemaMigrations(t, pool, 5, true)
+
+	_, err := PendingMigrations(context.Background(), pool)
+	if err == nil {
+		t.Fatal("expected error when database is dirty")
 	}
 }

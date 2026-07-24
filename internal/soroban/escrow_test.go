@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/keypair"
+	"github.com/stellar/go/network"
 	"github.com/stellar/go/xdr"
 )
 
@@ -307,3 +311,107 @@ func TestGetBalance_InvalidContract(t *testing.T) {
 	}
 }
 
+// newFakeHorizonServer serves the Horizon REST endpoints TransactionBuilder
+// depends on: account lookup (for sequence numbers), transaction submission,
+// and transaction lookup. If confirmHash is non-empty, GET /transactions/{confirmHash}
+// succeeds and the returned counter tracks how many times that happens;
+// otherwise it 404s, as Horizon does for a not-yet-confirmed transaction.
+func newFakeHorizonServer(t *testing.T, sourceAddress, submitHash, confirmHash string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var txDetailCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/accounts/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"account_id": sourceAddress,
+				"sequence":   "100",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/transactions":
+			json.NewEncoder(w).Encode(map[string]any{
+				"hash":   submitHash,
+				"ledger": 500,
+			})
+		case confirmHash != "" && r.Method == http.MethodGet && r.URL.Path == "/transactions/"+confirmHash:
+			txDetailCalls.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{
+				"hash":   confirmHash,
+				"ledger": 501,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{"status": http.StatusNotFound, "title": "Resource Missing"})
+		}
+	}))
+	return srv, &txDetailCalls
+}
+
+func newFakeEscrowContract(kp *keypair.Full, srv *httptest.Server) *EscrowContract {
+	client := &Client{
+		networkPassphrase: network.TestNetworkPassphrase,
+		horizonClient: &horizonclient.Client{
+			HorizonURL: srv.URL,
+			HTTP:       srv.Client(),
+		},
+	}
+	return &EscrowContract{
+		client:          client,
+		txBuilder:       &TransactionBuilder{client: client, sourceKP: kp},
+		contractAddress: "0000000000000000000000000000000000000000000000000000000000000001",
+	}
+}
+
+func TestInit_WaitsForConfirmation(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, txDetailCalls := newFakeHorizonServer(t, kp.Address(), txHash, txHash)
+	defer srv.Close()
+
+	ec := newFakeEscrowContract(kp, srv)
+
+	result, err := ec.Init(context.Background(), kp.Address(), kp.Address())
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if txDetailCalls.Load() == 0 {
+		t.Fatal("Init did not call WaitForConfirmation: no GET /transactions/{hash} request observed")
+	}
+	if result.Status != "success" {
+		t.Errorf("status: want %q (confirmed), got %q", "success", result.Status)
+	}
+	if result.Ledger != 501 {
+		t.Errorf("ledger: want 501 (from confirmed lookup), got %d", result.Ledger)
+	}
+}
+
+func TestInit_ConfirmationFailureReturnsSubmissionResult(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	ec := newFakeEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := ec.Init(ctx, kp.Address(), kp.Address())
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if result.Hash != txHash {
+		t.Errorf("hash: want %q, got %q", txHash, result.Hash)
+	}
+	if result.Status != "pending" {
+		t.Errorf("status: want %q (unconfirmed submission result), got %q", "pending", result.Status)
+	}
+}

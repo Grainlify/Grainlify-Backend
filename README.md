@@ -93,6 +93,7 @@ Grainlify-Backend/
 - Organize projects by ecosystems (Starknet, Ethereum, etc.)
 - Project verification and webhook setup
 - Issue and PR tracking
+- Short-TTL response cache for public project endpoints (30s TTL with automatic invalidation)
 
 ### User Profiles
 - Contribution statistics

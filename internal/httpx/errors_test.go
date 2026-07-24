@@ -43,7 +43,7 @@ func TestRespondError_WritesStableJSONEnvelope(t *testing.T) {
 			name:      "internal error",
 			status:    fiber.StatusInternalServerError,
 			code:      "internal_server_error",
-			message:   "an unexpected error occurred",
+			message:   httpx.GenericInternalMessage,
 			requestID: "req-internal",
 		},
 	}
@@ -174,8 +174,6 @@ func TestRespondError_NilOrEmptyInputsDoNotPanic(t *testing.T) {
 
 				body := decodeRawErrorEnvelope(t, resp.Body)
 				assert.Contains(t, body, "error")
-				// message uses "omitempty" and every case here passes an empty
-				// message, so it is intentionally absent from the envelope.
 				assert.Contains(t, body, "request_id")
 			})
 		})
@@ -196,16 +194,10 @@ func TestRespondError_RealHandlerUsesSharedEnvelope(t *testing.T) {
 
 	body := decodeRawErrorEnvelope(t, resp.Body)
 	assert.Equal(t, "db_not_configured", body["error"])
-	// message is empty for this handler and "omitempty" drops it from the JSON.
-	assert.NotContains(t, body, "message")
+	assert.Equal(t, httpx.GenericInternalMessage, body["message"])
 	assert.NotEmpty(t, body["request_id"])
 }
 
-// RespondError does not auto-scrub 5xx responses -- it is the caller's
-// responsibility to only ever pass a static, developer-chosen code/message
-// (never a raw error). This test locks in that pass-through contract so a
-// future change doesn't silently start scrubbing codes that handlers rely
-// on (e.g. "nonce_create_failed", "db_not_configured").
 func TestRespondError_5xxPassesThroughStaticCode(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(c *fiber.Ctx) error {
@@ -226,6 +218,75 @@ func TestRespondError_5xxPassesThroughStaticCode(t *testing.T) {
 	}
 	if env.Error != "nonce_create_failed" {
 		t.Errorf("expected code to pass through unchanged, got %q", env.Error)
+	}
+	if env.Message != httpx.GenericInternalMessage {
+		t.Errorf("expected message to be forced to GenericInternalMessage, got %q", env.Message)
+	}
+}
+
+func TestRespondError_5xxScrubsRawMessage(t *testing.T) {
+	app := fiber.New()
+	rawErrorMsg := "pq: relation users does not exist at character 14"
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return httpx.RespondError(c, fiber.StatusInternalServerError, "db_error", rawErrorMsg)
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var env httpx.ErrorEnvelope
+	body, _ := io.ReadAll(resp.Body)
+	require.NoError(t, json.Unmarshal(body, &env))
+
+	assert.Equal(t, "db_error", env.Error)
+	assert.Equal(t, httpx.GenericInternalMessage, env.Message)
+	assert.NotContains(t, string(body), rawErrorMsg)
+}
+
+func TestRespondError_5xxEmptyCodeDefaultsToCodeInternal(t *testing.T) {
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return httpx.RespondError(c, fiber.StatusServiceUnavailable, "", "some failure")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var env httpx.ErrorEnvelope
+	body, _ := io.ReadAll(resp.Body)
+	require.NoError(t, json.Unmarshal(body, &env))
+
+	assert.Equal(t, string(httpx.CodeInternal), env.Error)
+	assert.Equal(t, httpx.GenericInternalMessage, env.Message)
+}
+
+func TestDefaultCodeForStatus(t *testing.T) {
+	tests := []struct {
+		status   int
+		expected httpx.Code
+	}{
+		{fiber.StatusBadRequest, httpx.CodeBadRequest},
+		{fiber.StatusUnauthorized, httpx.CodeUnauthorized},
+		{fiber.StatusForbidden, httpx.CodeForbidden},
+		{fiber.StatusNotFound, httpx.CodeNotFound},
+		{fiber.StatusMethodNotAllowed, httpx.CodeMethodNotAllowed},
+		{fiber.StatusConflict, httpx.CodeConflict},
+		{fiber.StatusUnprocessableEntity, httpx.CodeUnprocessable},
+		{fiber.StatusTooManyRequests, httpx.CodeTooManyRequests},
+		{fiber.StatusRequestEntityTooLarge, httpx.CodeRequestTooLarge},
+		{fiber.StatusServiceUnavailable, httpx.CodeServiceUnavailable},
+		{fiber.StatusInternalServerError, httpx.CodeInternal},
+		{999, httpx.CodeInternal},
+	}
+
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			assert.Equal(t, tt.expected, httpx.DefaultCodeForStatus(tt.status))
+		})
 	}
 }
 
