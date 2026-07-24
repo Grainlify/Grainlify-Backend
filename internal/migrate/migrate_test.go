@@ -240,14 +240,18 @@ func TestNeedsMigration_BehindLatest(t *testing.T) {
 func TestNeedsMigration_UpToDate(t *testing.T) {
 	pool := setupTestPool(t)
 	dropSchemaMigrations(t, pool)
-	insertSchemaMigrations(t, pool, 28, false)
+	
+	src, _ := iofs.New(migrations.FS, ".")
+	latest, _ := getLatestMigrationVersion(src)
+
+	insertSchemaMigrations(t, pool, latest, false)
 
 	needs, err := NeedsMigration(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("NeedsMigration: %v", err)
 	}
 	if needs {
-		t.Fatal("expected false — version 28 == latest 28")
+		t.Fatalf("expected false — version %d == latest %d", latest, latest)
 	}
 }
 
@@ -308,5 +312,67 @@ func TestUp_CancelledContextAbortsRetryLoop(t *testing.T) {
 		if !strings.Contains(err.Error(), context.Canceled.Error()) {
 			t.Errorf("expected context.Canceled (or wrapped), got: %v", err)
 		}
+	}
+}
+
+func TestPendingMigrations_NoTable(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending migrations when no schema_migrations table exists")
+	}
+	if pending[0].Version != 1 {
+		t.Fatalf("first pending version: got %d, want 1", pending[0].Version)
+	}
+}
+
+func TestPendingMigrations_BehindLatest(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	insertSchemaMigrations(t, pool, 5, false)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending migrations when behind latest")
+	}
+	if pending[0].Version != 6 {
+		t.Fatalf("first pending version: got %d, want 6", pending[0].Version)
+	}
+}
+
+func TestPendingMigrations_UpToDate(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	
+	src, _ := iofs.New(migrations.FS, ".")
+	latest, _ := getLatestMigrationVersion(src)
+
+	insertSchemaMigrations(t, pool, latest, false)
+
+	pending, err := PendingMigrations(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("PendingMigrations: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected 0 pending migrations, got %d", len(pending))
+	}
+}
+
+func TestPendingMigrations_Dirty(t *testing.T) {
+	pool := setupTestPool(t)
+	dropSchemaMigrations(t, pool)
+	insertSchemaMigrations(t, pool, 5, true)
+
+	_, err := PendingMigrations(context.Background(), pool)
+	if err == nil {
+		t.Fatal("expected error when database is dirty")
 	}
 }

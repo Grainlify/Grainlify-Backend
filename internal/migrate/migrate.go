@@ -567,3 +567,73 @@ func verifyChecksums(pool db.DBPool, src source.Driver) error {
     return nil
 }
 
+// PendingMigration represents a migration that has not yet been applied.
+type PendingMigration struct {
+	Version  uint
+	Name     string
+	Checksum string
+}
+
+// PendingMigrations returns a list of pending migrations without applying them.
+// It is read-only and does not open a write transaction or acquire locks.
+func PendingMigrations(ctx context.Context, pool db.DBPool) ([]PendingMigration, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("db pool is nil")
+	}
+
+	var currentVersion uint
+	var dirty bool
+	err := pool.QueryRow(ctx, `
+		SELECT version, dirty 
+		FROM schema_migrations 
+		LIMIT 1
+	`).Scan(&currentVersion, &dirty)
+
+	var versionErr error
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			versionErr = migrate.ErrNilVersion
+		} else {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "does not exist") || strings.Contains(errStr, "relation") {
+				versionErr = migrate.ErrNilVersion
+			} else {
+				return nil, fmt.Errorf("query schema_migrations table: %w", err)
+			}
+		}
+	} else if dirty {
+		return nil, fmt.Errorf("database is in dirty state")
+	}
+
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		return nil, fmt.Errorf("load migration files: %w", err)
+	}
+
+	versions, err := collectPendingVersions(src, currentVersion, versionErr)
+	if err != nil {
+		return nil, fmt.Errorf("collect pending versions: %w", err)
+	}
+
+	var pending []PendingMigration
+	for _, v := range versions {
+		pattern := fmt.Sprintf("%06d_*.up.sql", v)
+		matches, err := fs.Glob(migrations.FS, pattern)
+		if err != nil || len(matches) == 0 {
+			return nil, fmt.Errorf("find migration file for version %d", v)
+		}
+		
+		chk, err := migrations.ComputeChecksum(v)
+		if err != nil {
+			return nil, fmt.Errorf("compute checksum for version %d: %w", v, err)
+		}
+
+		pending = append(pending, PendingMigration{
+			Version:  v,
+			Name:     matches[0],
+			Checksum: chk,
+		})
+	}
+
+	return pending, nil
+}
