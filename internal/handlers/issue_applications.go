@@ -97,7 +97,7 @@ LIMIT 1
 				} else {
 					return c.Status(responseStatus).JSON(cachedResponse)
 				}
-			} else if !strings.Contains(err.Error(), "no rows") {
+			} else if !errors.Is(err, pgx.ErrNoRows) {
 				// Log unexpected database errors but do not fail the request — fall through to execute normally.
 				slog.Warn("idempotency key lookup failed",
 					"user_id", userID.String(),
