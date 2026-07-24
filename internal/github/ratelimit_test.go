@@ -295,11 +295,17 @@ func TestMultipleRateLimitsBeforeSuccess(t *testing.T) {
 	}
 }
 
-// TestNewClientUsesRateLimitTransport ensures NewClient wires the transport.
+// TestNewClientUsesRateLimitTransport ensures NewClient wires the full
+// composed transport stack: TransientRetryTransport (outer) over
+// RateLimitTransport (inner).
 func TestNewClientUsesRateLimitTransport(t *testing.T) {
 	c := NewClient()
-	if _, ok := c.HTTP.Transport.(*RateLimitTransport); !ok {
-		t.Fatalf("NewClient transport is %T, want *RateLimitTransport", c.HTTP.Transport)
+	outer, ok := c.HTTP.Transport.(*TransientRetryTransport)
+	if !ok {
+		t.Fatalf("NewClient outer transport is %T, want *TransientRetryTransport", c.HTTP.Transport)
+	}
+	if _, ok := outer.Base.(*RateLimitTransport); !ok {
+		t.Fatalf("NewClient inner transport is %T, want *RateLimitTransport", outer.Base)
 	}
 }
 

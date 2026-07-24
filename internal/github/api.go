@@ -13,14 +13,29 @@ type Client struct {
 	UserAgent string
 }
 
-// NewClient returns a GitHub API client with automatic rate-limit backoff.
-// Requests that receive a 403/429 rate-limit response are retried up to
-// DefaultMaxRetries times, sleeping at most DefaultMaxWait per attempt.
+// NewClient returns a GitHub API client with two layers of automatic retry:
+//
+//  1. RateLimitTransport — retries 403/429 rate-limit responses, honoring the
+//     X-RateLimit-Reset and Retry-After headers returned by GitHub.
+//
+//  2. TransientRetryTransport — retries transient 5xx server errors and
+//     network-level failures (connection reset, timeout, etc.) with jittered
+//     exponential back-off. Only idempotent requests (GET/HEAD/OPTIONS) are
+//     retried by default; non-idempotent requests require the caller to set the
+//     "X-Retry-Non-Idempotent: true" request header to opt in explicitly.
+//
+// The two transports are composed so that each handles its own concern:
+//
+//	http.DefaultTransport
+//	  └─ RateLimitTransport           (inner — rate-limit signals)
+//	       └─ TransientRetryTransport (outer — 5xx / network errors)
 func NewClient() *Client {
+	rateLimitTransport := NewRateLimitTransport(nil)
+	transientTransport := NewTransientRetryTransport(rateLimitTransport)
 	return &Client{
 		HTTP: &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: NewRateLimitTransport(nil),
+			Transport: transientTransport,
 		},
 		UserAgent: "grainlify-backend",
 	}
