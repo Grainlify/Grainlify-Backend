@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -261,5 +262,51 @@ func TestNeedsMigration_Dirty(t *testing.T) {
 	}
 	if !needs {
 		t.Fatal("expected true — dirty flag set, regardless of version")
+	}
+}
+
+// TestUp_CancelledContextAbortsRetryLoop verifies that passing a pre-cancelled (or
+// very-short-deadline) context to Up causes the driver-creation retry loop to return
+// promptly with the context error, rather than running all 10 attempts × 500 ms = 5 s.
+func TestUp_CancelledContextAbortsRetryLoop(t *testing.T) {
+	// We need a non-nil pool whose Config().ConnConfig is valid enough for
+	// stdlib.OpenDB to succeed but whose resulting *sql.DB will make
+	// postgres.WithInstance fail (because there's no real PostgreSQL listening).
+	// pgxpool.ParseConfig gives us a valid *pgx.ConnConfig without dialing.
+	cfg, err := pgxpool.ParseConfig("postgresql://nouser:nopass@127.0.0.1:1/nodb?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		// Some environments reject pool creation without a live server; skip rather than fail.
+		t.Skipf("pgxpool.NewWithConfig: %v", err)
+	}
+	defer pool.Close()
+
+	// Pre-cancel the context before calling Up.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err = Up(ctx, pool, true)
+	elapsed := time.Since(start)
+
+	// The function must return quickly (well under one full retry delay of 500 ms).
+	const maxAllowed = 400 * time.Millisecond
+	if elapsed > maxAllowed {
+		t.Errorf("Up with cancelled ctx took %v; expected < %v (retry loop not aborting promptly)", elapsed, maxAllowed)
+	}
+
+	// It must return the context error, not some driver or migration error.
+	if err == nil {
+		t.Fatal("expected an error from Up with cancelled ctx, got nil")
+	}
+	if err != context.Canceled {
+		// Allow wrapped errors too.
+		if !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Errorf("expected context.Canceled (or wrapped), got: %v", err)
+		}
 	}
 }

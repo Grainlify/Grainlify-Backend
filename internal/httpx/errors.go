@@ -9,9 +9,10 @@ import "github.com/gofiber/fiber/v2"
 // values must never be renamed or repurposed, and codes must never leak
 // internal implementation detail (SQL errors, stack traces, file paths,
 // etc). Handlers may still define specific codes (e.g. "ecosystem_not_found")
-// as plain string constants -- they convert to Code automatically -- but
-// every 5xx response is always forced to CodeInternal regardless of what is
-// passed in, so failure detail never reaches the client.
+// as plain string constants -- they convert to Code automatically. For any
+// 5xx response, the message field is automatically forced to GenericInternalMessage,
+// while caller-specified static error codes are preserved (or default to CodeInternal
+// if empty).
 type Code string
 
 const (
@@ -30,9 +31,10 @@ const (
 	CodeInternal           Code = "internal_server_error"
 )
 
-// genericInternalMessage is the only message ever sent to a client on a 5xx
+// GenericInternalMessage is the default message sent to a client on a 5xx
 // response. Real failure detail belongs in server-side logs, never here.
-const genericInternalMessage = "An unexpected error occurred"
+const GenericInternalMessage = "An unexpected error occurred"
+const genericInternalMessage = GenericInternalMessage
 
 // ErrorEnvelope is the standard JSON error response body returned by every
 // endpoint in the API:
@@ -56,24 +58,24 @@ type ErrorEnvelope struct {
 // error response so support teams can correlate client-visible errors with
 // server logs.
 //
-// Every 5xx status is automatically forced to the opaque CodeInternal /
-// genericInternalMessage pair -- the code and message arguments passed in
-// are ignored in that case -- so a handler can never accidentally leak a raw
-// error (SQL error, stack trace, etc.) to a client. Log the real error
+// For any 5xx status (status >= 500), the message argument passed in is ignored
+// and automatically forced to GenericInternalMessage to prevent accidental leakage
+// of raw error details (SQL errors, stack traces, etc.) to the client. If code is
+// empty, it defaults to CodeInternal. Caller-specified static error codes (e.g.
+// "db_not_configured", "nonce_create_failed") are preserved. Log the real error
 // server-side (slog) before calling this.
 //
 // Usage:
 //
 // return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 func RespondError(c *fiber.Ctx, status int, code Code, message string) error {
-	// RespondError writes exactly the code and message it is given -- it
-	// does not auto-scrub 5xx responses. Existing handlers already use a
-	// safe convention: even on 500/503, pass a static, developer-chosen
-	// code (e.g. "db_not_configured", "nonce_create_failed") with an empty
-	// or static message. NEVER pass a raw error (err.Error(), a SQL
-	// message, a stack trace) as code or message -- log it server-side
-	// with slog instead. genericInternalMessage/CodeInternal remain
-	// available for call sites that truly have nothing safe to say.
+	if status >= 500 {
+		if code == "" {
+			code = CodeInternal
+		}
+		message = GenericInternalMessage
+	}
+
 	requestID := ""
 	if rid, ok := c.Locals("requestid").(string); ok {
 		requestID = rid

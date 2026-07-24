@@ -686,7 +686,7 @@ WHERE %s
 		total = len(out)
 	}
 
-	return json.Marshal(buildPaginatedResponse("projects", out, p, total))
+	return json.Marshal(PaginatedResponse("projects", out, p, total))
 }
 
 // Recommended returns top projects ordered by contributors count, enriched with GitHub data.
@@ -825,7 +825,7 @@ WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = fals
 		total = len(out)
 	}
 
-	return json.Marshal(buildPaginatedResponse("projects", out, p, total))
+	return json.Marshal(PaginatedResponse("projects", out, p, total))
 }
 
 // FilterOptions returns available filter values (languages, categories, tags) from verified projects.

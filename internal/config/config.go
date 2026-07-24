@@ -139,6 +139,13 @@ type Config struct {
 	// Controlled by SHUTDOWN_TIMEOUT, default 10s.
 	ShutdownTimeout time.Duration
 
+	// WorkerLivenessAddr is the TCP address for the worker liveness HTTP server
+	// (WORKER_LIVENESS_ADDR, default ":9091"). Set to empty to disable.
+	WorkerLivenessAddr string
+	// WorkerLivenessStaleThreshold is how long without progress before the liveness
+	// endpoint reports 503 (WORKER_LIVENESS_STALE_THRESHOLD, default 30s).
+	WorkerLivenessStaleThreshold time.Duration
+
 	// MaxBodyBytes is the maximum request body size in bytes (MAX_BODY_BYTES, default 1048576 / 1MB).
 	MaxBodyBytes int
 	// WebhookMaxBodyBytes is the maximum request body size in bytes for webhook routes
@@ -242,6 +249,9 @@ func Load() Config {
 		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
 		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
 		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
+
+		WorkerLivenessAddr:           getEnv("WORKER_LIVENESS_ADDR", ":9091"),
+		WorkerLivenessStaleThreshold: getEnvDuration("WORKER_LIVENESS_STALE_THRESHOLD", 30*time.Second),
 
 		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
 		WebhookMaxBodyBytes:   getEnvInt("WEBHOOK_MAX_BODY_BYTES", 10*1024*1024),
