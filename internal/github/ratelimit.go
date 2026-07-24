@@ -60,8 +60,18 @@ func (t *RateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 	)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Clone the request so the body can be re-read on retry.
+		// Clone the request so the body can be re-read on retry. Clone()
+		// copies req.Body by reference, so a body already drained by a prior
+		// attempt must be reset via GetBody() (set automatically by
+		// http.NewRequest for common body types) before this attempt reads it.
 		clone := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, bodyErr := req.GetBody()
+			if bodyErr != nil {
+				return nil, bodyErr
+			}
+			clone.Body = body
+		}
 
 		resp, err = t.Base.RoundTrip(clone)
 		if err != nil {
