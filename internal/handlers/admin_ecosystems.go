@@ -225,7 +225,7 @@ func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 		if err := validateEcosystemInput(&req, false); err != nil {
-			return httpx.RespondError(c, fiber.StatusBadRequest, err.Error(), "")
+			return httpx.RespondError(c, fiber.StatusBadRequest, httpx.Code(err.Error()), "")
 		}
 
 		// Auto-generate slug from name (users never see/type slug)
@@ -263,7 +263,7 @@ func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 INSERT INTO ecosystems (slug, name, description, website_url, logo_url, status, about, links, key_areas, technologies)
 VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), $6, NULLIF($7,''), $8::jsonb, $9::jsonb, $10::jsonb)
 RETURNING id
-`, slug, name, strings.TrimSpace(req.Description), strings.TrimSpace(req.WebsiteURL), strings.TrimSpace(req.LogoURL), status, strings.TrimSpace(req.About), linksJSON, keyAreasJSON, technologiesJSON).Scan(&id)
+`, slug, req.Name, strings.TrimSpace(req.Description), strings.TrimSpace(req.WebsiteURL), strings.TrimSpace(req.LogoURL), status, strings.TrimSpace(req.About), linksJSON, keyAreasJSON, technologiesJSON).Scan(&id)
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_create_failed", "")
 		}

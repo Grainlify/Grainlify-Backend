@@ -275,11 +275,11 @@ func TestProjectsPublicHandler_TTLBoundary(t *testing.T) {
 // TestPaginationResponse_Structure verifies the pagination response structure
 // is correctly serialized for caching.
 func TestPaginationResponse_Structure(t *testing.T) {
-	p := Pagination{Page: 1, Limit: 50, Offset: 0}
+	p := PaginationParams{Limit: 50, Offset: 0}
 	total := 100
 	data := []fiber.Map{{"id": "1"}, {"id": "2"}}
 
-	result := buildPaginatedResponse("projects", data, p, total)
+	result := PaginatedResponse("projects", data, p, total)
 
 	jsonBytes, err := json.Marshal(result)
 	if err != nil {
