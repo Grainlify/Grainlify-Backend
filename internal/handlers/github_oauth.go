@@ -25,7 +25,7 @@ import (
 // isAllowedRedirectURI validates that a redirect URI is from an allowed origin.
 // This prevents open redirect vulnerabilities by only allowing:
 // - localhost origins (for development)
-// - *.vercel.app domains (for preview deployments)
+// - *.vercel.app and *.0xo.in domains (for preview deployments, if CORS_ALLOW_PREVIEW is enabled)
 // - Explicit origins from CORS_ORIGINS config
 // - FrontendBaseURL (if configured)
 func isAllowedRedirectURI(redirectURI string, cfg config.Config) bool {
@@ -45,9 +45,11 @@ func isAllowedRedirectURI(redirectURI string, cfg config.Config) bool {
 		return true
 	}
 
-	// Allow all Vercel preview deployments (*.vercel.app)
-	if strings.HasSuffix(origin, ".vercel.app") {
-		return true
+	// Allow Vercel and 0xo preview deployments (*.vercel.app, *.0xo.in) only if CORSAllowPreview is enabled
+	if cfg.CORSAllowPreview {
+		if strings.HasSuffix(origin, ".vercel.app") || strings.HasSuffix(origin, ".0xo.in") {
+			return true
+		}
 	}
 
 	// Check explicit CORS origins
