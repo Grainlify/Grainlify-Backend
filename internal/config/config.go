@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 )
 
 type Config struct {
@@ -49,8 +51,14 @@ type Config struct {
 	JetStreamConsumerName string
 	// JetStreamMaxDeliver is the maximum number of delivery attempts before dead-lettering (JS_MAX_DELIVER, default 5).
 	JetStreamMaxDeliver int
-	// JetStreamAckWait is how long the server waits for an ack before redelivering (JS_ACK_WAIT, default 30s).
+	// JetStreamAckWait is how long the server waits for an ack before redelivering
+	// (JS_ACK_WAIT, default natsbus.DefaultAckWait / 30s). Too long delays
+	// redelivery on real failures; too short duplicates work for slow handlers.
 	JetStreamAckWait time.Duration
+	// jetStreamAckWaitErr holds a message when JS_ACK_WAIT is set but malformed
+	// or non-positive. Empty when unset (falls back to default) or valid.
+	// Checked by Validate() so bad input fails fast at startup.
+	jetStreamAckWaitErr string
 	// JetStreamMaxAge is the maximum age of messages retained in the stream (JS_MAX_AGE, default 24h).
 	JetStreamMaxAge time.Duration
 
@@ -175,6 +183,7 @@ type Config struct {
 
 func Load() Config {
 	env := getEnv("APP_ENV", "dev")
+	jsAckWait, jsAckWaitErr := getEnvDurationValidated("JS_ACK_WAIT", natsbus.DefaultAckWait)
 	logLevel := getEnv("LOG_LEVEL", "info")
 
 	// Prefer HTTP_ADDR if provided, otherwise build it from PORT.
@@ -205,7 +214,8 @@ func Load() Config {
 		JetStreamStreamName:   getEnv("JS_STREAM_NAME", "GITHUB_WEBHOOKS"),
 		JetStreamConsumerName: getEnv("JS_CONSUMER_NAME", "grainlify-workers"),
 		JetStreamMaxDeliver:   getEnvInt("JS_MAX_DELIVER", 5),
-		JetStreamAckWait:      getEnvDuration("JS_ACK_WAIT", 30*time.Second),
+		JetStreamAckWait:      jsAckWait,
+		jetStreamAckWaitErr:   jsAckWaitErr,
 		JetStreamMaxAge:       getEnvDuration("JS_MAX_AGE", 24*time.Hour),
 
 		GitHubOAuthClientID:           getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
@@ -295,6 +305,13 @@ func (c Config) Validate() error {
 		if _, err := net.ResolveTCPAddr("tcp", addr); err != nil {
 			errs = append(errs, fmt.Sprintf("HTTP_ADDR %q is not a valid TCP address: %v", c.HTTPAddr, err))
 		}
+	}
+
+	// --- JS_ACK_WAIT ---
+	// Checked in every environment (not just non-dev): an absurd ack-wait is
+	// a correctness bug, not just a prod-hardening concern.
+	if c.jetStreamAckWaitErr != "" {
+		errs = append(errs, c.jetStreamAckWaitErr)
 	}
 
 	// --- SorobanNetwork ---
@@ -411,6 +428,25 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// getEnvDurationValidated parses key as a duration. An unset/empty value
+// returns fallback with no error ("unset" = use default, always a no-op).
+// A set-but-malformed or non-positive value returns fallback plus an error
+// string so Validate() can fail startup fast instead of masking it.
+func getEnvDurationValidated(key string, fallback time.Duration) (time.Duration, string) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback, fmt.Sprintf("%s %q is not a valid duration: %v", key, raw, err)
+	}
+	if d <= 0 {
+		return fallback, fmt.Sprintf("%s must be greater than zero, got %q", key, raw)
+	}
+	return d, ""
 }
 
 func getEnvBool(key string, fallback bool) bool {
