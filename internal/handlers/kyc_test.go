@@ -270,3 +270,114 @@ func TestKYCHandlerLoggingRedaction(t *testing.T) {
 		}
 	})
 }
+
+func TestKYCStatusTransientInvalidErrorDoesNotExpireSession(t *testing.T) {
+	// Mock Didit server returning a 500 error containing the word "invalid"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "invalid character '<' looking for beginning of value"}`))
+	}))
+	defer server.Close()
+
+	var execCalled bool
+	mockPool := &mockDBPool{
+		queryRowFunc: func(sql string, args ...any) pgx.Row {
+			status := "in_review"
+			sessionID := "active-session-id"
+			var verifiedAt *time.Time = nil
+			kycData := []byte(`{}`)
+			return &mockRow{
+				values: []interface{}{&status, &sessionID, verifiedAt, kycData},
+			}
+		},
+		execFunc: func(sql string, args ...any) (pgconn.CommandTag, error) {
+			execCalled = true
+			return pgconn.CommandTag{}, nil
+		},
+	}
+
+	cfg := config.Config{
+		DiditAPIKey: "mock-api-key",
+	}
+	h := NewKYCHandler(cfg, &db.DB{Pool: mockPool})
+	h.didit.BaseURL = server.URL
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals("user_id", uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/kyc/status", h.Status())
+
+	req := httptest.NewRequest("GET", "/kyc/status", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if execCalled {
+		t.Errorf("expected DB exec (expiry update) NOT to be called on transient error containing 'invalid'")
+	}
+}
+
+func TestKYCStatus404ErrorExpiresSession(t *testing.T) {
+	// Mock Didit server returning a genuine 404 session not found
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error": "session not found"}`))
+	}))
+	defer server.Close()
+
+	var execCalled bool
+	var expiredArg string
+	mockPool := &mockDBPool{
+		queryRowFunc: func(sql string, args ...any) pgx.Row {
+			status := "in_review"
+			sessionID := "deleted-session-id"
+			var verifiedAt *time.Time = nil
+			kycData := []byte(`{}`)
+			return &mockRow{
+				values: []interface{}{&status, &sessionID, verifiedAt, kycData},
+			}
+		},
+		execFunc: func(sql string, args ...any) (pgconn.CommandTag, error) {
+			execCalled = true
+			if len(args) > 0 {
+				if s, ok := args[0].(string); ok {
+					expiredArg = s
+				}
+			}
+			return pgconn.CommandTag{}, nil
+		},
+	}
+
+	cfg := config.Config{
+		DiditAPIKey: "mock-api-key",
+	}
+	h := NewKYCHandler(cfg, &db.DB{Pool: mockPool})
+	h.didit.BaseURL = server.URL
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals("user_id", uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/kyc/status", h.Status())
+
+	req := httptest.NewRequest("GET", "/kyc/status", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if !execCalled {
+		t.Errorf("expected DB exec (expiry update) to be called on 404 session not found")
+	}
+	if expiredArg != "expired" {
+		t.Errorf("expected kyc_status argument to be 'expired', got %q", expiredArg)
+	}
+}

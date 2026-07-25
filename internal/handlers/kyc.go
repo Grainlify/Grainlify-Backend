@@ -183,13 +183,8 @@ WHERE id = $1
 			if h.didit != nil {
 				decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
 				if err != nil {
-					// Check if error indicates session not found/deleted
-					var apiErr *didit.APIError
-					if errors.As(err, &apiErr) && (apiErr.StatusCode == 404 ||
-						strings.Contains(strings.ToLower(apiErr.Message), "not found") ||
-						strings.Contains(strings.ToLower(apiErr.Message), "not_found") ||
-						strings.Contains(strings.ToLower(apiErr.Message), "invalid") ||
-						strings.Contains(strings.ToLower(apiErr.Message), "deleted")) {
+					// Check if error indicates session not found/deleted in Didit
+					if errors.Is(err, didit.ErrSessionNotFound) {
 						// Session was deleted in Didit dashboard - mark as expired and allow new session
 						_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE users
@@ -405,22 +400,8 @@ WHERE id = $1
 					"current_status", currentStatusStr,
 					"error_type", fmt.Sprintf("%T", err))
 
-				// Check if error indicates session not found, deleted, or invalid
-				// Use errors.As to inspect typed APIError without relying on string formatting
-				var apiErr *didit.APIError
-				msgLower := ""
-				if errors.As(err, &apiErr) {
-					msgLower = strings.ToLower(apiErr.Message)
-				}
-				isDeleted := (errors.As(err, &apiErr) && apiErr.StatusCode == 404) ||
-					strings.Contains(msgLower, "not found") ||
-					strings.Contains(msgLower, "not_found") ||
-					strings.Contains(msgLower, "invalid") ||
-					strings.Contains(msgLower, "deleted") ||
-					strings.Contains(msgLower, "does not exist") ||
-					strings.Contains(msgLower, "doesn't exist") ||
-					strings.Contains(msgLower, "no such") ||
-					strings.Contains(msgLower, "not available")
+				// Check if error indicates session not found/deleted in Didit
+				isDeleted := errors.Is(err, didit.ErrSessionNotFound)
 
 				if isDeleted {
 					previousStatusStr := "nil"
