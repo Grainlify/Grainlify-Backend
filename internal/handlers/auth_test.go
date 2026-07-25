@@ -19,6 +19,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // decodeErrorCode reads a standard httpx.ErrorEnvelope JSON body and returns
@@ -187,8 +188,8 @@ func TestNonceValidation(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/auth/nonce", bytes.NewReader(b))
 			req.Header.Set("Content-Type", "application/json")
 
-			resp, err := app.Test(req)
-			assert.NoError(t, err)
+			resp, err := app.Test(req, 5000)
+			require.NoError(t, err)
 			defer resp.Body.Close()
 
 			if tt.wantStatus == http.StatusOK {

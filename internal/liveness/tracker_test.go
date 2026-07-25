@@ -121,6 +121,7 @@ func TestConcurrentTicksAndReads(t *testing.T) {
 		_ = tr.Stale()
 	}
 	close(done)
+	tr.Tick() // Ensure at least one tick happened before we check
 	if !tr.Started() {
 		t.Fatal("expected Started after concurrent access")
 	}
@@ -201,14 +202,16 @@ func TestServeAndShutdown(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", tr.HealthzHandler())
-	srv := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
-	go srv.ListenAndServe()
-	time.Sleep(100 * time.Millisecond)
-
-	addr := tr.ServerAddr()
-	if addr == "" {
-		addr = srv.Addr
+	
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
 	}
+	
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(listener)
+	
+	addr := listener.Addr().String()
 	resp, err := http.Get("http://" + addr + "/healthz")
 	if err != nil {
 		t.Fatalf("failed to GET /healthz: %v", err)

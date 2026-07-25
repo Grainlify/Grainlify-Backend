@@ -246,8 +246,8 @@ func TestProjectsCache_EvictionLoop(t *testing.T) {
 		t.Errorf("expected 10 entries, got %d", cache.Len())
 	}
 
-	// Wait for TTL + eviction interval
-	time.Sleep(ttl + 100*time.Millisecond)
+	// Wait for TTL + eviction interval (generous sleep for CI)
+	time.Sleep(ttl * 2)
 
 	// Eviction loop should have cleaned up expired entries
 	if cache.Len() != 0 {

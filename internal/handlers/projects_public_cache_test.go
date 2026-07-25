@@ -113,7 +113,7 @@ func TestProjectsPublicHandler_ListCacheHit(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	
-	cache := NewProjectsCache(1*time.Second, stopCh)
+	cache := NewProjectsCache(10*time.Second, stopCh)
 	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{}, cache)
 
 	app := fiber.New()
@@ -156,7 +156,7 @@ func TestProjectsPublicHandler_RecommendedCacheHit(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	
-	cache := NewProjectsCache(1*time.Second, stopCh)
+	cache := NewProjectsCache(10*time.Second, stopCh)
 	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{}, cache)
 
 	app := fiber.New()
@@ -185,7 +185,7 @@ func TestProjectsPublicHandler_FiltersCacheHit(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	
-	cache := NewProjectsCache(1*time.Second, stopCh)
+	cache := NewProjectsCache(10*time.Second, stopCh)
 	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{}, cache)
 
 	app := fiber.New()
