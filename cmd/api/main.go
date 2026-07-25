@@ -102,10 +102,6 @@ func main() {
 			"max_conns", cfg.DBMaxConns,
 		)
 		database = d
-		defer func() {
-			slog.Info("closing database connection")
-			database.Close()
-		}()
 
 		if cfg.AutoMigrate {
 			slog.Info("checking if migrations are needed", "step", "5", "action", "checking_migrations")
@@ -123,7 +119,7 @@ func main() {
 				slog.Info("migrations needed, running database migrations", "step", "5", "action", "running_database_migrations")
 				// Use background context - migrations handle their own retries without timeouts
 				allowIrreversible := cfg.IsDev() || os.Getenv("MIGRATE_ALLOW_IRREVERSIBLE") == "1"
-			err := migrate.Up(context.Background(), database.Pool, allowIrreversible)
+				err := migrate.Up(context.Background(), database.Pool, allowIrreversible)
 				if err != nil {
 					slog.Error("migration failed", "step", "5", "action", "migration_failed",
 						"error", err,
@@ -154,10 +150,6 @@ func main() {
 		}
 		slog.Info("nats connection successful", "step", "6.2", "action", "nats_connection_successful")
 		eventBus = b
-		defer func() {
-			slog.Info("closing NATS connection")
-			eventBus.Close()
-		}()
 	} else {
 		slog.Info("nats skipped", "step", "6", "action", "nats_skipped", "reason", "NATS_URL not set")
 	}
@@ -239,17 +231,105 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
-	if err := api.Shutdown(ctx, app); err != nil {
+	runner := gracefulShutdownRunner{deps: gracefulShutdownDeps{
+		ShutdownHTTP: func(ctx context.Context) error {
+			return api.Shutdown(ctx, app)
+		},
+		StopWorkers: stopWorkers,
+		WaitWorkers: func(ctx context.Context) error {
+			return shutdownwait.Wait(ctx, &workerWG)
+		},
+		CloseBus: func(context.Context) error {
+			if eventBus == nil {
+				return nil
+			}
+			slog.Info("closing NATS connection")
+			eventBus.Close()
+			return nil
+		},
+		CloseDB: func(context.Context) error {
+			if database == nil {
+				return nil
+			}
+			slog.Info("closing database connection")
+			database.Close()
+			return nil
+		},
+	}}
+	result := runner.Run(ctx)
+	if result.WorkerErr != nil {
+		slog.Warn("worker shutdown exceeded deadline", "error", result.WorkerErr)
+	}
+	if result.Err != nil {
 		slog.Error("graceful shutdown failed",
-			"error", err,
-			"error_type", fmt.Sprintf("%T", err),
+			"error", result.Err,
+			"error_type", fmt.Sprintf("%T", result.Err),
 		)
 		os.Exit(1)
 	}
-	stopWorkers()
-	if err := shutdownwait.Wait(ctx, &workerWG); err != nil {
-		slog.Warn("worker shutdown exceeded deadline", "error", err)
-	}
 
 	slog.Info("shutdown complete")
+}
+
+type gracefulShutdownDeps struct {
+	ShutdownHTTP func(context.Context) error
+	StopWorkers  func()
+	WaitWorkers  func(context.Context) error
+	CloseBus     func(context.Context) error
+	CloseDB      func(context.Context) error
+}
+
+type gracefulShutdownResult struct {
+	Err       error
+	WorkerErr error
+}
+
+type gracefulShutdownRunner struct {
+	deps gracefulShutdownDeps
+	once sync.Once
+	res  gracefulShutdownResult
+}
+
+func (r *gracefulShutdownRunner) Run(ctx context.Context) gracefulShutdownResult {
+	r.once.Do(func() {
+		r.res = runGracefulShutdown(ctx, r.deps)
+	})
+	return r.res
+}
+
+// runGracefulShutdown preserves the API process shutdown order. The HTTP
+// listener stops first so new connections are rejected while in-flight requests
+// can drain with the database still open. Workers are then canceled and waited
+// on, the message bus is drained/closed, and the database pool is closed last.
+func runGracefulShutdown(ctx context.Context, deps gracefulShutdownDeps) gracefulShutdownResult {
+	var shutdownErr error
+
+	if deps.ShutdownHTTP != nil {
+		if err := deps.ShutdownHTTP(ctx); err != nil {
+			return gracefulShutdownResult{Err: fmt.Errorf("shutdown http listener: %w", err)}
+		}
+	}
+
+	if deps.StopWorkers != nil {
+		deps.StopWorkers()
+	}
+
+	var workerErr error
+	if deps.WaitWorkers != nil {
+		workerErr = deps.WaitWorkers(ctx)
+	}
+
+	if deps.CloseBus != nil {
+		if err := deps.CloseBus(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close bus: %w", err))
+		}
+	}
+
+	if deps.CloseDB != nil {
+		if err := deps.CloseDB(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close database: %w", err))
+		}
+	}
+
+	return gracefulShutdownResult{Err: shutdownErr, WorkerErr: workerErr}
 }
