@@ -242,3 +242,140 @@ func TestCreateSessionSuccessUnchanged(t *testing.T) {
 		t.Fatalf("expected url, got %q", resp.URL)
 	}
 }
+
+func TestAPIErrorIsErrSessionNotFound(t *testing.T) {
+	err404 := &APIError{StatusCode: http.StatusNotFound, Message: "session not found"}
+	if !errors.Is(err404, ErrSessionNotFound) {
+		t.Errorf("expected errors.Is(err404, ErrSessionNotFound) to be true")
+	}
+
+	err500 := &APIError{StatusCode: http.StatusInternalServerError, Message: "invalid signature"}
+	if errors.Is(err500, ErrSessionNotFound) {
+		t.Errorf("expected errors.Is(err500, ErrSessionNotFound) to be false")
+	}
+
+	errTransient := errors.New("invalid character '<' looking for beginning of value")
+	if errors.Is(errTransient, ErrSessionNotFound) {
+		t.Errorf("expected errors.Is(errTransient, ErrSessionNotFound) to be false")
+	}
+}
+
+func TestNewClientAndDefaults(t *testing.T) {
+	client := NewClient("my-api-key")
+	if client.APIKey != "my-api-key" {
+		t.Errorf("expected APIKey my-api-key, got %q", client.APIKey)
+	}
+	if client.UserAgent != "grainlify-backend" {
+		t.Errorf("expected UserAgent grainlify-backend, got %q", client.UserAgent)
+	}
+	if client.baseURL() != BaseURL {
+		t.Errorf("expected default baseURL %q, got %q", BaseURL, client.baseURL())
+	}
+	if client.pollInterval() != 2*time.Second {
+		t.Errorf("expected default pollInterval 2s, got %v", client.pollInterval())
+	}
+
+	client.BaseURL = "  "
+	client.PollInterval = 0
+	if client.baseURL() != BaseURL {
+		t.Errorf("expected default baseURL %q when empty, got %q", BaseURL, client.baseURL())
+	}
+	if client.pollInterval() != 2*time.Second {
+		t.Errorf("expected default pollInterval 2s when zero, got %v", client.pollInterval())
+	}
+}
+
+func TestAPIErrorStringFormatting(t *testing.T) {
+	errNoMsg := &APIError{StatusCode: 500}
+	if got := errNoMsg.Error(); got != "didit API error: status 500" {
+		t.Errorf("unexpected error string for no message: %q", got)
+	}
+
+	errMsg := &APIError{StatusCode: 404, Message: "not found"}
+	if got := errMsg.Error(); got != "didit API error: status 404, error: not found" {
+		t.Errorf("unexpected error string for with message: %q", got)
+	}
+}
+
+func TestSleepContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := sleepContext(ctx, 10*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestGetSessionDecisionContextCanceledDuringPoll(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"pending"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	client.PollInterval = 100 * time.Millisecond
+	client.MaxPolls = 10
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := client.GetSessionDecision(ctx, "session-cancel")
+	if err == nil || (!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)) {
+		t.Errorf("expected context cancellation/deadline error, got %v", err)
+	}
+}
+
+func TestCreateSession_ErrorPaths(t *testing.T) {
+	// Bad URL / HTTP Do error
+	clientBadURL := &Client{
+		HTTP:    &http.Client{Timeout: 50 * time.Millisecond},
+		APIKey:  "test-key",
+		BaseURL: "http://127.0.0.1:12345678", // Invalid port
+	}
+	_, err := clientBadURL.CreateSession(context.Background(), CreateSessionRequest{WorkflowID: "wf1"})
+	if err == nil {
+		t.Error("expected error for bad URL")
+	}
+
+	// 200 OK with malformed JSON body
+	serverMalformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer serverMalformed.Close()
+
+	clientMalformed := newTestClient(serverMalformed)
+	_, err = clientMalformed.CreateSession(context.Background(), CreateSessionRequest{WorkflowID: "wf1"})
+	if err == nil {
+		t.Error("expected error for malformed JSON 200 OK response in CreateSession")
+	}
+}
+
+func TestGetSessionDecision_ErrorPaths(t *testing.T) {
+	// Bad URL / HTTP Do error
+	clientBadURL := &Client{
+		HTTP:    &http.Client{Timeout: 50 * time.Millisecond},
+		APIKey:  "test-key",
+		BaseURL: "http://127.0.0.1:12345678", // Invalid port
+	}
+	_, err := clientBadURL.GetSessionDecision(context.Background(), "session-id")
+	if err == nil {
+		t.Error("expected error for bad URL")
+	}
+
+	// 200 OK with malformed JSON body
+	serverMalformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer serverMalformed.Close()
+
+	clientMalformed := newTestClient(serverMalformed)
+	_, err = clientMalformed.GetSessionDecision(context.Background(), "session-id")
+	if err == nil {
+		t.Error("expected error for malformed JSON response in GetSessionDecision")
+	}
+}
+
+

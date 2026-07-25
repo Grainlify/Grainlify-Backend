@@ -63,3 +63,11 @@ func TestJetStreamBus_PublishCancelledContext(t *testing.T) {
 		t.Fatal("expected error for cancelled context")
 	}
 }
+
+// TestDefaultAckWait pins the documented default (30s) so any change to it
+// is a deliberate, visible edit rather than an accidental one.
+func TestDefaultAckWait(t *testing.T) {
+	if DefaultAckWait != 30*time.Second {
+		t.Fatalf("DefaultAckWait = %s, want 30s", DefaultAckWait)
+	}
+}

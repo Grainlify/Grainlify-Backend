@@ -14,7 +14,10 @@ import (
 
 const BaseURL = "https://verification.didit.me/v2"
 
-var ErrMalformedResponse = errors.New("malformed didit response")
+var (
+	ErrMalformedResponse = errors.New("malformed didit response")
+	ErrSessionNotFound   = errors.New("didit session not found")
+)
 
 // APIError represents a non-2xx response from the Didit API.
 // The raw response body is available via Body but is intentionally
@@ -30,6 +33,13 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("didit API error: status %d, error: %s", e.StatusCode, e.Message)
 	}
 	return fmt.Sprintf("didit API error: status %d", e.StatusCode)
+}
+
+func (e *APIError) Is(target error) bool {
+	if target == ErrSessionNotFound && e.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return false
 }
 
 type Client struct {
@@ -195,10 +205,26 @@ func (c *Client) getSessionDecisionOnce(ctx context.Context, sessionID string) (
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody struct {
-			Error string `json:"error"`
+			Error   string `json:"error"`
+			Message string `json:"message"`
+			Detail  string `json:"detail"`
 		}
 		_ = json.Unmarshal(bodyBytes, &errBody)
-		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errBody.Error, Body: string(bodyBytes)}
+
+		errMsg := errBody.Error
+		if errMsg == "" {
+			errMsg = errBody.Message
+		}
+		if errMsg == "" {
+			errMsg = errBody.Detail
+		}
+		if errBody.Message != "" && errBody.Message != errMsg {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, errBody.Message)
+		}
+		if errMsg == "" {
+			errMsg = "unexpected error"
+		}
+		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errMsg, Body: string(bodyBytes)}
 	}
 
 	// First, unmarshal into a generic map to capture all fields
