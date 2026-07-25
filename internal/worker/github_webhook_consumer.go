@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/liveness"
 	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
@@ -230,6 +231,7 @@ type JetStreamConsumerConfig struct {
 	// MaxDeliver is the maximum number of delivery attempts before the message is dead-lettered.
 	MaxDeliver int
 	// AckWait is how long the server waits for an ack before redelivering.
+	// Pass config.JetStreamAckWait; zero falls back to natsbus.DefaultAckWait.
 	AckWait time.Duration
 }
 
@@ -276,7 +278,7 @@ func (c *GitHubWebhookJetStreamConsumer) SubscribeJetStream(
 	}
 	ackWait := cfg.AckWait
 	if ackWait <= 0 {
-		ackWait = 30 * time.Second
+		ackWait = natsbus.DefaultAckWait
 	}
 
 	processingCtx := c.initProcessingContext(ctx)
