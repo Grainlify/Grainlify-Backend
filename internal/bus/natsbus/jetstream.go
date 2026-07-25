@@ -11,6 +11,11 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// DefaultAckWait is the fallback ack-wait for JetStream consumers, used
+// when config.JetStreamAckWait (JS_ACK_WAIT) is unset. Too long delays
+// redelivery on real failures; too short duplicates work for slow handlers.
+const DefaultAckWait = 30 * time.Second
+
 // JetStreamConfig holds configuration for a JetStream-backed bus.
 type JetStreamConfig struct {
 	// StreamName is the name of the JetStream stream.

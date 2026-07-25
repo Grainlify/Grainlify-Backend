@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 )
 
 // valid32ByteKey returns a base64-encoded 32-byte key for test use.
@@ -278,5 +280,93 @@ func TestLoad_ShutdownTimeoutFromEnv(t *testing.T) {
 	cfg := Load()
 	if cfg.ShutdownTimeout != 45*time.Second {
 		t.Fatalf("expected shutdown timeout 45s, got %s", cfg.ShutdownTimeout)
+	}
+}
+
+// TestLoad_JetStreamAckWaitDefault verifies that leaving JS_ACK_WAIT unset is a
+// no-op: it falls back to natsbus.DefaultAckWait and never fails Validate().
+func TestLoad_JetStreamAckWaitDefault(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "")
+
+	cfg := Load()
+	if cfg.JetStreamAckWait != natsbus.DefaultAckWait {
+		t.Fatalf("expected default ack-wait %s, got %s", natsbus.DefaultAckWait, cfg.JetStreamAckWait)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unset JS_ACK_WAIT should not fail validation, got: %v", err)
+	}
+}
+
+// TestLoad_JetStreamAckWaitFromEnv verifies a valid JS_ACK_WAIT overrides the default.
+func TestLoad_JetStreamAckWaitFromEnv(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "90s")
+
+	cfg := Load()
+	if cfg.JetStreamAckWait != 90*time.Second {
+		t.Fatalf("expected ack-wait 90s, got %s", cfg.JetStreamAckWait)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid JS_ACK_WAIT should not fail validation, got: %v", err)
+	}
+}
+
+// TestValidate_JetStreamAckWaitMalformedFailsFast covers an unparseable duration string.
+func TestValidate_JetStreamAckWaitMalformedFailsFast(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "not-a-duration")
+
+	cfg := Load()
+	// Behavior is unchanged even with bad input: the default is still used.
+	if cfg.JetStreamAckWait != natsbus.DefaultAckWait {
+		t.Fatalf("expected fallback to default ack-wait, got %s", cfg.JetStreamAckWait)
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for malformed JS_ACK_WAIT")
+	}
+	if !strings.Contains(err.Error(), "JS_ACK_WAIT") {
+		t.Fatalf("error should mention JS_ACK_WAIT, got: %v", err)
+	}
+}
+
+// TestValidate_JetStreamAckWaitZeroFailsFast covers an explicit zero duration,
+// which must be rejected rather than silently treated as "unset".
+func TestValidate_JetStreamAckWaitZeroFailsFast(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "0s")
+
+	cfg := Load()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for zero JS_ACK_WAIT")
+	}
+	if !strings.Contains(err.Error(), "JS_ACK_WAIT") {
+		t.Fatalf("error should mention JS_ACK_WAIT, got: %v", err)
+	}
+}
+
+// TestValidate_JetStreamAckWaitNegativeFailsFast covers a negative duration.
+func TestValidate_JetStreamAckWaitNegativeFailsFast(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "-5s")
+
+	cfg := Load()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative JS_ACK_WAIT")
+	}
+	if !strings.Contains(err.Error(), "JS_ACK_WAIT") {
+		t.Fatalf("error should mention JS_ACK_WAIT, got: %v", err)
+	}
+}
+
+// TestValidate_JetStreamAckWaitCheckedInDev ensures the ack-wait bound is
+// enforced in every environment, not just non-dev (unlike JWT/DB checks).
+func TestValidate_JetStreamAckWaitCheckedInDev(t *testing.T) {
+	t.Setenv("JS_ACK_WAIT", "0s")
+
+	cfg := Config{Env: "dev", HTTPAddr: ":8080"}
+	cfg2 := Load()
+	cfg.jetStreamAckWaitErr = cfg2.jetStreamAckWaitErr
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected JS_ACK_WAIT validation to run even in dev")
 	}
 }
