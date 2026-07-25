@@ -87,4 +87,43 @@ func TestLoadDotenv_Cases(t *testing.T) {
 		}
 		os.Unsetenv("TEST_WIN_CRLF")
 	})
+
+	t.Run("default locations fallback", func(t *testing.T) {
+		t.Setenv("ENV_FILE", "") // Ensure explicit file is empty to trigger fallback
+		os.Unsetenv("TEST_DEFAULT_LOC")
+		
+		cwd, _ := os.Getwd()
+		defaultEnvFile := filepath.Join(cwd, ".env")
+		
+		// Create a temporary .env in the current directory
+		err := os.WriteFile(defaultEnvFile, []byte("TEST_DEFAULT_LOC=fallback_val"), 0644)
+		if err != nil {
+			t.Fatalf("failed to write default env file: %v", err)
+		}
+		defer os.Remove(defaultEnvFile)
+		
+		LoadDotenv()
+		
+		if val := os.Getenv("TEST_DEFAULT_LOC"); val != "fallback_val" {
+			t.Errorf("expected 'fallback_val' from default location, got: %q", val)
+		}
+		os.Unsetenv("TEST_DEFAULT_LOC")
+	})
+
+	t.Run("default locations fallback malformed", func(t *testing.T) {
+		t.Setenv("ENV_FILE", "") 
+		buf.Reset()
+		
+		cwd, _ := os.Getwd()
+		defaultEnvFile := filepath.Join(cwd, ".env")
+		
+		os.WriteFile(defaultEnvFile, []byte("MALFORMED_LINE\n"), 0644)
+		defer os.Remove(defaultEnvFile)
+		
+		LoadDotenv()
+		
+		if !strings.Contains(buf.String(), "Warning: error loading .env file") {
+			t.Errorf("expected warning for malformed default file, got: %s", buf.String())
+		}
+	})
 }
