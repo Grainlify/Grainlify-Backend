@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,9 @@ func LoadDotenv() {
 		for i := range parts {
 			parts[i] = strings.TrimSpace(parts[i])
 		}
-		_ = godotenv.Load(parts...)
+		if err := godotenv.Load(parts...); err != nil {
+			log.Printf("Warning: failed to load ENV_FILE: %v", err)
+		}
 		return
 	}
 
@@ -40,7 +43,9 @@ func LoadDotenv() {
 			continue
 		}
 		if _, err := os.Stat(p); err == nil {
-			_ = godotenv.Load(p)
+			if err := godotenv.Load(p); err != nil {
+				log.Printf("Warning: error loading .env file %q: %v", p, err)
+			}
 			return
 		}
 	}
