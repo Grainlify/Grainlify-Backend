@@ -61,14 +61,10 @@ func ConsumeNonceAndUpsertUser(ctx context.Context, pool db.DBPool, walletType W
 		return VerifyResult{}, fmt.Errorf("db not configured")
 	}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return VerifyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var nonceID uuid.UUID
-	err = tx.QueryRow(ctx, `
+	var result VerifyResult
+	err := db.WithTx(ctx, pool, func(tx pgx.Tx) error {
+		var nonceID uuid.UUID
+		err := tx.QueryRow(ctx, `
 SELECT id
 FROM auth_nonces
 WHERE wallet_type = $1
@@ -78,64 +74,67 @@ WHERE wallet_type = $1
   AND expires_at > now()
 FOR UPDATE
 `, string(walletType), address, nonce).Scan(&nonceID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return VerifyResult{}, fmt.Errorf("invalid_or_expired_nonce")
-	}
-	if err != nil {
-		return VerifyResult{}, err
-	}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("invalid_or_expired_nonce")
+		}
+		if err != nil {
+			return err
+		}
 
-	if _, err := tx.Exec(ctx, `UPDATE auth_nonces SET used_at = now() WHERE id = $1`, nonceID); err != nil {
-		return VerifyResult{}, err
-	}
+		if _, err := tx.Exec(ctx, `UPDATE auth_nonces SET used_at = now() WHERE id = $1`, nonceID); err != nil {
+			return err
+		}
 
-	var userID uuid.UUID
-	var role string
-	err = tx.QueryRow(ctx, `
+		var userID uuid.UUID
+		var role string
+		err = tx.QueryRow(ctx, `
 SELECT u.id, u.role
 FROM wallets w
 JOIN users u ON u.id = w.user_id
 WHERE w.wallet_type = $1 AND w.address = $2
 `, string(walletType), address).Scan(&userID, &role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// New user + wallet.
-		err = tx.QueryRow(ctx, `INSERT INTO users DEFAULT VALUES RETURNING id, role`).Scan(&userID, &role)
-		if err != nil {
-			return VerifyResult{}, err
-		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			// New user + wallet.
+			err = tx.QueryRow(ctx, `INSERT INTO users DEFAULT VALUES RETURNING id, role`).Scan(&userID, &role)
+			if err != nil {
+				return err
+			}
 
-		_, err = tx.Exec(ctx, `
+			_, err = tx.Exec(ctx, `
 INSERT INTO wallets (user_id, wallet_type, address, public_key)
 VALUES ($1, $2, $3, $4)
 `, userID, string(walletType), address, nullIfEmpty(publicKey))
-		if err != nil {
-			return VerifyResult{}, err
-		}
-	} else if err != nil {
-		return VerifyResult{}, err
-	} else {
-		// Existing wallet: update public key if provided and missing.
-		if publicKey != "" {
-			_, _ = tx.Exec(ctx, `
+			if err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			// Existing wallet: update public key if provided and missing.
+			if publicKey != "" {
+				_, _ = tx.Exec(ctx, `
 UPDATE wallets
 SET public_key = COALESCE(public_key, $3)
 WHERE wallet_type = $1 AND address = $2
 `, string(walletType), address, publicKey)
+			}
 		}
-	}
 
-	if err := tx.Commit(ctx); err != nil {
+		result = VerifyResult{
+			User: User{ID: userID, Role: role},
+			Wallet: Wallet{
+				WalletType: walletType,
+				Address:    address,
+				PublicKey:  publicKey,
+			},
+		}
+		return nil
+	})
+	if err != nil {
 		return VerifyResult{}, err
 	}
 
-	return VerifyResult{
-		User: User{ID: userID, Role: role},
-		Wallet: Wallet{
-			WalletType: walletType,
-			Address:    address,
-			PublicKey:  publicKey,
-		},
-	}, nil
+	return result, nil
 }
 
 func randomNonce(n int) string {

@@ -174,3 +174,43 @@ func (d *DB) Close() {
 	}
 	d.Pool.Close()
 }
+
+// WithTx executes the given function within a database transaction using the provided pool.
+// It commits the transaction if fn returns nil, and rolls back if fn returns an error
+// or panics. If fn panics, the transaction is rolled back and the panic is re-raised.
+func WithTx(ctx context.Context, pool DBPool, fn func(pgx.Tx) error) (err error) {
+	if pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	if fn == nil {
+		return fmt.Errorf("transaction function cannot be nil")
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(ctx)
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback(ctx)
+		} else {
+			err = tx.Commit(ctx)
+		}
+	}()
+
+	err = fn(tx)
+	return err
+}
+
+// WithTx executes the given function within a database transaction using d.Pool.
+// It commits on nil error and rolls back on error or panic.
+func (d *DB) WithTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	if d == nil || d.Pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	return WithTx(ctx, d.Pool, fn)
+}

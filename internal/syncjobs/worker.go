@@ -166,17 +166,13 @@ func (w *Worker) refreshQueueDepth(ctx context.Context) {
 }
 
 func (w *Worker) processOne(ctx context.Context) error {
-	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var jobID uuid.UUID
 	var projectID uuid.UUID
 	var jobType string
 	var attempts int
-	err = tx.QueryRow(ctx, `
+
+	err := db.WithTx(ctx, w.pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
 SELECT id, project_id, job_type, attempts
 FROM sync_jobs
 WHERE status = 'pending'
@@ -185,20 +181,18 @@ ORDER BY run_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT 1
 `).Scan(&jobID, &projectID, &jobType, &attempts)
-	if err != nil {
-		return err
-	}
+		if err != nil {
+			return err
+		}
 
-	_, err = tx.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 UPDATE sync_jobs
 SET status = 'running', locked_at = now(), locked_by = $2, updated_at = now()
 WHERE id = $1
 `, jobID, w.workerID)
-	if err != nil {
 		return err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
