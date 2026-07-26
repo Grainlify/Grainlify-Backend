@@ -10,11 +10,14 @@ package github
 //   - Cache hit within TTL (no extra API call)
 //   - Cache miss (first fetch stored, second fetch served from cache)
 //   - TTL expiry mid-burst (entry evicted, fresh fetch performed)
+//   - Revoked repo access is reflected at the exact TTL boundary
 //   - Bypass flag forces a fresh fetch and overwrites the cached entry
+//   - Permission-bearing entries are scoped by access token
 //   - Repo renamed/transferred between fetches (new name misses, old name still hits until TTL)
 //   - Nil cache → falls through to GetRepo directly
 //   - TTL==0 → caching disabled, every call is a live fetch
 //   - Invalidate removes a specific entry without touching others
+//   - Concurrent same-key cache fills share one fetch
 //   - Concurrent reads are safe (no data race under -race)
 //   - Key is normalised: "Owner/Repo" and "owner/repo" share the same bucket
 //   - Eviction sweep removes only expired entries
@@ -25,24 +28,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
-// newTestCache builds a RepoCache with an injectable clock and a closed stopCh
-// so the background goroutine exits immediately.
+// newTestCache builds a RepoCache with an injectable clock and no background
+// goroutine; eviction is exercised explicitly in unit tests.
 func newTestCache(ttl time.Duration, nowFn func() time.Time) *RepoCache {
-	stopCh := make(chan struct{})
-	close(stopCh) // stop the background goroutine immediately; eviction is tested explicitly
-	c := &RepoCache{
+	return &RepoCache{
 		entries: make(map[string]cacheEntry),
 		ttl:     ttl,
 		now:     nowFn,
 	}
-	_ = stopCh // already closed above — just documenting intent
-	return c
+}
+
+func newRepoCacheTestClient(handler http.Handler) *Client {
+	return &Client{
+		HTTP: &http.Client{
+			Timeout: 2 * time.Second,
+			Transport: repoCacheRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				return rec.Result(), nil
+			}),
+		},
+		UserAgent: "test",
+	}
+}
+
+type repoCacheRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f repoCacheRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func writeRepoResponse(w http.ResponseWriter, id int64, fullName string, private, admin, push, pull bool) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"id":%d,"full_name":%q,"owner":{"id":1,"login":"owner","avatar_url":"https://example.test/avatar.png"},"html_url":"https://github.com/%s","private":%t,"permissions":{"admin":%t,"push":%t,"pull":%t}}`,
+		id, fullName, fullName, private, admin, push, pull)
 }
 
 // ── RepoCache unit tests ──────────────────────────────────────────────────────
@@ -104,22 +130,20 @@ func TestRepoCache_ExpiredEntryIsEvictedLazily(t *testing.T) {
 }
 
 func TestRepoCache_ExactTTLBoundary(t *testing.T) {
-	now := time.Unix(1_000_000, 0)
+	base := time.Unix(1_000_000, 0)
+	now := base
 	c := newTestCache(60*time.Second, func() time.Time { return now })
 
 	c.set("owner/repo", Repo{ID: 4, FullName: "owner/repo"})
 
-	// One second before expiry — still a hit.
-	now = now.Add(59 * time.Second)
+	now = base.Add(60*time.Second - time.Nanosecond)
 	if _, ok := c.Get("owner/repo"); !ok {
-		t.Fatal("expected hit 1 s before TTL boundary, got miss")
+		t.Fatal("expected hit immediately before TTL boundary, got miss")
 	}
 
-	// Exactly at expiry — miss (entry expires at stored_time + TTL; now == expiry → After is false).
-	// Advance one more second to be strictly after.
-	now = now.Add(2 * time.Second)
+	now = base.Add(60 * time.Second)
 	if _, ok := c.Get("owner/repo"); ok {
-		t.Fatal("expected miss after TTL boundary, got hit")
+		t.Fatal("expected miss exactly at TTL boundary, got hit")
 	}
 }
 
@@ -153,6 +177,27 @@ func TestRepoCache_InvalidateRemovesEntry(t *testing.T) {
 	}
 	if _, ok := c.Get("owner/b"); !ok {
 		t.Fatal("sibling entry should still be a hit after Invalidate of different key")
+	}
+}
+
+func TestRepoCache_InvalidateRemovesTokenScopedEntries(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	c := newTestCache(time.Minute, func() time.Time { return now })
+
+	c.set(repoCacheScopedKey("token-a", "owner/a"), Repo{ID: 61, FullName: "owner/a"})
+	c.set(repoCacheScopedKey("token-b", "owner/a"), Repo{ID: 62, FullName: "owner/a"})
+	c.set(repoCacheScopedKey("token-a", "owner/b"), Repo{ID: 63, FullName: "owner/b"})
+
+	c.Invalidate("owner/a")
+
+	if _, ok := c.Get(repoCacheScopedKey("token-a", "owner/a")); ok {
+		t.Fatal("expected token-a owner/a entry to be invalidated")
+	}
+	if _, ok := c.Get(repoCacheScopedKey("token-b", "owner/a")); ok {
+		t.Fatal("expected token-b owner/a entry to be invalidated")
+	}
+	if _, ok := c.Get(repoCacheScopedKey("token-a", "owner/b")); !ok {
+		t.Fatal("sibling repo should remain cached")
 	}
 }
 
@@ -228,57 +273,45 @@ func TestRepoCache_ConcurrentWritesAreSafe(t *testing.T) {
 
 // ── GetRepoWithCache integration tests ───────────────────────────────────────
 
-// getRepoViaCache calls GetRepoWithCache using a URL that routes to srv.
-// Because GetRepo hardcodes api.github.com we patch the request via the
-// test server's client transport — we instead call GetRepo directly in tests
-// that need network control, and test the cache layer in isolation.
-
 func TestGetRepoWithCache_NilCacheFallsThrough(t *testing.T) {
-	calls := 0
-	now := time.Unix(4_000_000, 0)
-	c := newTestCache(time.Minute, func() time.Time { return now })
-	_ = c
-
-	// With a nil cache, every call must reach the underlying GetRepo.
-	// We test this by verifying the cache is not consulted (entry count stays 0).
-	// The real HTTP call will fail (no server), but that is expected — we only
-	// check the cache path.
-	client := &Client{HTTP: &http.Client{}, UserAgent: "test"}
-	_, err := client.GetRepoWithCache(context.Background(), "", "owner/repo", nil, false)
-	// We expect an error (no server), not a panic or unexpected nil.
-	if err == nil {
-		t.Fatal("expected error when no server is available, got nil")
+	var calls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		writeRepoResponse(w, 1, "owner/repo", false, false, true, true)
+	}))
+	for i := 0; i < 2; i++ {
+		got, err := client.GetRepoWithCache(context.Background(), "token", "owner/repo", nil, false)
+		if err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i+1, err)
+		}
+		if got.ID != 1 {
+			t.Fatalf("call %d: got repo ID %d, want 1", i+1, got.ID)
+		}
 	}
-	_ = calls
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("nil cache made %d API calls, want 2", got)
+	}
 }
 
 func TestGetRepoWithCache_TTLZeroFallsThrough(t *testing.T) {
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id":1,"full_name":"owner/repo","owner":{"id":1,"login":"owner","avatar_url":""},"html_url":"","private":false}`)
+	var calls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		writeRepoResponse(w, 1, "owner/repo", false, false, true, true)
 	}))
-	t.Cleanup(srv.Close)
 
-	// A cache with TTL=0 must not cache anything.
 	zeroTTLCache := newTestCache(0, time.Now)
 
-	client := &Client{HTTP: srv.Client(), UserAgent: "test"}
-
-	// Patch: we need to hit our test server, not api.github.com.
-	// Use the internal getRepoURL helper by constructing the URL ourselves.
-	// Since GetRepo builds the URL from fullName, we test via a round-trip
-	// using the real GetRepo logic.  To avoid a real network call we accept
-	// that TTL=0 disables caching and verify the cache stays empty.
-	zeroTTLCache.set("owner/repo", Repo{ID: 99, FullName: "owner/repo"})
-	if zeroTTLCache.Len() != 0 {
-		t.Fatal("TTL=0: set should be no-op, but Len != 0")
+	for i := 0; i < 2; i++ {
+		if _, err := client.GetRepoWithCache(context.Background(), "token", "owner/repo", zeroTTLCache, false); err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i+1, err)
+		}
 	}
-	_, _ = client.GetRepoWithCache(context.Background(), "", "owner/repo", zeroTTLCache, false)
-	// Cache must still be empty.
 	if zeroTTLCache.Len() != 0 {
 		t.Fatalf("TTL=0: Len = %d after GetRepoWithCache, want 0", zeroTTLCache.Len())
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("TTL=0 made %d API calls, want 2", got)
 	}
 }
 
@@ -286,28 +319,25 @@ func TestGetRepoWithCache_HitServesFromCacheWithoutAPICall(t *testing.T) {
 	now := time.Unix(5_000_000, 0)
 	cache := newTestCache(time.Minute, func() time.Time { return now })
 
-	// Pre-populate the cache.
+	token := "token-hit"
 	cached := Repo{ID: 42, FullName: "owner/cached-repo"}
-	cache.set("owner/cached-repo", cached)
+	cache.set(repoCacheScopedKey(token, "owner/cached-repo"), cached)
 
-	// Build a client pointing at a server that must NOT be called.
-	apiCalls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
+	var apiCalls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&apiCalls, 1)
 		w.WriteHeader(http.StatusInternalServerError) // fail loudly if reached
 	}))
-	t.Cleanup(srv.Close)
-	client := &Client{HTTP: srv.Client(), UserAgent: "test"}
 
-	got, err := client.GetRepoWithCache(context.Background(), "", "owner/cached-repo", cache, false)
+	got, err := client.GetRepoWithCache(context.Background(), token, "owner/cached-repo", cache, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.ID != 42 {
 		t.Fatalf("got repo ID %d, want 42", got.ID)
 	}
-	if apiCalls != 0 {
-		t.Fatalf("expected 0 API calls on cache hit, got %d", apiCalls)
+	if got := atomic.LoadInt64(&apiCalls); got != 0 {
+		t.Fatalf("expected 0 API calls on cache hit, got %d", got)
 	}
 }
 
@@ -315,35 +345,32 @@ func TestGetRepoWithCache_MissFetchesAndPopulatesCache(t *testing.T) {
 	now := time.Unix(6_000_000, 0)
 	cache := newTestCache(time.Minute, func() time.Time { return now })
 
-	apiCalls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id":7,"full_name":"owner/miss-repo","owner":{"id":1,"login":"owner","avatar_url":""},"html_url":"","private":false}`)
+	var apiCalls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&apiCalls, 1)
+		writeRepoResponse(w, 7, "owner/miss-repo", false, false, true, true)
 	}))
-	t.Cleanup(srv.Close)
-	client := &Client{HTTP: srv.Client(), UserAgent: "test"}
 
-	// First call — cache miss, API called.
-	// We call GetRepo directly through the cache wrapper using the test server
-	// by pre-loading one level: ensure cache is empty then call set after.
-	// Since GetRepo builds api.github.com URLs we test the cache layer only.
-	// Insert manually and verify the "already cached" path to keep tests hermetic.
-	cache.set("owner/miss-repo", Repo{ID: 7, FullName: "owner/miss-repo"})
-	if apiCalls != 0 {
-		t.Fatal("API should not be called for a manual set")
+	got, err := client.GetRepoWithCache(context.Background(), "token-miss", "owner/miss-repo", cache, false)
+	if err != nil {
+		t.Fatalf("unexpected error on cache miss: %v", err)
+	}
+	if got.ID != 7 {
+		t.Fatalf("got ID %d, want 7", got.ID)
+	}
+	if got := atomic.LoadInt64(&apiCalls); got != 1 {
+		t.Fatalf("expected 1 API call after miss, got %d", got)
 	}
 
-	// Second call — cache hit, API not called.
-	got, err := client.GetRepoWithCache(context.Background(), "", "owner/miss-repo", cache, false)
+	got, err = client.GetRepoWithCache(context.Background(), "token-miss", "owner/miss-repo", cache, false)
 	if err != nil {
 		t.Fatalf("unexpected error on cache hit: %v", err)
 	}
 	if got.ID != 7 {
 		t.Fatalf("got ID %d, want 7", got.ID)
 	}
-	if apiCalls != 0 {
-		t.Fatalf("expected 0 additional API calls, got %d", apiCalls)
+	if got := atomic.LoadInt64(&apiCalls); got != 1 {
+		t.Fatalf("expected second call to hit cache; API calls = %d, want 1", got)
 	}
 }
 
@@ -351,34 +378,197 @@ func TestGetRepoWithCache_BypassForcesAPICall(t *testing.T) {
 	now := time.Unix(7_000_000, 0)
 	cache := newTestCache(time.Minute, func() time.Time { return now })
 
-	// Pre-populate with stale data.
-	cache.set("owner/bypass-repo", Repo{ID: 1, FullName: "owner/bypass-repo"})
-
-	apiCalls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		w.Header().Set("Content-Type", "application/json")
-		// Return updated data (e.g. repo made private after install).
-		fmt.Fprint(w, `{"id":2,"full_name":"owner/bypass-repo","owner":{"id":1,"login":"owner","avatar_url":""},"html_url":"","private":true}`)
+	var apiCalls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt64(&apiCalls, 1)
+		writeRepoResponse(w, call, "owner/bypass-repo", call > 1, false, true, true)
 	}))
-	t.Cleanup(srv.Close)
-	client := &Client{HTTP: srv.Client(), UserAgent: "test"}
 
-	// We can't call GetRepoWithCache against api.github.com in unit tests, so
-	// we verify the bypass path by directly testing the cache skip logic:
-	// a bypass=true call must not return the cached value.
-	// Simulate: invalidate then set fresh.
-	cache.Invalidate("owner/bypass-repo")
-	cache.set("owner/bypass-repo", Repo{ID: 2, FullName: "owner/bypass-repo", Private: true})
-
-	got, err := client.GetRepoWithCache(context.Background(), "", "owner/bypass-repo", cache, false)
+	got, err := client.GetRepoWithCache(context.Background(), "token-bypass", "owner/bypass-repo", cache, false)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("initial miss: %v", err)
 	}
-	if !got.Private {
-		t.Fatal("expected updated (private=true) entry after bypass, got stale entry")
+	if got.ID != 1 || got.Private {
+		t.Fatalf("initial repo = {ID:%d Private:%t}, want {ID:1 Private:false}", got.ID, got.Private)
 	}
-	_ = apiCalls
+
+	got, err = client.GetRepoWithCache(context.Background(), "token-bypass", "owner/bypass-repo", cache, false)
+	if err != nil {
+		t.Fatalf("cached hit: %v", err)
+	}
+	if got.ID != 1 || got.Private {
+		t.Fatalf("cached repo = {ID:%d Private:%t}, want stale ID 1 before bypass", got.ID, got.Private)
+	}
+
+	got, err = client.GetRepoWithCache(context.Background(), "token-bypass", "owner/bypass-repo", cache, true)
+	if err != nil {
+		t.Fatalf("bypass refresh: %v", err)
+	}
+	if got.ID != 2 || !got.Private {
+		t.Fatalf("bypass repo = {ID:%d Private:%t}, want refreshed private repo", got.ID, got.Private)
+	}
+
+	got, err = client.GetRepoWithCache(context.Background(), "token-bypass", "owner/bypass-repo", cache, false)
+	if err != nil {
+		t.Fatalf("post-bypass cached hit: %v", err)
+	}
+	if got.ID != 2 || !got.Private {
+		t.Fatalf("post-bypass repo = {ID:%d Private:%t}, want refreshed cached repo", got.ID, got.Private)
+	}
+	if got := atomic.LoadInt64(&apiCalls); got != 2 {
+		t.Fatalf("API calls = %d, want 2 (miss + bypass)", got)
+	}
+}
+
+func TestGetRepoWithCache_RevokedAccessReflectedAtTTLExpiry(t *testing.T) {
+	base := time.Unix(7_100_000, 0)
+	now := base
+	ttl := 30 * time.Second
+	cache := newTestCache(ttl, func() time.Time { return now })
+
+	var calls int64
+	var revoked atomic.Bool
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		if revoked.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		writeRepoResponse(w, 70, "owner/revoked-repo", false, false, true, true)
+	}))
+
+	got, err := client.GetRepoWithCache(context.Background(), "token-revoked", "owner/revoked-repo", cache, false)
+	if err != nil {
+		t.Fatalf("initial authorized lookup: %v", err)
+	}
+	if !got.Permissions.Push {
+		t.Fatal("initial lookup should have push permission")
+	}
+
+	revoked.Store(true)
+	now = base.Add(ttl - time.Nanosecond)
+	got, err = client.GetRepoWithCache(context.Background(), "token-revoked", "owner/revoked-repo", cache, false)
+	if err != nil {
+		t.Fatalf("cached lookup before TTL expiry: %v", err)
+	}
+	if !got.Permissions.Push {
+		t.Fatal("expected cached permission immediately before TTL expiry")
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("API calls before TTL expiry = %d, want 1", got)
+	}
+
+	now = base.Add(ttl)
+	got, err = client.GetRepoWithCache(context.Background(), "token-revoked", "owner/revoked-repo", cache, false)
+	if err == nil {
+		t.Fatalf("lookup at TTL expiry returned stale repo with push=%t, want GitHub revocation error", got.Permissions.Push)
+	}
+	apiErr, ok := err.(*GitHubAPIError)
+	if !ok || apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("lookup at TTL expiry error = %T(%v), want 404 GitHubAPIError", err, err)
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("API calls after TTL expiry = %d, want 2", got)
+	}
+	if cache.Len() != 0 {
+		t.Fatalf("cache Len = %d after revoked refresh failed, want stale entry evicted", cache.Len())
+	}
+}
+
+func TestGetRepoWithCache_PermissionsAreScopedByAccessToken(t *testing.T) {
+	now := time.Unix(7_200_000, 0)
+	cache := newTestCache(time.Minute, func() time.Time { return now })
+
+	var calls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		switch r.Header.Get("Authorization") {
+		case "Bearer admin-token":
+			writeRepoResponse(w, 81, "owner/scoped-repo", false, true, true, true)
+		case "Bearer readonly-token":
+			writeRepoResponse(w, 82, "owner/scoped-repo", false, false, false, true)
+		default:
+			t.Errorf("unexpected Authorization header %q", r.Header.Get("Authorization"))
+			http.Error(w, "unexpected authorization header", http.StatusUnauthorized)
+		}
+	}))
+
+	adminRepo, err := client.GetRepoWithCache(context.Background(), "admin-token", "owner/scoped-repo", cache, false)
+	if err != nil {
+		t.Fatalf("admin lookup: %v", err)
+	}
+	if !adminRepo.Permissions.Push {
+		t.Fatal("admin token should have push permission")
+	}
+
+	readOnlyRepo, err := client.GetRepoWithCache(context.Background(), "readonly-token", "owner/scoped-repo", cache, false)
+	if err != nil {
+		t.Fatalf("readonly lookup: %v", err)
+	}
+	if readOnlyRepo.Permissions.Push {
+		t.Fatal("readonly token received cached push permission from another token")
+	}
+
+	adminRepo, err = client.GetRepoWithCache(context.Background(), "admin-token", "owner/scoped-repo", cache, false)
+	if err != nil {
+		t.Fatalf("second admin lookup: %v", err)
+	}
+	if !adminRepo.Permissions.Push {
+		t.Fatal("admin token should still hit its own scoped permission entry")
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("API calls = %d, want 2 token-scoped misses", got)
+	}
+}
+
+func TestGetRepoWithCache_ConcurrentSameKeyMissesShareFetch(t *testing.T) {
+	now := time.Unix(7_300_000, 0)
+	cache := newTestCache(time.Minute, func() time.Time { return now })
+
+	var calls int64
+	client := newRepoCacheTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		time.Sleep(25 * time.Millisecond)
+		writeRepoResponse(w, 90, "owner/concurrent-repo", false, false, true, true)
+	}))
+
+	const goroutines = 20
+	start := make(chan struct{})
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got, err := client.GetRepoWithCache(context.Background(), "token-concurrent", "owner/concurrent-repo", cache, false)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if got.ID != 90 || !got.Permissions.Push {
+				errs <- fmt.Errorf("got repo ID=%d push=%t, want ID=90 push=true", got.ID, got.Permissions.Push)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("concurrent same-key misses made %d API calls, want 1", got)
+	}
+	if cache.Len() != 1 {
+		t.Fatalf("cache Len = %d after concurrent fill, want 1", cache.Len())
+	}
 }
 
 func TestGetRepoWithCache_ExpiryMidBurst(t *testing.T) {
