@@ -4,9 +4,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
+)
+
+const (
+	natsClientName          = "grainlify-api"
+	natsConnectTimeout      = 5 * time.Second
+	natsMaxReconnects       = 120
+	natsReconnectWait       = time.Second
+	natsReconnectJitter     = 250 * time.Millisecond
+	natsReconnectJitterTLS  = time.Second
+	natsReconnectBufferSize = 8 * 1024 * 1024
+	natsMaskedCredential    = "redacted"
 )
 
 type Bus struct {
@@ -22,17 +35,12 @@ func Connect(url string) (*Bus, error) {
 	maskedURL := maskNATSURL(url)
 	slog.Info("connecting to NATS",
 		"url_masked", maskedURL,
-		"timeout", "5s",
-		"max_reconnects", 5,
+		"timeout", natsConnectTimeout,
+		"max_reconnects", natsMaxReconnects,
+		"reconnect_wait", natsReconnectWait,
 	)
 
-	nc, err := nats.Connect(url,
-		nats.Name("grainlify-api"),
-		nats.Timeout(5*time.Second),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(5),
-		nats.ReconnectWait(500*time.Millisecond),
-	)
+	nc, err := nats.Connect(url, natsConnectOptions()...)
 	if err != nil {
 		slog.Error("failed to connect to NATS",
 			"error", err,
@@ -43,34 +51,88 @@ func Connect(url string) (*Bus, error) {
 
 	slog.Info("NATS connection established",
 		"status", nc.Status().String(),
-		"connected_url", nc.ConnectedUrl(),
+		"connected_url_masked", maskNATSURL(nc.ConnectedUrl()),
 	)
 
 	return &Bus{nc: nc}, nil
 }
 
+// natsConnectOptions centralises connection behavior so reconnect policy is
+// explicit and unit-tested instead of relying on nats.go defaults.
+// Core NATS subscriptions are owned by the connection; with reconnect enabled,
+// nats.go replays active subscriptions after a successful reconnect.
+func natsConnectOptions() []nats.Option {
+	return []nats.Option{
+		func(o *nats.Options) error {
+			o.AllowReconnect = true
+			return nil
+		},
+		func(o *nats.Options) error {
+			o.NoCallbacksAfterClientClose = true
+			return nil
+		},
+		nats.Name(natsClientName),
+		nats.Timeout(natsConnectTimeout),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(natsMaxReconnects),
+		nats.ReconnectWait(natsReconnectWait),
+		nats.ReconnectJitter(natsReconnectJitter, natsReconnectJitterTLS),
+		nats.ReconnectBufSize(natsReconnectBufferSize),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			logNATSConnectionTransition(slog.LevelWarn, "NATS connection disconnected", "disconnected", nc, err)
+		}),
+		nats.ReconnectErrHandler(func(nc *nats.Conn, err error) {
+			logNATSConnectionTransition(slog.LevelWarn, "NATS reconnect attempt failed", "reconnect_failed", nc, err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			logNATSConnectionTransition(slog.LevelInfo, "NATS connection reconnected", "reconnected", nc, nil)
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			logNATSConnectionTransition(slog.LevelError, "NATS connection closed", "closed", nc, nil)
+		}),
+	}
+}
+
+func logNATSConnectionTransition(level slog.Level, msg, transition string, nc *nats.Conn, err error) {
+	attrs := []any{
+		"transition", transition,
+		"max_reconnects", natsMaxReconnects,
+		"reconnect_wait", natsReconnectWait,
+	}
+	if nc == nil {
+		attrs = append(attrs, "status", "UNKNOWN")
+	} else {
+		stats := nc.Stats()
+		attrs = append(attrs,
+			"status", nc.Status().String(),
+			"connected_url_masked", maskNATSURL(nc.ConnectedUrl()),
+			"reconnects", stats.Reconnects,
+		)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	slog.Log(context.Background(), level, msg, attrs...)
+}
+
 // maskNATSURL masks credentials in NATS URL for logging
-func maskNATSURL(url string) string {
-	// Format: nats://user:pass@host:port
-	// Simple masking: replace password with ***
-	if len(url) < 10 {
+func maskNATSURL(rawURL string) string {
+	u, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "***"
 	}
-	atIdx := -1
-	colonIdx := -1
-	for i, r := range url {
-		if r == '@' {
-			atIdx = i
-			break
-		}
-		if r == ':' && colonIdx == -1 {
-			colonIdx = i
-		}
+	if u.User == nil {
+		return u.String()
 	}
-	if atIdx > 0 && colonIdx > 0 && colonIdx < atIdx {
-		return url[:colonIdx+1] + "***" + url[atIdx:]
+	username := u.User.Username()
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		u.User = neturl.User(natsMaskedCredential)
+	} else if username == "" {
+		u.User = neturl.UserPassword("", natsMaskedCredential)
+	} else {
+		u.User = neturl.UserPassword(username, natsMaskedCredential)
 	}
-	return "***"
+	return u.String()
 }
 
 func (b *Bus) Publish(ctx context.Context, subject string, data []byte) error {
