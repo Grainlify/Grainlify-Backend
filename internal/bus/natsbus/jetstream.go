@@ -27,7 +27,15 @@ type JetStreamConfig struct {
 }
 
 // JetStreamBus is a bus.Bus implementation backed by NATS JetStream.
-// It provides durable, acknowledged publishing with at-least-once delivery guarantees.
+// It provides durable, acknowledged publishing with at-least-once delivery
+// guarantees.
+//
+// Reconnect behavior: JetStreamBus shares the reconnect-aware *nats.Conn from
+// Connect. The nats.go client replays active subscriptions after reconnect, and
+// durable JetStream consumers keep server-side ack state. With explicit ack
+// consumers this means processing resumes from the last acknowledged sequence;
+// unacked messages may be redelivered as part of JetStream's documented
+// at-least-once semantics.
 type JetStreamBus struct {
 	nc  *nats.Conn
 	js  nats.JetStreamContext
