@@ -207,7 +207,7 @@ WHERE id = $1
 		attemptDelta = 1
 	}
 	consecutiveFailures := attempts + attemptDelta
-	metricLabels := []string{jobID.String(), projectID.String(), jobType}
+	metricLabels := []string{projectID.String(), jobType}
 	if runErr == nil {
 		metrics.SyncJobsProcessed.Inc()
 		metrics.SyncJobsConsecutiveFailures.WithLabelValues(metricLabels...).Set(0)
