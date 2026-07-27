@@ -213,8 +213,12 @@ WHERE state = $1
 				"state", state,
 			)
 		} else {
-			// Sync repositories in background (don't block redirect)
-			go h.syncInstallationRepositories(c.Context(), userID, installationID)
+			// Sync repositories in background (don't block redirect).
+			// We must NOT use c.Context() here: Fiber request contexts are pooled
+			// and reused, so they become invalid once the handler returns. Since
+			// this goroutine outlives the request, we start from context.Background()
+			// and let syncInstallationRepositories apply its own 60-second timeout.
+			go h.syncInstallationRepositories(context.Background(), userID, installationID)
 		}
 
 		// Redirect to frontend with success message
