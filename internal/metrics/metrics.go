@@ -56,13 +56,18 @@ var (
 	})
 
 	// SyncJobsConsecutiveFailures exposes the current consecutive failure count
-	// for each sync job row so alerting can detect repositories needing attention.
+	// per (project_id, job_type) so alerting can detect repositories needing
+	// attention.  Labels must NOT include per-job identifiers (e.g. job_id);
+	// each sync job row produces a unique UUID, so including it would create an
+	// unbounded number of time series — the same class of problem that
+	// NormalizePath solves for HTTP route labels.  Using Set() means the gauge
+	// always reflects the most recent job's failure count ("last write wins").
 	SyncJobsConsecutiveFailures = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "grainlify",
 		Subsystem: "syncjobs",
 		Name:      "consecutive_failures",
 		Help:      "Current consecutive failure count for a sync job.",
-	}, []string{"job_id", "project_id", "job_type"})
+	}, []string{"project_id", "job_type"})
 
 	// WebhooksReceived counts incoming GitHub webhook requests.
 	WebhooksReceived = promauto.NewCounter(prometheus.CounterOpts{
