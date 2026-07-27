@@ -88,6 +88,20 @@ var registry = map[ContractKind]map[uint32]contractErrorEntry{
 	CircuitBreaker: circuitBreakerErrors,
 }
 
+// Display returns the PascalCase display name of the ContractKind.
+func (k ContractKind) Display() string {
+	switch k {
+	case BountyEscrow:
+		return "BountyEscrow"
+	case Governance:
+		return "Governance"
+	case CircuitBreaker:
+		return "CircuitBreaker"
+	default:
+		return string(k)
+	}
+}
+
 // ContractErrorMessage returns a human-readable message for the given
 // numeric error code and contract kind.  If the code is unknown it
 // returns a descriptive fallback rather than an empty string.
@@ -97,7 +111,7 @@ func ContractErrorMessage(kind ContractKind, code uint32) string {
 			return entry.Message
 		}
 	}
-	return fmt.Sprintf("Unknown %s contract error (code %d)", kind, code)
+	return fmt.Sprintf("Unknown %s contract error (code %d)", kind.Display(), code)
 }
 
 // ContractErrorName returns the Rust enum variant name (e.g.
