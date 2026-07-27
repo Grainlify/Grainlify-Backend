@@ -521,6 +521,132 @@ func TestListInstallationRepositories_EmptyList(t *testing.T) {
 	}
 }
 
+// TestListInstallationRepositories_Pagination tests multi-page aggregation
+func TestListInstallationRepositories_Pagination(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		page := r.URL.Query().Get("page")
+
+		// Verify per_page=100
+		if pp := r.URL.Query().Get("per_page"); pp != "100" {
+			t.Errorf("Expected per_page=100, got %s", pp)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		switch page {
+		case "1":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"total_count": 3,
+				"repositories": []interface{}{
+					map[string]interface{}{"id": int64(1), "full_name": "o/r1", "name": "r1", "private": false, "owner": map[string]interface{}{"id": int64(10), "login": "o", "type": "User"}},
+					map[string]interface{}{"id": int64(2), "full_name": "o/r2", "name": "r2", "private": false, "owner": map[string]interface{}{"id": int64(10), "login": "o", "type": "User"}},
+				},
+			})
+		case "2":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"total_count": 3,
+				"repositories": []interface{}{
+					map[string]interface{}{"id": int64(3), "full_name": "o/r3", "name": "r3", "private": false, "owner": map[string]interface{}{"id": int64(10), "login": "o", "type": "User"}},
+				},
+			})
+		default:
+			t.Errorf("Unexpected page request: %s", page)
+			json.NewEncoder(w).Encode(map[string]interface{}{"total_count": 3, "repositories": []interface{}{}})
+		}
+	}))
+	defer server.Close()
+
+	client := &GitHubAppClient{
+		HTTP:    server.Client(),
+		BaseURL: server.URL,
+	}
+
+	repos, err := client.ListInstallationRepositories(context.Background(), "ghs_testToken")
+	if err != nil {
+		t.Fatalf("ListInstallationRepositories failed: %v", err)
+	}
+
+	if len(repos) != 3 {
+		t.Fatalf("Expected 3 repositories across pages, got %d", len(repos))
+	}
+
+	if repos[0].ID != 1 || repos[1].ID != 2 || repos[2].ID != 3 {
+		t.Errorf("Expected repo IDs [1, 2, 3], got [%d, %d, %d]", repos[0].ID, repos[1].ID, repos[2].ID)
+	}
+
+	if callCount != 2 {
+		t.Errorf("Expected 2 HTTP requests, got %d", callCount)
+	}
+}
+
+// TestListInstallationRepositories_SafetyCap verifies pagination stops at the cap
+func TestListInstallationRepositories_SafetyCap(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Always return a full page with total_count larger than fetched,
+		// so the loop would never stop without the cap.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total_count": 9999,
+			"repositories": []interface{}{
+				map[string]interface{}{"id": int64(callCount), "full_name": "o/r", "name": "r", "private": false, "owner": map[string]interface{}{"id": int64(10), "login": "o", "type": "User"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := &GitHubAppClient{
+		HTTP:    server.Client(),
+		BaseURL: server.URL,
+	}
+
+	repos, err := client.ListInstallationRepositories(context.Background(), "ghs_testToken")
+	if err != nil {
+		t.Fatalf("ListInstallationRepositories failed: %v", err)
+	}
+
+	if callCount != maxInstallationRepositoryPages {
+		t.Errorf("Expected %d requests (safety cap), got %d", maxInstallationRepositoryPages, callCount)
+	}
+
+	if len(repos) != maxInstallationRepositoryPages {
+		t.Errorf("Expected %d repositories (one per capped page), got %d", maxInstallationRepositoryPages, len(repos))
+	}
+}
+
+// TestListInstallationRepositories_ContextCancellation tests that context is respected
+func TestListInstallationRepositories_ContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total_count": 1,
+			"repositories": []interface{}{
+				map[string]interface{}{"id": int64(1), "full_name": "o/r", "name": "r", "private": false, "owner": map[string]interface{}{"id": int64(10), "login": "o", "type": "User"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	client := &GitHubAppClient{
+		HTTP:    server.Client(),
+		BaseURL: server.URL,
+	}
+
+	_, err := client.ListInstallationRepositories(ctx, "ghs_testToken")
+	if err == nil {
+		t.Fatal("Expected error from cancelled context")
+	}
+}
+
 // Helper function to create string pointers
 func strPtr(s string) *string {
 	return &s

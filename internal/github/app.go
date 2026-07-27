@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -178,39 +181,70 @@ type InstallationRepository struct {
 	Topics      []string `json:"topics"`
 }
 
-// ListInstallationRepositories lists all repositories accessible to an installation
+// maxInstallationRepositoryPages is a safety cap to prevent runaway pagination.
+const maxInstallationRepositoryPages = 20
+
+// ListInstallationRepositories lists all repositories accessible to an installation.
+// It fetches every page (per_page=100) and aggregates results. A safety cap of
+// maxInstallationRepositoryPages prevents infinite pagination loops.
 func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, installationToken string) ([]InstallationRepository, error) {
-	url := fmt.Sprintf("%s/installation/repositories", c.BaseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+	var all []InstallationRepository
+
+	for page := 1; page <= maxInstallationRepositoryPages; page++ {
+		u, _ := url.Parse(fmt.Sprintf("%s/installation/repositories", c.BaseURL))
+		q := u.Query()
+		q.Set("per_page", "100")
+		q.Set("page", strconv.Itoa(page))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Authorization", "Bearer "+installationToken)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if c.UserAgent != "" {
+			req.Header.Set("User-Agent", c.UserAgent)
+		}
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var pageResult struct {
+			TotalCount    int                      `json:"total_count"`
+			Repositories  []InstallationRepository `json:"repositories"`
+		}
+		err = func() error {
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				var errBody map[string]interface{}
+				json.NewDecoder(resp.Body).Decode(&errBody)
+				return fmt.Errorf("failed to list repositories: status %d, error: %v", resp.StatusCode, errBody)
+			}
+			return json.NewDecoder(resp.Body).Decode(&pageResult)
+		}()
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, pageResult.Repositories...)
+
+		if len(pageResult.Repositories) < 100 || len(all) >= pageResult.TotalCount {
+			break
+		}
+
+		if page == maxInstallationRepositoryPages {
+			slog.Warn("installation repository pagination hit safety cap",
+				"cap", maxInstallationRepositoryPages,
+				"fetched", len(all),
+				"total_count", pageResult.TotalCount,
+			)
+		}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+installationToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
-	}
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&errBody)
-		return nil, fmt.Errorf("failed to list repositories: status %d, error: %v", resp.StatusCode, errBody)
-	}
-
-	var result struct {
-		Repositories []InstallationRepository `json:"repositories"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	return result.Repositories, nil
+	return all, nil
 }
 
