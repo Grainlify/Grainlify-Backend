@@ -21,8 +21,9 @@ func NewLeaderboardHandler(d *db.DB) *LeaderboardHandler {
 
 // leaderboardBaseQuery returns username, avatar_url, user_id, contribution_count,
 // and ecosystems for all contributors in verified projects.  Issue and PR counts
-// are pre-computed once in CTEs and reused in both SELECT and WHERE — avoiding
-// the repeated correlated-subquery execution of the previous query shape.
+// are pre-computed once in CTEs, and contribution_count is computed once per row
+// in the contributor_data CTE and reused for filtering — avoiding duplicated
+// arithmetic and correlated-subquery execution.
 const leaderboardBaseQuery = `
 WITH all_contributors AS (
   SELECT DISTINCT i.author_login as login
@@ -62,37 +63,40 @@ pr_counts AS (
     AND pr.author_login != ''
     AND p.status = 'verified'
   GROUP BY LOWER(pr.author_login)
+),
+contributor_data AS (
+  SELECT
+    ac.login as username,
+    COALESCE(ga.avatar_url, '') as avatar_url,
+    COALESCE(u.id::text, '') as user_id,
+    (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) as contribution_count,
+    COALESCE(
+      (
+        SELECT ARRAY_AGG(DISTINCT e.name)
+        FROM (
+          SELECT DISTINCT p.ecosystem_id
+          FROM github_issues i
+          INNER JOIN projects p ON i.project_id = p.id
+          WHERE LOWER(i.author_login) = LOWER(ac.login) AND p.status = 'verified'
+          UNION
+          SELECT DISTINCT p.ecosystem_id
+          FROM github_pull_requests pr
+          INNER JOIN projects p ON pr.project_id = p.id
+          WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified'
+        ) contrib_ecosystems
+        INNER JOIN ecosystems e ON contrib_ecosystems.ecosystem_id = e.id
+        WHERE e.status = 'active'
+      ),
+      ARRAY[]::TEXT[]
+    ) as ecosystems
+  FROM all_contributors ac
+  LEFT JOIN issue_counts ic ON LOWER(ac.login) = ic.login_lower
+  LEFT JOIN pr_counts pc ON LOWER(ac.login) = pc.login_lower
+  LEFT JOIN github_accounts ga ON LOWER(ga.login) = LOWER(ac.login)
+  LEFT JOIN users u ON ga.user_id = u.id
 )
-SELECT
-  ac.login as username,
-  COALESCE(ga.avatar_url, '') as avatar_url,
-  COALESCE(u.id::text, '') as user_id,
-  (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) as contribution_count,
-  COALESCE(
-    (
-      SELECT ARRAY_AGG(DISTINCT e.name)
-      FROM (
-        SELECT DISTINCT p.ecosystem_id
-        FROM github_issues i
-        INNER JOIN projects p ON i.project_id = p.id
-        WHERE LOWER(i.author_login) = LOWER(ac.login) AND p.status = 'verified'
-        UNION
-        SELECT DISTINCT p.ecosystem_id
-        FROM github_pull_requests pr
-        INNER JOIN projects p ON pr.project_id = p.id
-        WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified'
-      ) contrib_ecosystems
-      INNER JOIN ecosystems e ON contrib_ecosystems.ecosystem_id = e.id
-      WHERE e.status = 'active'
-    ),
-    ARRAY[]::TEXT[]
-  ) as ecosystems
-FROM all_contributors ac
-LEFT JOIN issue_counts ic ON LOWER(ac.login) = ic.login_lower
-LEFT JOIN pr_counts pc ON LOWER(ac.login) = pc.login_lower
-LEFT JOIN github_accounts ga ON LOWER(ga.login) = LOWER(ac.login)
-LEFT JOIN users u ON ga.user_id = u.id
-WHERE (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) > 0
+SELECT * FROM contributor_data
+WHERE contribution_count > 0
 `
 
 // leaderboardCountQuery is a lighter variant that skips the ecosystems
@@ -150,7 +154,7 @@ func (h *LeaderboardHandler) Leaderboard() fiber.Handler {
 
 		// Query top contributors by contribution count in verified projects
 		rows, err := h.db.Pool.Query(c.Context(), leaderboardBaseQuery+`
-ORDER BY contribution_count DESC, ac.login ASC
+ORDER BY contribution_count DESC, username ASC
 LIMIT $1 OFFSET $2
 `, p.Limit, p.Offset)
 		if err != nil {
