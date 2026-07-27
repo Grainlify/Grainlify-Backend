@@ -1,10 +1,14 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
 )
+
+const repoCacheKeySeparator = "\x00"
 
 // cacheEntry holds a cached Repo value together with the wall-clock time at
 // which it was stored.  expiry is pre-computed at insertion to avoid repeated
@@ -12,6 +16,12 @@ import (
 type cacheEntry struct {
 	repo   Repo
 	expiry time.Time
+}
+
+type repoCacheCall struct {
+	wg   sync.WaitGroup
+	repo Repo
+	err  error
 }
 
 // RepoCache is a concurrency-safe, TTL-based in-memory cache for GitHub
@@ -30,19 +40,29 @@ type cacheEntry struct {
 //     that lookup and insertion are case-insensitive, matching GitHub's own
 //     canonical form.
 //
+//   - In-flight deduplication: concurrent misses for the same token-scoped repo
+//     key share one GitHub request, preventing stampedes while preserving
+//     independent lookups for different users/tokens.
+//
 // # Security note
 //
-// Cached metadata includes repo visibility and permission flags.  A short TTL
-// (≤5 min, default 60 s) limits the window in which a since-revoked integration
-// could continue operating on stale data.  Callers with freshness requirements
-// (e.g. right after an App install/uninstall) must pass bypass=true to
-// GetRepoWithCache so the cache is skipped and the entry is unconditionally
+// Cached metadata includes repo visibility and token-specific permission flags.
+// GetRepoWithCache keys entries by a SHA-256 fingerprint of the access token
+// plus the repo name, so one user's permissions are never served to another
+// user. A short TTL (≤5 min, default 60 s) limits the window in which a
+// since-revoked integration could continue operating on stale data. Entries are
+// stale at the exact expiry instant, not just after it. Callers with freshness
+// requirements (e.g. right after an App install/uninstall) must pass bypass=true
+// to GetRepoWithCache so the cache is skipped and the entry is unconditionally
 // refreshed.
 type RepoCache struct {
 	mu      sync.RWMutex
 	entries map[string]cacheEntry
 	ttl     time.Duration
 	now     func() time.Time // injectable for testing
+
+	inflightMu sync.Mutex
+	inflight   map[string]*repoCacheCall
 }
 
 // NewRepoCache returns a new RepoCache with the given TTL.  A background
@@ -68,6 +88,18 @@ func cacheKey(fullName string) string {
 	return strings.ToLower(strings.TrimSpace(fullName))
 }
 
+// repoCacheScopedKey scopes GetRepoWithCache entries by access token without
+// storing the token itself in memory-backed map keys.
+func repoCacheScopedKey(accessToken, fullName string) string {
+	key := cacheKey(fullName)
+	token := strings.TrimSpace(accessToken)
+	if token == "" {
+		return key + repoCacheKeySeparator + "public"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return key + repoCacheKeySeparator + hex.EncodeToString(sum[:])
+}
+
 // Get returns the cached Repo for fullName if a fresh (non-expired) entry
 // exists.  The second return value is true on a cache hit and false on a miss.
 func (c *RepoCache) Get(fullName string) (Repo, bool) {
@@ -83,11 +115,11 @@ func (c *RepoCache) Get(fullName string) (Repo, bool) {
 	if !ok {
 		return Repo{}, false
 	}
-	if c.now().After(entry.expiry) {
+	if now := c.now(); !now.Before(entry.expiry) {
 		// Lazy eviction: remove the stale entry and report a miss.
 		c.mu.Lock()
 		// Re-check inside the write lock to avoid a race with a concurrent set.
-		if e, still := c.entries[key]; still && c.now().After(e.expiry) {
+		if e, still := c.entries[key]; still && !c.now().Before(e.expiry) {
 			delete(c.entries, key)
 		}
 		c.mu.Unlock()
@@ -116,7 +148,11 @@ func (c *RepoCache) set(fullName string, repo Repo) {
 func (c *RepoCache) Invalidate(fullName string) {
 	key := cacheKey(fullName)
 	c.mu.Lock()
-	delete(c.entries, key)
+	for k := range c.entries {
+		if k == key || strings.HasPrefix(k, key+repoCacheKeySeparator) {
+			delete(c.entries, k)
+		}
+	}
 	c.mu.Unlock()
 }
 
@@ -127,6 +163,36 @@ func (c *RepoCache) Len() int {
 	n := len(c.entries)
 	c.mu.RUnlock()
 	return n
+}
+
+// do runs fetch once per key while concurrent callers wait for the same result.
+// Errors are returned to all waiters and are not cached by the caller.
+func (c *RepoCache) do(fullName string, fetch func() (Repo, error)) (Repo, error) {
+	key := cacheKey(fullName)
+
+	c.inflightMu.Lock()
+	if c.inflight == nil {
+		c.inflight = make(map[string]*repoCacheCall)
+	}
+	if call := c.inflight[key]; call != nil {
+		c.inflightMu.Unlock()
+		call.wg.Wait()
+		return call.repo, call.err
+	}
+
+	call := &repoCacheCall{}
+	call.wg.Add(1)
+	c.inflight[key] = call
+	c.inflightMu.Unlock()
+
+	call.repo, call.err = fetch()
+	call.wg.Done()
+
+	c.inflightMu.Lock()
+	delete(c.inflight, key)
+	c.inflightMu.Unlock()
+
+	return call.repo, call.err
 }
 
 // evictLoop runs in the background and removes expired entries on each tick.
@@ -159,7 +225,7 @@ func (c *RepoCache) evictExpired() {
 	now := c.now()
 	c.mu.Lock()
 	for k, e := range c.entries {
-		if now.After(e.expiry) {
+		if !now.Before(e.expiry) {
 			delete(c.entries, k)
 		}
 	}
