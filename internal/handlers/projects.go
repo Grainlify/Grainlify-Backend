@@ -17,15 +17,24 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 )
 
 type ProjectsHandler struct {
-	cfg config.Config
-	db  *db.DB
+	cfg                 config.Config
+	db                  *db.DB
+	onProjectChanged    func(projectID string) // callback to invalidate cache on project CUD operations
 }
 
 func NewProjectsHandler(cfg config.Config, d *db.DB) *ProjectsHandler {
 	return &ProjectsHandler{cfg: cfg, db: d}
+}
+
+// SetCacheInvalidator sets the callback to invalidate the projects public cache
+// when projects are created, updated, or deleted.  This must be called after
+// both the projects handler and the projects public handler are constructed.
+func (h *ProjectsHandler) SetCacheInvalidator(fn func(projectID string)) {
+	h.onProjectChanged = fn
 }
 
 type createProjectRequest struct {
@@ -39,29 +48,29 @@ type createProjectRequest struct {
 func (h *ProjectsHandler) Create() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		var req createProjectRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		fullName := normalizeRepoFullName(req.GitHubFullName)
 		if fullName == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_github_full_name"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_github_full_name", "")
 		}
 
 		// Ecosystem is required (must be an active ecosystem from DB)
 		ecosystemName := strings.TrimSpace(req.EcosystemName)
 		if ecosystemName == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ecosystem_required", "message": "Ecosystem name is required"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "ecosystem_required", "Ecosystem name is required")
 		}
 
 		var ecosystemID uuid.UUID
@@ -73,7 +82,7 @@ WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
   AND status = 'active'
 `, ecosystemName).Scan(&ecosystemID)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ecosystem_not_found", "message": "No active ecosystem found with that name. Please select from available ecosystems."})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "ecosystem_not_found", "No active ecosystem found with that name. Please select from available ecosystems.")
 		}
 
 		// Prepare tags as JSONB
@@ -97,7 +106,7 @@ ON CONFLICT (github_full_name) DO UPDATE SET
 RETURNING id, status
 `, userID, fullName, ecosystemID, req.Language, tagsJSON, req.Category).Scan(&projectID, &status)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_create_failed", "")
 		}
 
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -121,7 +130,7 @@ func (h *ProjectsHandler) Mine() fiber.Handler {
 			slog.Error("projects/mine: database not configured",
 				"request_id", c.Locals("requestid"),
 			)
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, ok := c.Locals(auth.LocalUserID).(string)
@@ -132,9 +141,9 @@ func (h *ProjectsHandler) Mine() fiber.Handler {
 				"user_id_value", c.Locals(auth.LocalUserID),
 				"request_id", requestID,
 			)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
-		
+
 		userID, err := uuid.Parse(sub)
 		if err != nil {
 			slog.Warn("projects/mine: failed to parse user_id as UUID",
@@ -142,7 +151,7 @@ func (h *ProjectsHandler) Mine() fiber.Handler {
 				"error", err,
 				"request_id", c.Locals("requestid"),
 			)
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		slog.Info("projects/mine: querying projects",
@@ -181,7 +190,7 @@ ORDER BY p.created_at DESC
 				"error", err,
 				"request_id", c.Locals("requestid"),
 			)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -212,7 +221,7 @@ ORDER BY p.created_at DESC
 			var needsMetadata bool
 
 			if err := rows.Scan(&id, &fullName, &status, &repoID, &verifiedAt, &verErr, &webhookID, &webhookURL, &webhookCreatedAt, &createdAt, &updatedAt, &ecosystemName, &language, &tagsJSON, &category, &description, &needsMetadata); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
 			}
 
 			// Fetch repo data from GitHub to check if it's private and get owner avatar
@@ -245,7 +254,7 @@ WHERE id = $1
 			// Parse tags JSONB
 			var tags []string
 			if len(tagsJSON) > 0 {
-				json.Unmarshal(tagsJSON, &tags)
+				_ = json.Unmarshal(tagsJSON, &tags)
 			}
 
 			projectMap := fiber.Map{
@@ -295,13 +304,13 @@ WHERE id = $1
 func (h *ProjectsHandler) PendingSetup() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -314,7 +323,7 @@ WHERE p.owner_user_id = $1
 ORDER BY p.created_at ASC
 `, userID)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_setup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "pending_setup_failed", "")
 		}
 		defer rows.Close()
 
@@ -330,12 +339,12 @@ ORDER BY p.created_at ASC
 			var category *string
 
 			if err := rows.Scan(&id, &fullName, &description, &ecosystemID, &ecosystemName, &language, &tagsJSON, &category); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_setup_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "pending_setup_failed", "")
 			}
 
 			var tags []string
 			if len(tagsJSON) > 0 {
-				json.Unmarshal(tagsJSON, &tags)
+				_ = json.Unmarshal(tagsJSON, &tags)
 			}
 
 			ecoID := ""
@@ -378,23 +387,23 @@ type updateMetadataRequest struct {
 func (h *ProjectsHandler) UpdateMetadata() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		projectID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
 		var req updateMetadataRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
 		}
 
 		var ownerUserID uuid.UUID
@@ -402,13 +411,13 @@ func (h *ProjectsHandler) UpdateMetadata() fiber.Handler {
 SELECT owner_user_id FROM projects WHERE id = $1 AND deleted_at IS NULL
 `, projectID).Scan(&ownerUserID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_lookup_failed", "")
 		}
 		if ownerUserID != userID {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
+			return httpx.RespondError(c, fiber.StatusForbidden, "forbidden", "")
 		}
 
 		// Resolve ecosystem if name provided
@@ -419,7 +428,7 @@ SELECT owner_user_id FROM projects WHERE id = $1 AND deleted_at IS NULL
 SELECT id FROM ecosystems WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND status = 'active'
 `, *req.EcosystemName).Scan(&ecoID)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ecosystem_not_found", "message": "No active ecosystem found with that name."})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "ecosystem_not_found", "No active ecosystem found with that name.")
 			}
 			ecosystemID = &ecoID
 		}
@@ -442,9 +451,13 @@ SET description = COALESCE($2, description),
 WHERE id = $1
 `, projectID, req.Description, ecosystemID, req.Language, tagsJSON, req.Category)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "metadata_update_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "metadata_update_failed", "")
 		}
 
+		// Invalidate projects cache since project metadata changed
+		if h.onProjectChanged != nil {
+			h.onProjectChanged(projectID.String())
+		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -452,20 +465,20 @@ WHERE id = $1
 func (h *ProjectsHandler) Verify() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		role, _ := c.Locals(auth.LocalRole).(string)
 
 		projectID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
 		var ownerUserID uuid.UUID
@@ -477,14 +490,14 @@ FROM projects
 WHERE id = $1
 `, projectID).Scan(&ownerUserID, &fullName, &webhookID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
+			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_lookup_failed", "")
 		}
 
 		if ownerUserID != userID && role != "admin" {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
+			return httpx.RespondError(c, fiber.StatusForbidden, "forbidden", "")
 		}
 
 		_, _ = h.db.Pool.Exec(c.Context(), `
@@ -541,6 +554,10 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, repo.StargazersCount, repo.ForksCount)
+		// Invalidate cache since project is now verified and visible
+		if h.onProjectChanged != nil {
+			h.onProjectChanged(projectID.String())
+		}
 		return
 	}
 
@@ -576,6 +593,10 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, wh.ID, webhookURL, repo.StargazersCount, repo.ForksCount)
+	// Invalidate cache since project is now verified and visible
+	if h.onProjectChanged != nil {
+		h.onProjectChanged(projectID.String())
+	}
 }
 
 func (h *ProjectsHandler) recordProjectError(ctx context.Context, projectID uuid.UUID, msg string) {

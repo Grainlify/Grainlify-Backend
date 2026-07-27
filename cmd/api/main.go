@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,14 +16,28 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
+	shutdownwait "github.com/jagadeesh/grainlify/backend/internal/shutdown"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
+)
+
+// Build metadata populated via -ldflags at build time.
+// Example:
+//
+//	go build -ldflags="-X main.Version=$(git describe --tags --always) \
+//	                   -X main.Commit=$(git rev-parse --short HEAD) \
+//	                   -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/api
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildTime = "unknown"
 )
 
 func main() {
 	slog.Info("=== Grainlify API Starting ===")
 	slog.Info("loading environment variables", "step", "1", "action", "loading_environment_variables")
-	
+
 	config.LoadDotenv()
 	slog.Info("loading configuration", "step", "2", "action", "loading_configuration")
 	cfg := config.Load()
@@ -30,6 +46,11 @@ func main() {
 		Level: cfg.LogLevel(),
 	}))
 	slog.SetDefault(logger)
+
+	if err := cfg.Validate(); err != nil {
+		slog.Error("startup config validation failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Log configuration (mask sensitive values)
 	slog.Info("configuration loaded", "step", "3", "action", "configuration_loaded",
@@ -43,6 +64,7 @@ func main() {
 		"nats_url_set", cfg.NATSURL != "",
 		"github_oauth_client_id_set", cfg.GitHubOAuthClientID != "",
 		"public_base_url", cfg.PublicBaseURL,
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
 	)
 
 	slog.Info("connecting to database", "step", "4", "action", "connecting_to_database")
@@ -62,7 +84,12 @@ func main() {
 		slog.Info("parsing db url", "step", "4.1", "action", "parsing_db_url", "db_url_length", len(cfg.DBURL))
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		slog.Info("attempting db connection", "step", "4.2", "action", "attempting_db_connection", "timeout", "10s")
-		d, err := db.Connect(ctx, cfg.DBURL)
+		d, err := db.Connect(ctx, cfg.DBURL, db.PoolConfig{
+			MaxConns:        cfg.DBMaxConns,
+			MinConns:        cfg.DBMinConns,
+			MaxConnLifetime: cfg.DBMaxConnLifetime,
+			MaxConnIdleTime: cfg.DBMaxConnIdleTime,
+		})
 		cancel()
 		if err != nil {
 			slog.Error("db connection failed", "step", "4", "action", "db_connection_failed",
@@ -72,13 +99,9 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("db connection successful", "step", "4.3", "action", "db_connection_successful",
-			"max_conns", 10,
+			"max_conns", cfg.DBMaxConns,
 		)
 		database = d
-		defer func() {
-			slog.Info("closing database connection")
-			database.Close()
-		}()
 
 		if cfg.AutoMigrate {
 			slog.Info("checking if migrations are needed", "step", "5", "action", "checking_migrations")
@@ -95,7 +118,8 @@ func main() {
 			if needsMigration {
 				slog.Info("migrations needed, running database migrations", "step", "5", "action", "running_database_migrations")
 				// Use background context - migrations handle their own retries without timeouts
-				err := migrate.Up(context.Background(), database.Pool)
+				allowIrreversible := cfg.IsDev() || os.Getenv("MIGRATE_ALLOW_IRREVERSIBLE") == "1"
+				err := migrate.Up(context.Background(), database.Pool, allowIrreversible)
 				if err != nil {
 					slog.Error("migration failed", "step", "5", "action", "migration_failed",
 						"error", err,
@@ -126,26 +150,32 @@ func main() {
 		}
 		slog.Info("nats connection successful", "step", "6.2", "action", "nats_connection_successful")
 		eventBus = b
-		defer func() {
-			slog.Info("closing NATS connection")
-			eventBus.Close()
-		}()
 	} else {
 		slog.Info("nats skipped", "step", "6", "action", "nats_skipped", "reason", "NATS_URL not set")
 	}
 
 	slog.Info("initializing api", "step", "7", "action", "initializing_api")
-	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus})
-	slog.Info("api initialized", "step", "7", "action", "api_initialized")
+	buildInfo := handlers.BuildInfo{Version: Version, Commit: Commit, BuildTime: BuildTime}
+	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus}, buildInfo)
+	slog.Info("api initialized", "step", "7", "action", "api_initialized",
+		"version", Version, "commit", Commit, "build_time", BuildTime)
+
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	defer stopWorkers()
+	var workerWG sync.WaitGroup
 
 	// Background workers (dev convenience). In production we run `cmd/worker` instead.
 	// If NATS is configured, prefer the external worker process.
 	if cfg.NATSURL == "" && database != nil && database.Pool != nil {
 		slog.Info("starting background worker", "step", "8", "action", "starting_background_worker")
 		worker := syncjobs.New(cfg, database.Pool)
+		workerWG.Add(1)
 		go func() {
+			defer workerWG.Done()
 			slog.Info("background worker started")
-			_ = worker.Run(context.Background())
+			if err := worker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("background worker exited", "error", err)
+			}
 		}()
 
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)
@@ -195,17 +225,111 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("initiating graceful shutdown", "step", "10", "action", "initiating_graceful_shutdown")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	slog.Info("initiating graceful shutdown", "step", "10", "action", "initiating_graceful_shutdown",
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
-	if err := api.Shutdown(ctx, app); err != nil {
+	runner := gracefulShutdownRunner{deps: gracefulShutdownDeps{
+		ShutdownHTTP: func(ctx context.Context) error {
+			return api.Shutdown(ctx, app)
+		},
+		StopWorkers: stopWorkers,
+		WaitWorkers: func(ctx context.Context) error {
+			return shutdownwait.Wait(ctx, &workerWG)
+		},
+		CloseBus: func(context.Context) error {
+			if eventBus == nil {
+				return nil
+			}
+			slog.Info("closing NATS connection")
+			eventBus.Close()
+			return nil
+		},
+		CloseDB: func(context.Context) error {
+			if database == nil {
+				return nil
+			}
+			slog.Info("closing database connection")
+			database.Close()
+			return nil
+		},
+	}}
+	result := runner.Run(ctx)
+	if result.WorkerErr != nil {
+		slog.Warn("worker shutdown exceeded deadline", "error", result.WorkerErr)
+	}
+	if result.Err != nil {
 		slog.Error("graceful shutdown failed",
-			"error", err,
-			"error_type", fmt.Sprintf("%T", err),
+			"error", result.Err,
+			"error_type", fmt.Sprintf("%T", result.Err),
 		)
 		os.Exit(1)
 	}
 
 	slog.Info("shutdown complete")
+}
+
+type gracefulShutdownDeps struct {
+	ShutdownHTTP func(context.Context) error
+	StopWorkers  func()
+	WaitWorkers  func(context.Context) error
+	CloseBus     func(context.Context) error
+	CloseDB      func(context.Context) error
+}
+
+type gracefulShutdownResult struct {
+	Err       error
+	WorkerErr error
+}
+
+type gracefulShutdownRunner struct {
+	deps gracefulShutdownDeps
+	once sync.Once
+	res  gracefulShutdownResult
+}
+
+func (r *gracefulShutdownRunner) Run(ctx context.Context) gracefulShutdownResult {
+	r.once.Do(func() {
+		r.res = runGracefulShutdown(ctx, r.deps)
+	})
+	return r.res
+}
+
+// runGracefulShutdown preserves the API process shutdown order. The HTTP
+// listener stops first so new connections are rejected while in-flight requests
+// can drain with the database still open. Workers are then canceled and waited
+// on, the message bus is drained/closed, and the database pool is closed last.
+func runGracefulShutdown(ctx context.Context, deps gracefulShutdownDeps) gracefulShutdownResult {
+	var shutdownErr error
+
+	if deps.ShutdownHTTP != nil {
+		if err := deps.ShutdownHTTP(ctx); err != nil {
+			return gracefulShutdownResult{Err: fmt.Errorf("shutdown http listener: %w", err)}
+		}
+	}
+
+	if deps.StopWorkers != nil {
+		deps.StopWorkers()
+	}
+
+	var workerErr error
+	if deps.WaitWorkers != nil {
+		workerErr = deps.WaitWorkers(ctx)
+	}
+
+	if deps.CloseBus != nil {
+		if err := deps.CloseBus(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close bus: %w", err))
+		}
+	}
+
+	if deps.CloseDB != nil {
+		if err := deps.CloseDB(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close database: %w", err))
+		}
+	}
+
+	return gracefulShutdownResult{Err: shutdownErr, WorkerErr: workerErr}
 }

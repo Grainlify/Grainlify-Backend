@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -16,7 +18,6 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
-	"github.com/jagadeesh/grainlify/backend/internal/cryptox"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
@@ -24,7 +25,7 @@ import (
 // isAllowedRedirectURI validates that a redirect URI is from an allowed origin.
 // This prevents open redirect vulnerabilities by only allowing:
 // - localhost origins (for development)
-// - *.vercel.app domains (for preview deployments)
+// - *.vercel.app and *.0xo.in domains (for preview deployments, if CORS_ALLOW_PREVIEW is enabled)
 // - Explicit origins from CORS_ORIGINS config
 // - FrontendBaseURL (if configured)
 func isAllowedRedirectURI(redirectURI string, cfg config.Config) bool {
@@ -44,9 +45,11 @@ func isAllowedRedirectURI(redirectURI string, cfg config.Config) bool {
 		return true
 	}
 
-	// Allow all Vercel preview deployments (*.vercel.app)
-	if strings.HasSuffix(origin, ".vercel.app") {
-		return true
+	// Allow Vercel and 0xo preview deployments (*.vercel.app, *.0xo.in) only if CORSAllowPreview is enabled
+	if cfg.CORSAllowPreview {
+		if strings.HasSuffix(origin, ".vercel.app") || strings.HasSuffix(origin, ".0xo.in") {
+			return true
+		}
 	}
 
 	// Check explicit CORS origins
@@ -84,16 +87,16 @@ func NewGitHubOAuthHandler(cfg config.Config, d *db.DB) *GitHubOAuthHandler {
 func (h *GitHubOAuthHandler) Start() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		if h.cfg.GitHubOAuthClientID == "" || effectiveGitHubRedirect(h.cfg) == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "github_oauth_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "github_oauth_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		state := randomState(32)
@@ -104,7 +107,7 @@ INSERT INTO oauth_states (state, user_id, kind, expires_at)
 VALUES ($1, $2, 'github_link', $3)
 `, state, userID, expiresAt)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_create_failed", "")
 		}
 
 		// Scopes:
@@ -115,7 +118,7 @@ VALUES ($1, $2, 'github_link', $3)
 		// - read:org: helps when dealing with org-owned repos
 		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, []string{"read:user", "user:email", "repo", "admin:repo_hook", "read:org"})
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "auth_url_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "auth_url_failed", "")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"url": authURL})
@@ -128,10 +131,10 @@ VALUES ($1, $2, 'github_link', $3)
 func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		if h.cfg.GitHubOAuthClientID == "" || effectiveGitHubRedirect(h.cfg) == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "github_login_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "github_login_not_configured", "")
 		}
 
 		// Get redirect_uri from query parameter (frontend origin)
@@ -142,7 +145,7 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 		if redirectURI != "" {
 			parsedURL, err := url.Parse(redirectURI)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_redirect_uri"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_redirect_uri", "")
 			}
 
 			// Security: Only allow redirects to whitelisted origins
@@ -156,7 +159,7 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 
 			// Ensure redirect URI uses http or https scheme
 			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_redirect_uri_scheme"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_redirect_uri_scheme", "")
 			}
 		}
 
@@ -171,7 +174,7 @@ VALUES ($1, NULL, 'github_login', $2, $3)
 `, csrfToken, expiresAt, redirectURI)
 		if err != nil {
 			slog.Error("OAuth login start - failed to store state", "error", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_create_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_create_failed", "")
 		}
 
 		// Encode redirect_uri in state parameter (OAuth 2.0 spec recommendation)
@@ -187,7 +190,7 @@ VALUES ($1, NULL, 'github_login', $2, $3)
 		// Login scopes: identity + email + repo access for later project verification.
 		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, []string{"read:user", "user:email", "repo", "admin:repo_hook", "read:org"})
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "auth_url_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "auth_url_failed", "")
 		}
 
 		// Redirect user to GitHub OAuth page
@@ -203,19 +206,19 @@ VALUES ($1, NULL, 'github_login', $2, $3)
 func (h *GitHubOAuthHandler) CallbackUnified() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		if h.cfg.GitHubOAuthClientID == "" || h.cfg.GitHubOAuthClientSecret == "" || effectiveGitHubRedirect(h.cfg) == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "github_oauth_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "github_oauth_not_configured", "")
 		}
 		if h.cfg.JWTSecret == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "jwt_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "jwt_not_configured", "")
 		}
 
 		code := c.Query("code")
 		encodedState := c.Query("state")
 		if code == "" || encodedState == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_code_or_state"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "missing_code_or_state", "")
 		}
 
 		// Decode state parameter to extract CSRF token and redirect_uri (OAuth 2.0 spec)
@@ -225,7 +228,7 @@ func (h *GitHubOAuthHandler) CallbackUnified() fiber.Handler {
 				"error", err,
 				"encoded_state", encodedState,
 			)
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_state_format"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_state_format", "")
 		}
 
 		slog.Info("OAuth callback - decoded state",
@@ -249,7 +252,7 @@ WHERE state = $1
 				"csrf_token", csrfToken,
 				"encoded_state", encodedState,
 			)
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_or_expired_state"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_or_expired_state", "")
 		}
 		if err != nil {
 			slog.Error("OAuth callback - database error during state lookup",
@@ -257,7 +260,7 @@ WHERE state = $1
 				"csrf_token", csrfToken,
 				"encoded_state", encodedState,
 			)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_lookup_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_lookup_failed", "")
 		}
 
 		// Use redirect_uri from state parameter (OAuth 2.0 spec), fallback to database if not in state
@@ -317,22 +320,14 @@ WHERE state = $1
 			RedirectURL:  effectiveGitHubRedirect(h.cfg),
 		})
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "token_exchange_failed"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "token_exchange_failed", "")
 		}
 
-		encKey, err := cryptox.KeyFromB64(h.cfg.TokenEncKeyB64)
-		if err != nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "token_encryption_not_configured"})
-		}
-		encToken, err := cryptox.EncryptAESGCM(encKey, []byte(tr.AccessToken))
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_encrypt_failed"})
-		}
 
 		gh := github.NewClient()
 		u, err := gh.GetUser(c.Context(), tr.AccessToken)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "github_user_fetch_failed"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "github_user_fetch_failed", "")
 		}
 
 		var userID uuid.UUID
@@ -352,35 +347,36 @@ RETURNING id, role
 `, u.ID).Scan(&userID, &role)
 			}
 			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_upsert_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "user_upsert_failed", "")
 			}
 		case "github_link":
 			if stateUserID == nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_state_user"})
+				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_state_user", "")
 			}
 			userID = *stateUserID
 			// Fetch role for JWT issuance.
 			if err := h.db.Pool.QueryRow(c.Context(), `SELECT role FROM users WHERE id = $1`, userID).Scan(&role); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_lookup_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "user_lookup_failed", "")
 			}
 		default:
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "wrong_state_kind"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "wrong_state_kind", "")
 		}
 
-		_, err = h.db.Pool.Exec(c.Context(), `
-INSERT INTO github_accounts (user_id, github_user_id, login, avatar_url, access_token, token_type, scope)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (user_id) DO UPDATE SET
-  github_user_id = EXCLUDED.github_user_id,
-  login = EXCLUDED.login,
-  avatar_url = EXCLUDED.avatar_url,
-  access_token = EXCLUDED.access_token,
-  token_type = EXCLUDED.token_type,
-  scope = EXCLUDED.scope,
-  updated_at = now()
-`, userID, u.ID, u.Login, u.AvatarURL, encToken, tr.TokenType, tr.Scope)
+		err = github.StoreLinkedAccount(
+			c.Context(),
+			h.db.Pool,
+			userID,
+			u.ID,
+			u.Login,
+			u.AvatarURL,
+			tr.AccessToken,
+			tr.TokenType,
+			tr.Scope,
+			h.cfg.TokenEncKeyB64,
+		)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "github_account_upsert_failed"})
+			slog.Error("failed to store github account", "error", err, "user_id", userID)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_upsert_failed", "")
 		}
 
 		// Ensure users.github_user_id is set (idempotent).
@@ -392,7 +388,7 @@ UPDATE users SET github_user_id = $2, updated_at = now() WHERE id = $1
 		if storedKind == "github_login" {
 			jwtToken, err := auth.IssueJWT(h.cfg.JWTSecret, userID, role, "", "", 60*time.Minute)
 			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token_issue_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "token_issue_failed", "")
 			}
 
 			// Determine redirect URL priority (OAuth 2.0 spec: use state parameter):
@@ -545,13 +541,13 @@ func effectiveGitHubRedirect(cfg config.Config) string {
 func (h *GitHubOAuthHandler) Status() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		sub, _ := c.Locals(auth.LocalUserID).(string)
 		userID, err := uuid.Parse(sub)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
 		var githubUserID int64
@@ -568,7 +564,7 @@ WHERE user_id = $1
 			})
 		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "status_failed", "")
 		}
 
 		githubMap := fiber.Map{

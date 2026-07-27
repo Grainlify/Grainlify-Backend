@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,13 @@ import (
 	"time"
 )
 
+// tokenEndpoint is a var (not const) so tests can override it to point at a
+// local httptest server.
+var tokenEndpoint = "https://github.com/login/oauth/access_token"
+
+// OAuthConfig holds the configuration for GitHub OAuth authentication.
+// ClientID and ClientSecret are obtained from GitHub OAuth app settings.
+// RedirectURL must match the callback URL configured in the GitHub OAuth app.
 type OAuthConfig struct {
 	ClientID     string
 	ClientSecret string
@@ -44,12 +52,21 @@ func joinScopes(scopes []string) string {
 	return out
 }
 
+// TokenResponse represents the response from GitHub's OAuth token endpoint.
+// AccessToken is the OAuth bearer token used to authenticate API requests.
+// TokenType is typically "bearer".
+// Scope indicates the granted OAuth scopes.
 type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	Scope       string `json:"scope"`
 }
 
+// ExchangeCode exchanges an OAuth authorization code for an access token.
+// It makes a POST request to GitHub's token endpoint with the code and client credentials.
+// The context can be used to set a deadline for the HTTP request (default timeout is 10s).
+// Returns an error if the configuration is incomplete, code is empty, or the request fails.
+// The access token in the response must be non-empty.
 func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenResponse, error) {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return TokenResponse{}, fmt.Errorf("github oauth not configured")
@@ -66,7 +83,7 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 	}
 	b, _ := json.Marshal(body)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, bytes.NewReader(b))
 	if err != nil {
 		return TokenResponse{}, err
 	}
@@ -95,22 +112,38 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 }
 
 
+// Test helpers to override endpoints for mocking
+
+var apiBase = "https://api.github.com"
+
+// GetTokenEndpoint returns the current token endpoint URL (for tests).
+func GetTokenEndpoint() string {
+	return tokenEndpoint
+}
+
+// SetTokenEndpoint sets the token endpoint URL (for tests).
+func SetTokenEndpoint(endpoint string) {
+	tokenEndpoint = endpoint
+}
+
+// GetAPIBase returns the current API base URL (for tests).
+func GetAPIBase() string {
+	return apiBase
+}
+
+// SetAPIBase sets the API base URL (for tests).
+func SetAPIBase(base string) {
+	apiBase = base
+}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// EncodeStateWithRedirect is a test helper that encodes a CSRF token and redirect
+// URI into a state parameter matching the format used by handlers/github_oauth.go.
+// Format: base64(csrf_token + "|" + redirect_uri)
+func EncodeStateWithRedirect(csrfToken, redirectURI string) string {
+	if redirectURI == "" {
+		return csrfToken
+	}
+	stateData := csrfToken + "|" + redirectURI
+	return base64.RawURLEncoding.EncodeToString([]byte(stateData))
+}

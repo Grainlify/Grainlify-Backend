@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_projects_owner;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS github_accounts;
+DROP INDEX IF EXISTS idx_oauth_states_expires;
+DROP TABLE IF EXISTS oauth_states;
+DROP INDEX IF EXISTS idx_auth_nonces_lookup;
+DROP TABLE IF EXISTS auth_nonces;
+DROP INDEX IF EXISTS idx_wallets_user_id;
+DROP TABLE IF EXISTS wallets;
+DROP TABLE IF EXISTS users;

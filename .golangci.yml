@@ -1,0 +1,79 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # golangci-lint v2 does not expose gosimple as a separate linter;
+    # staticcheck runs the S* simplification checks.
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*github.com/golang-migrate/migrate/v4.Migrate).Close
+        - io.Copy
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+      - path: internal/(didit|github|soroban)/.*\.go
+        text: "Error return value of `resp.Body.Close` is not checked"
+        linters:
+          - errcheck
+      - path: internal/migrate/migrate\.go
+        text: "Error return value of `sqlDB.Close` is not checked"
+        linters:
+          - errcheck
+      - path: internal/github/app\.go
+        text: "Error return value of `\\(\\*encoding/json.Decoder\\).Decode` is not checked"
+        linters:
+          - errcheck
+      - path: internal/handlers/user_profile\.go
+        text: "SA4031"
+        linters:
+          - staticcheck
+      - path: internal/handlers/user_profile\.go
+        text: "SA4006:"
+        linters:
+          - staticcheck
+      - path: internal/(handlers/(github_app|projects)|migrate/migrate|syncjobs/worker)\.go
+        text: "ST1023:"
+        linters:
+          - staticcheck
+      - path: internal/auth/jwt_test\.go
+        text: "QF1008:"
+        linters:
+          - staticcheck
+      - path: internal/(handlers/(github_app|projects)|migrate/migrate|syncjobs/worker)\.go
+        text: "QF1011:"
+        linters:
+          - staticcheck
+      - path: internal/handlers/kyc\.go
+        text: "S1009:"
+        linters:
+          - staticcheck
+      - path: internal/handlers/user_profile\.go
+        text: "ineffectual assignment to err"
+        linters:
+          - ineffassign
+      - path: internal/github/list\.go
+        text: "func looksLikeRFC3339 is unused"
+        linters:
+          - unused
+      - path: internal/handlers/project_data\.go
+        text: "func \\(\\*ProjectDataHandler\\)\\.authorizeProject is unused"
+        linters:
+          - unused
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"github.com/jagadeesh/grainlify/backend/internal/httpx"
+
 	"encoding/json"
 	"time"
 
@@ -22,11 +24,11 @@ func NewEcosystemsPublicHandler(d *db.DB) *EcosystemsPublicHandler {
 func (h *EcosystemsPublicHandler) GetByID() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 		ecoID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_ecosystem_id"})
+			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_ecosystem_id", "")
 		}
 
 		var id uuid.UUID
@@ -77,23 +79,23 @@ SELECT
 `, ecoID, ecoID, ecoID, ecoID).Scan(&projectCount, &contributorsCount, &openIssuesCount, &openPRsCount)
 
 		out := fiber.Map{
-			"id":                   id.String(),
-			"slug":                 slug,
-			"name":                 name,
-			"description":          desc,
-			"website_url":          website,
-			"logo_url":             logoURL,
-			"status":               status,
-			"created_at":           createdAt,
-			"updated_at":           updatedAt,
-			"about":                about,
-			"links":                links,
-			"key_areas":            keyAreas,
-			"technologies":         technologies,
-			"project_count":        projectCount,
-			"contributors_count":   contributorsCount,
-			"open_issues_count":    openIssuesCount,
-			"open_prs_count":       openPRsCount,
+			"id":                 id.String(),
+			"slug":               slug,
+			"name":               name,
+			"description":        desc,
+			"website_url":        website,
+			"logo_url":           logoURL,
+			"status":             status,
+			"created_at":         createdAt,
+			"updated_at":         updatedAt,
+			"about":              about,
+			"links":              links,
+			"key_areas":          keyAreas,
+			"technologies":       technologies,
+			"project_count":      projectCount,
+			"contributors_count": contributorsCount,
+			"open_issues_count":  openIssuesCount,
+			"open_prs_count":     openPRsCount,
 		}
 		return c.Status(fiber.StatusOK).JSON(out)
 	}
@@ -105,7 +107,7 @@ SELECT
 func (h *EcosystemsPublicHandler) ListActive() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
 		}
 
 		rows, err := h.db.Pool.Query(c.Context(), `
@@ -129,7 +131,7 @@ ORDER BY e.created_at DESC
 LIMIT 200
 `)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystems_list_failed"})
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystems_list_failed", "")
 		}
 		defer rows.Close()
 
@@ -149,7 +151,7 @@ LIMIT 200
 				userCnt    int64
 			)
 			if err := rows.Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &projectCnt, &userCnt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystems_list_failed"})
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystems_list_failed", "")
 			}
 			out = append(out, fiber.Map{
 				"id":            id.String(),

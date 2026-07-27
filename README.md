@@ -1,4 +1,8 @@
-# Grainlify Backend
+﻿# Grainlify Backend
+
+[![CI](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml/badge.svg)](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml)
+
+[![CI](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml/badge.svg)](https://github.com/jagadeesh/Grainlify-Backend/actions/workflows/ci.yml)
 
 Grainlify Backend is a Go-based API server that connects open-source developers with projects through GitHub integration, ecosystem tracking, and contribution management.
 
@@ -51,24 +55,24 @@ flowchart TB
 
 ```text
 Grainlify-Backend/
-├── cmd/
-│   ├── api/          # Main API server
-│   ├── migrate/      # Database migration runner
-│   └── worker/       # Background worker (optional)
-├── internal/
-│   ├── api/          # HTTP handlers and routing
-│   ├── auth/         # JWT authentication
-│   ├── bus/          # Event bus interface (NATS)
-│   ├── config/       # Configuration management
-│   ├── db/           # Database connection
-│   ├── github/       # GitHub API client
-│   ├── handlers/     # HTTP endpoint handlers
-│   ├── soroban/      # Stellar blockchain integration
-│   └── worker/       # Background job processing
-├── migrations/       # SQL migration files
-├── .env.example      # Environment variables template
-├── go.mod            # Go dependencies
-└── Makefile          # Build commands
+â”œâ”€â”€ cmd/
+â”‚   â”œâ”€â”€ api/          # Main API server
+â”‚   â”œâ”€â”€ migrate/      # Database migration runner
+â”‚   â””â”€â”€ worker/       # Background worker (optional)
+â”œâ”€â”€ internal/
+â”‚   â”œâ”€â”€ api/          # HTTP handlers and routing
+â”‚   â”œâ”€â”€ auth/         # JWT authentication
+â”‚   â”œâ”€â”€ bus/          # Event bus interface (NATS)
+â”‚   â”œâ”€â”€ config/       # Configuration management
+â”‚   â”œâ”€â”€ db/           # Database connection
+â”‚   â”œâ”€â”€ github/       # GitHub API client
+â”‚   â”œâ”€â”€ handlers/     # HTTP endpoint handlers
+â”‚   â”œâ”€â”€ soroban/      # Stellar blockchain integration
+â”‚   â””â”€â”€ worker/       # Background job processing
+â”œâ”€â”€ migrations/       # SQL migration files
+â”œâ”€â”€ .env.example      # Environment variables template
+â”œâ”€â”€ go.mod            # Go dependencies
+â””â”€â”€ Makefile          # Build commands
 ```
 
 ## Core Features
@@ -89,6 +93,7 @@ Grainlify-Backend/
 - Organize projects by ecosystems (Starknet, Ethereum, etc.)
 - Project verification and webhook setup
 - Issue and PR tracking
+- Short-TTL response cache for public project endpoints (30s TTL with automatic invalidation)
 
 ### User Profiles
 - Contribution statistics
@@ -172,7 +177,7 @@ AUTO_MIGRATE=true
 
 # Authentication
 JWT_SECRET=your-secret-key-min-32-chars
-ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token
+ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token-min-32-chars
 
 # GitHub OAuth
 GITHUB_OAUTH_CLIENT_ID=your_client_id
@@ -201,13 +206,18 @@ DIDIT_WORKFLOW_ID=your_workflow_id
 
 ## API Documentation
 
-See [API_ENDPOINTS.md](API_ENDPOINTS.md) for complete API documentation.
+See [API Endpoints](docs/reference/api-endpoints.md) for the complete REST reference.
+
+Interactive API docs are served at `/docs` (Swagger UI) and the raw OpenAPI 3.1 spec at `/openapi.yaml`.
+
+- Local: http://localhost:8080/docs
+- Spec: http://localhost:8080/openapi.yaml
 
 ## Deployment
 
 ### Railway
 
-See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed Railway deployment instructions.
+See [Railway Deployment](docs/deployment/railway.md) for detailed Railway deployment instructions.
 
 ### Other Platforms
 
@@ -216,13 +226,71 @@ See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed Railway deployme
 3. Build binary: `go build -o ./api ./cmd/api`
 4. Start server: `./api`
 
+## Operations
+
+### Graceful Shutdown
+
+Both `cmd/api` and `cmd/worker` use a cancelable root context for background
+workers. On `SIGINT` or `SIGTERM`, the API process first stops accepting HTTP
+requests, then cancels the sync worker context, waits for in-flight worker work
+within the shutdown deadline, and only then lets deferred DB/NATS cleanup run.
+
+The standalone worker process passes the same root context to the NATS webhook
+consumer and sync worker. Canceling that context unsubscribes the consumer and
+lets the sync worker finish or safely requeue work before `Close()` drains NATS
+and closes the database pool.
+
 ## Development
 
 ### Running Tests
 
 ```bash
-go test ./...
+make test
+# or directly:
+go test -race -short ./...
 ```
+
+### Fuzz Testing (XDR decode helpers)
+
+The `internal/soroban` package includes Go native fuzz targets for every
+exported `Decode*` function.  These guard against a remote-DoS scenario where
+a misbehaving Soroban RPC endpoint returns truncated, type-confused, or
+otherwise adversarial XDR that could panic a request handler or worker goroutine.
+
+**Run the corpus seeds only (fast, no randomisation — identical to CI):**
+
+```bash
+go test ./internal/soroban/... -run 'TestDecodeNeverPanics|TestDecodeRoundTrip'
+```
+
+**30-second fuzz smoke run across all targets:**
+
+```bash
+go test ./internal/soroban/... -run='^$' -fuzz=FuzzDecode -fuzztime=30s
+```
+
+**Targeted long run (e.g. for the struct/map decoder):**
+
+```bash
+go test ./internal/soroban/... -run='^$' \
+  -fuzz='^FuzzDecodeScValStruct$' \
+  -fuzztime=5m
+```
+
+If the fuzzer finds a crash it writes a reproducer to
+`testdata/fuzz/<TargetName>/<hash>`.  Commit that file as a regression test
+and fix the underlying panic to return an error instead.
+
+Fuzz targets and their coverage:
+
+| Target | Decoder under test | Corpus seeds |
+|---|---|---|
+| `FuzzDecodeScValInt64` | `DecodeScValInt64` | 9 |
+| `FuzzDecodeScValString` | `DecodeScValString` | 7 |
+| `FuzzDecodeScValSymbol` | `DecodeScValSymbol` | 7 |
+| `FuzzDecodeScValAddress` | `DecodeScValAddress` | 7 |
+| `FuzzDecodeScValStruct` | `DecodeScValStruct` | 8 |
+| `FuzzDecodeScValRoundTrip` | encode→unmarshal→decode round-trip | 6 |
 
 ### Code Style
 
@@ -233,38 +301,79 @@ go test ./...
 
 ## Troubleshooting
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
+See [Troubleshooting Guide](docs/troubleshooting/index.md) for common issues and solutions.
+
+## Operations
+
+### Health and Readiness Endpoints
+
+The API exposes two standard observability endpoints:
+
+- `GET /health` — Liveness probe. Always returns 200 with build metadata and uptime. Never reflects dependency state (safe for load-balancer health checks).
+- `GET /ready` — Readiness probe. Returns 200 only when **all configured dependencies** (PostgreSQL, NATS) are healthy; returns 503 with a per-dependency breakdown otherwise.
+
+**Example `/health` response:**
+
+```json
+{
+  "ok": true,
+  "service": "grainlify-api",
+  "version": "1.2.3",
+  "commit": "abc1234",
+  "build_time": "2025-06-22T12:00:00Z",
+  "uptime": "3h12m45s"
+}
+```
+
+**Example `/ready` response (healthy):**
+
+```json
+{
+  "ok": true,
+  "deps": [
+    { "name": "database", "ready": true, "status": "ok" },
+    { "name": "nats", "ready": true, "status": "CONNECTED" }
+  ]
+}
+```
+
+**Example `/ready` response (degraded):**
+
+```json
+{
+  "ok": false,
+  "deps": [
+    { "name": "database", "ready": true, "status": "ok" },
+    { "name": "nats", "ready": false, "status": "DISCONNECTED" }
+  ]
+}
+```
+
+> **Security:** Neither endpoint leaks DB URLs, NATS credentials, JWT secrets, or internal hostnames. The health endpoint only returns build-time metadata and uptime.
+
+### Build Metadata
+
+Build metadata is injected at compile time via `-ldflags`. Example build command:
+
+```sh
+go build -ldflags="\
+  -X main.Version=$(git describe --tags --always 2>/dev/null || echo dev) \
+  -X main.Commit=$(git rev-parse --short HEAD) \
+  -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o bin/grainlify-api ./cmd/api
+```
+
+When these flags are omitted, the defaults (`dev`, `none`, `unknown`) are used.
 
 ## Additional Documentation
 
-- [Development Guide](DEVELOPMENT.md) - Development setup and commands
-- [GitHub App Setup](GITHUB_APP_SETUP.md) - GitHub App configuration
-- [Quick Start](QUICK_START.md) - Quick development setup
-- [API Endpoints](API_ENDPOINTS.md) - Complete API reference
+Full documentation index: **[docs/README.md](docs/README.md)**
+
+- [Quick Start](docs/setup/quick-start.md) — Auto-reload development setup
+- [Development Guide](docs/setup/development.md) — Dev commands and logging
+- [GitHub App Setup](docs/github-app/setup.md) — GitHub App configuration
+- [API Endpoints](docs/reference/api-endpoints.md) — Complete API reference
 
 ## License
 
 [Add your license here]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

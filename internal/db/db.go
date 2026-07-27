@@ -2,18 +2,79 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type DB struct {
-	Pool *pgxpool.Pool
+// PoolConfig holds the tuneable pgxpool parameters.
+type PoolConfig struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
 }
 
-func Connect(ctx context.Context, dbURL string) (*DB, error) {
+// DBPool defines the database query interface for mockability.
+type DBPool interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	Ping(ctx context.Context) error
+	Close()
+	Config() *pgxpool.Config
+}
+
+type DB struct {
+	Pool DBPool
+}
+
+// ErrDBUnavailable identifies connection-level database failures.
+// Use errors.Is(err, ErrDBUnavailable) to branch on unavailable database
+// conditions without string-matching driver errors.
+var ErrDBUnavailable = errors.New("database unavailable")
+
+// DBUnavailableError wraps the underlying connection-level failure without
+// exposing DSN credentials in its public error text.
+type DBUnavailableError struct {
+	Op  string
+	Err error
+}
+
+func (e *DBUnavailableError) Error() string {
+	if e == nil || e.Op == "" {
+		return ErrDBUnavailable.Error()
+	}
+	return fmt.Sprintf("%s: %s", e.Op, ErrDBUnavailable)
+}
+
+func (e *DBUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *DBUnavailableError) Is(target error) bool {
+	return target == ErrDBUnavailable
+}
+
+func dbUnavailable(op string, err error) error {
+	return &DBUnavailableError{Op: op, Err: err}
+}
+
+// parsePgxConfig wraps pgxpool.ParseConfig for testability.
+func parsePgxConfig(dbURL string) (*pgxpool.Config, error) {
+	return pgxpool.ParseConfig(dbURL)
+}
+
+func Connect(ctx context.Context, dbURL string, pc PoolConfig) (*DB, error) {
 	if dbURL == "" {
 		return nil, fmt.Errorf("DB_URL is required")
 	}
@@ -38,10 +99,10 @@ func Connect(ctx context.Context, dbURL string) (*DB, error) {
 		"user", cfg.ConnConfig.User,
 	)
 
-	cfg.MaxConns = 10
-	cfg.MinConns = 0
-	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConns = pc.MaxConns
+	cfg.MinConns = pc.MinConns
+	cfg.MaxConnLifetime = pc.MaxConnLifetime
+	cfg.MaxConnIdleTime = pc.MaxConnIdleTime
 	cfg.HealthCheckPeriod = 30 * time.Second
 
 	slog.Info("creating database connection pool",
@@ -55,7 +116,7 @@ func Connect(ctx context.Context, dbURL string) (*DB, error) {
 			"error", err,
 			"error_type", fmt.Sprintf("%T", err),
 		)
-		return nil, fmt.Errorf("connect db: %w", err)
+		return nil, dbUnavailable("connect db", err)
 	}
 
 	slog.Info("database connection pool created, testing connection")
@@ -65,7 +126,7 @@ func Connect(ctx context.Context, dbURL string) (*DB, error) {
 			"error", err,
 			"error_type", fmt.Sprintf("%T", err),
 		)
-		return nil, fmt.Errorf("ping db: %w", err)
+		return nil, dbUnavailable("ping db", err)
 	}
 
 	slog.Info("database connection successful")
@@ -97,6 +158,16 @@ func maskDBURL(dbURL string) string {
 	return "***"
 }
 
+func (d *DB) Ping(ctx context.Context) error {
+	if d == nil || d.Pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	if err := d.Pool.Ping(ctx); err != nil {
+		return dbUnavailable("ping db", err)
+	}
+	return nil
+}
+
 func (d *DB) Close() {
 	if d == nil || d.Pool == nil {
 		return
@@ -104,6 +175,42 @@ func (d *DB) Close() {
 	d.Pool.Close()
 }
 
+// WithTx executes the given function within a database transaction using the provided pool.
+// It commits the transaction if fn returns nil, and rolls back if fn returns an error
+// or panics. If fn panics, the transaction is rolled back and the panic is re-raised.
+func WithTx(ctx context.Context, pool DBPool, fn func(pgx.Tx) error) (err error) {
+	if pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	if fn == nil {
+		return fmt.Errorf("transaction function cannot be nil")
+	}
 
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
 
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(ctx)
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback(ctx)
+		} else {
+			err = tx.Commit(ctx)
+		}
+	}()
 
+	err = fn(tx)
+	return err
+}
+
+// WithTx executes the given function within a database transaction using d.Pool.
+// It commits on nil error and rolls back on error or panic.
+func (d *DB) WithTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	if d == nil || d.Pool == nil {
+		return fmt.Errorf("db not configured")
+	}
+	return WithTx(ctx, d.Pool, fn)
+}

@@ -65,7 +65,7 @@ func TestLoggingRedaction(t *testing.T) {
 
 		app := fiber.New()
 		cfg := config.Config{GitHubWebhookSecret: "secret123"}
-		
+
 		// Use empty DB and Bus since we just want to test early handler logging
 		ghHandler := handlers.NewGitHubWebhooksHandler(cfg, nil, nil)
 		app.Post("/webhook", ghHandler.Receive())

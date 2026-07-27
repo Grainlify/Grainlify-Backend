@@ -94,10 +94,13 @@ func TestParsePagination_RejectsNegativeOffset(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(c *fiber.Ctx) error {
 		_, err := handlers.ParsePagination(c, 20, 100)
-		// ParsePagination sends the 400 response and returns nil error
-		// (since c.JSON() returns nil on success). The response is already
-		// written with the 400 status.
-		return err
+		// ParsePagination writes the 400 response itself and returns a
+		// non-nil sentinel so callers stop processing. The response is
+		// already committed, so return nil to avoid overwriting it.
+		if err != nil {
+			return nil
+		}
+		return nil
 	})
 
 	req := httptest.NewRequest("GET", "/test?offset=-1", nil)
@@ -163,6 +166,7 @@ func TestPaginatedResponse_Shape(t *testing.T) {
 	assert.Equal(t, 10, resp["limit"])
 	assert.Equal(t, 0, resp["offset"])
 	assert.Equal(t, 100, resp["total"])
+	assert.True(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_NilItems(t *testing.T) {
@@ -174,6 +178,7 @@ func TestPaginatedResponse_NilItems(t *testing.T) {
 	assert.Equal(t, 20, resp["limit"])
 	assert.Equal(t, 5, resp["offset"])
 	assert.Equal(t, 0, resp["total"])
+	assert.False(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_CustomItemsKey(t *testing.T) {
@@ -186,6 +191,7 @@ func TestPaginatedResponse_CustomItemsKey(t *testing.T) {
 	assert.Equal(t, 1, resp["offset"])
 	assert.Equal(t, 42, resp["total"])
 	assert.NotContains(t, resp, "items") // custom key, not "items"
+	assert.True(t, resp["has_more"].(bool))
 }
 
 func TestPaginatedResponse_RoundTrip(t *testing.T) {

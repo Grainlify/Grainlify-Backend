@@ -13,10 +13,31 @@ type Client struct {
 	UserAgent string
 }
 
+// NewClient returns a GitHub API client with two layers of automatic retry:
+//
+//  1. RateLimitTransport — retries 403/429 rate-limit responses, honoring the
+//     X-RateLimit-Reset and Retry-After headers returned by GitHub.
+//
+//  2. TransientRetryTransport — retries transient 5xx server errors and
+//     network-level failures (connection reset, timeout, etc.) with jittered
+//     exponential back-off. Only idempotent requests (GET/HEAD/OPTIONS) are
+//     retried by default; non-idempotent requests require the caller to set the
+//     "X-Retry-Non-Idempotent: true" request header to opt in explicitly.
+//
+// The two transports are composed so that each handles its own concern:
+//
+//	http.DefaultTransport
+//	  └─ RateLimitTransport           (inner — rate-limit signals)
+//	       └─ TransientRetryTransport (outer — 5xx / network errors)
 func NewClient() *Client {
+	rateLimitTransport := NewRateLimitTransport(nil)
+	transientTransport := NewTransientRetryTransport(rateLimitTransport)
 	return &Client{
-		HTTP:      &http.Client{Timeout: 10 * time.Second},
-		UserAgent: "patchwork-backend",
+		HTTP: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: transientTransport,
+		},
+		UserAgent: "grainlify-backend",
 	}
 }
 
@@ -105,26 +126,25 @@ func (c *Client) GetPrimaryEmail(ctx context.Context, accessToken string) (strin
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Find primary email
 	for _, email := range emails {
 		if email.Primary && email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no primary verified email, return first verified email
 	for _, email := range emails {
 		if email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no verified email, return first email
 	if len(emails) > 0 {
 		return emails[0].Email, nil
 	}
-	
+
 	return "", fmt.Errorf("no email found")
 }
-

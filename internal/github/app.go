@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -12,12 +13,48 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// ErrInstallationNotFound is the sentinel error returned by GetInstallationToken when
+// the GitHub App installation no longer exists (HTTP 404). Callers should detect this
+// condition with errors.Is(err, github.ErrInstallationNotFound) rather than matching
+// substrings in the error message.
+var ErrInstallationNotFound = errors.New("github app installation not found")
+
+// InstallationNotFoundError wraps ErrInstallationNotFound and carries the raw HTTP
+// status code so callers can distinguish a genuine 404 from other error types.
+type InstallationNotFoundError struct {
+	InstallationID string
+	StatusCode     int
+}
+
+func (e *InstallationNotFoundError) Error() string {
+	return fmt.Sprintf("github app installation %s not found (HTTP %d)", e.InstallationID, e.StatusCode)
+}
+
+// Unwrap makes errors.Is(err, ErrInstallationNotFound) work for wrapped errors.
+func (e *InstallationNotFoundError) Unwrap() error {
+	return ErrInstallationNotFound
+}
+
+// Clock provides the current time, allowing for testability
+type Clock interface {
+	Now() time.Time
+}
+
+// realClock uses time.Now()
+type realClock struct{}
+
+func (c realClock) Now() time.Time {
+	return time.Now()
+}
+
 // GitHubAppClient handles GitHub App API calls
 type GitHubAppClient struct {
 	AppID      string
 	PrivateKey *rsa.PrivateKey
 	HTTP       *http.Client
 	UserAgent  string
+	BaseURL    string
+	Clock      Clock
 }
 
 // NewGitHubAppClient creates a new GitHub App client
@@ -42,12 +79,23 @@ func NewGitHubAppClient(appID string, privateKeyPEM string) (*GitHubAppClient, e
 		PrivateKey: privateKey,
 		HTTP:       &http.Client{Timeout: 10 * time.Second},
 		UserAgent:  "grainlify-backend",
+		BaseURL:    "https://api.github.com",
+		Clock:      realClock{},
 	}, nil
 }
 
-// GenerateJWT generates a JWT token for GitHub App authentication
+// GenerateJWT generates a JWT token for GitHub App authentication.
+//
+// The token is signed with RS256 and includes the following claims:
+// - iat (issued at): Set to current time minus 60 seconds to account for clock skew
+// - exp (expiration): Set to current time plus 10 minutes
+// - iss (issuer): The GitHub App ID
+//
+// The 60-second clock skew offset ensures the token is accepted even if the
+// server's clock is slightly ahead of the client's clock. The 10-minute
+// expiration follows GitHub's requirements for App JWTs.
 func (c *GitHubAppClient) GenerateJWT() (string, error) {
-	now := time.Now()
+	now := c.Clock.Now()
 	claims := jwt.MapClaims{
 		"iat": now.Add(-60 * time.Second).Unix(), // Issued at time (allow 60s clock skew)
 		"exp": now.Add(10 * time.Minute).Unix(),   // Expires in 10 minutes
@@ -76,7 +124,7 @@ func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installation
 		return "", fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%s/access_tokens", installationID)
+	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", c.BaseURL, installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return "", err
@@ -97,6 +145,12 @@ func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installation
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
+		if resp.StatusCode == http.StatusNotFound {
+			return "", &InstallationNotFoundError{
+				InstallationID: installationID,
+				StatusCode:     resp.StatusCode,
+			}
+		}
 		return "", fmt.Errorf("failed to get installation token: status %d, error: %v", resp.StatusCode, errBody)
 	}
 
@@ -126,7 +180,7 @@ type InstallationRepository struct {
 
 // ListInstallationRepositories lists all repositories accessible to an installation
 func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, installationToken string) ([]InstallationRepository, error) {
-	url := "https://api.github.com/installation/repositories"
+	url := fmt.Sprintf("%s/installation/repositories", c.BaseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

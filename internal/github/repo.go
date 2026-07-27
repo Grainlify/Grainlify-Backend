@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/jagadeesh/grainlify/backend/internal/metrics"
 )
 
 type Repo struct {
@@ -27,7 +29,7 @@ type Repo struct {
 	ForksCount      int    `json:"forks_count"`
 	OpenIssuesCount int    `json:"open_issues_count"`
 	Description     string `json:"description"`
-	Permissions struct {
+	Permissions     struct {
 		Admin bool `json:"admin"`
 		Push  bool `json:"push"`
 		Pull  bool `json:"pull"`
@@ -35,12 +37,12 @@ type Repo struct {
 }
 
 type GitHubAPIError struct {
-	StatusCode        int
-	Message           string
-	DocumentationURL  string
+	StatusCode         int
+	Message            string
+	DocumentationURL   string
 	RateLimitRemaining *int
 	RateLimitResetUnix *int64
-	Body              string
+	Body               string
 }
 
 func (e *GitHubAPIError) Error() string {
@@ -88,12 +90,12 @@ func parseGitHubAPIError(resp *http.Response) error {
 	}
 
 	return &GitHubAPIError{
-		StatusCode:        resp.StatusCode,
-		Message:           payload.Message,
-		DocumentationURL:  payload.DocumentationURL,
+		StatusCode:         resp.StatusCode,
+		Message:            payload.Message,
+		DocumentationURL:   payload.DocumentationURL,
 		RateLimitRemaining: remaining,
 		RateLimitResetUnix: reset,
-		Body:              bodyStr,
+		Body:               bodyStr,
 	}
 }
 
@@ -178,9 +180,9 @@ func (c *Client) GetRepoLanguages(ctx context.Context, accessToken string, fullN
 
 // ReadmeResponse represents the GitHub API response for README content
 type ReadmeResponse struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Content string `json:"content"` // Base64 encoded
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Content  string `json:"content"` // Base64 encoded
 	Encoding string `json:"encoding"`
 }
 
@@ -232,6 +234,48 @@ func (c *Client) GetReadme(ctx context.Context, accessToken string, fullName str
 	return readme.Content, nil
 }
 
+// GetRepoWithCache fetches repo metadata, serving from cache when possible.
+//
+// Parameters:
+//   - cache: a *RepoCache shared across calls. If nil, the call falls through
+//     to GetRepo with no caching and no metrics.
+//     Cached entries are scoped by access-token fingerprint because GitHub's
+//     permissions field is token-specific authorization state.
+//   - bypass: when true the cache is skipped unconditionally and the fresh result
+//     is stored back into the cache. Use this for freshness-sensitive callers
+//     (e.g. right after a GitHub App install/uninstall) so subsequent normal
+//     callers immediately see the updated data.
+//
+// Metrics (grainlify_github_repo_metadata_cache_total):
+//   - "hit"    — entry was present and within TTL.
+//   - "miss"   — entry was absent or expired; a network fetch was performed.
+//   - "bypass" — caller forced a fresh fetch regardless of cache state.
+func (c *Client) GetRepoWithCache(ctx context.Context, accessToken, fullName string, cache *RepoCache, bypass bool) (Repo, error) {
+	if cache == nil || cache.ttl <= 0 {
+		return c.GetRepo(ctx, accessToken, fullName)
+	}
+
+	cacheKey := repoCacheScopedKey(accessToken, fullName)
+	if !bypass {
+		if repo, ok := cache.Get(cacheKey); ok {
+			metrics.RepoMetadataCache.WithLabelValues("hit").Inc()
+			return repo, nil
+		}
+		metrics.RepoMetadataCache.WithLabelValues("miss").Inc()
+	} else {
+		metrics.RepoMetadataCache.WithLabelValues("bypass").Inc()
+	}
+
+	return cache.do(cacheKey, func() (Repo, error) {
+		repo, err := c.GetRepo(ctx, accessToken, fullName)
+		if err != nil {
+			return Repo{}, err
+		}
+		cache.set(cacheKey, repo)
+		return repo, nil
+	})
+}
+
 func splitFullName(fullName string) (string, string, error) {
 	s := strings.TrimSpace(fullName)
 	parts := strings.Split(s, "/")
@@ -245,5 +289,3 @@ func splitFullName(fullName string) (string, string, error) {
 	}
 	return owner, repo, nil
 }
-
-

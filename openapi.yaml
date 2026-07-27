@@ -1,0 +1,2168 @@
+﻿openapi: 3.1.0
+info:
+  title: Grainlify API
+  description: |
+    The Grainlify backend API. Public endpoints are accessible without authentication.
+    Authenticated endpoints require a Bearer JWT token obtained via `/auth/verify`.
+    Admin endpoints additionally require the `admin` role.
+  version: 1.0.0
+  contact:
+    name: Grainlify OSS
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.grainlify.0xo.in
+    description: Production
+
+security: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from /auth/verify
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: not_found
+        message:
+          type: string
+          example: The requested resource was not found
+      required: [error]
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        per_page:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          example: 100
+        total_pages:
+          type: integer
+          example: 5
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+
+    RootResponse:
+      type: object
+      properties:
+        service:
+          type: string
+          example: grainlify-api
+        status:
+          type: string
+          example: running
+        version:
+          type: string
+          example: 1.0.0
+
+    NonceRequest:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: string
+          description: Ethereum wallet address
+          example: "0xAbC123..."
+
+    NonceResponse:
+      type: object
+      properties:
+        nonce:
+          type: string
+          example: "Please sign this message to verify your identity: abc123"
+
+    VerifyRequest:
+      type: object
+      required: [address, signature]
+      properties:
+        address:
+          type: string
+          example: "0xAbC123..."
+        signature:
+          type: string
+          example: "0xdeadbeef..."
+
+    VerifyResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT bearer token
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          type: string
+        github_username:
+          type: string
+          nullable: true
+        github_avatar_url:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [user, admin]
+        kyc_status:
+          type: string
+          enum: [none, pending, approved, rejected]
+        created_at:
+          type: string
+          format: date-time
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          type: string
+        github_username:
+          type: string
+          nullable: true
+        github_avatar_url:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        website:
+          type: string
+          nullable: true
+        twitter:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [user, admin]
+        kyc_status:
+          type: string
+          enum: [none, pending, approved, rejected]
+        created_at:
+          type: string
+          format: date-time
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        bio:
+          type: string
+        website:
+          type: string
+        twitter:
+          type: string
+
+    UpdateAvatarRequest:
+      type: object
+      required: [avatar_url]
+      properties:
+        avatar_url:
+          type: string
+          format: uri
+
+    ContributionCalendar:
+      type: object
+      properties:
+        weeks:
+          type: array
+          items:
+            type: object
+            properties:
+              week:
+                type: string
+                format: date
+              count:
+                type: integer
+
+    ContributionActivity:
+      type: object
+      properties:
+        activities:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              type:
+                type: string
+              project_name:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+
+    Ecosystem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        logo_url:
+          type: string
+          nullable: true
+        project_count:
+          type: integer
+        user_count:
+          type: integer
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    CreateEcosystemRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+        logo_url:
+          type: string
+
+    LeaderboardEntry:
+      type: object
+      properties:
+        rank:
+          type: integer
+        user_id:
+          type: string
+          format: uuid
+        github_username:
+          type: string
+        github_avatar_url:
+          type: string
+          nullable: true
+        total_points:
+          type: integer
+        contributions:
+          type: integer
+
+    LandingStats:
+      type: object
+      properties:
+        total_projects:
+          type: integer
+        total_contributors:
+          type: integer
+        total_contributions:
+          type: integer
+        total_ecosystems:
+          type: integer
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        github_url:
+          type: string
+        logo_url:
+          type: string
+          nullable: true
+        ecosystem_id:
+          type: string
+          format: uuid
+          nullable: true
+        owner_id:
+          type: string
+          format: uuid
+        is_verified:
+          type: boolean
+        open_issues_count:
+          type: integer
+        stars_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    CreateProjectRequest:
+      type: object
+      required: [github_url]
+      properties:
+        github_url:
+          type: string
+          format: uri
+          example: "https://github.com/org/repo"
+        ecosystem_id:
+          type: string
+          format: uuid
+
+    UpdateProjectMetadataRequest:
+      type: object
+      properties:
+        description:
+          type: string
+        logo_url:
+          type: string
+
+    Issue:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        title:
+          type: string
+        body:
+          type: string
+          nullable: true
+        state:
+          type: string
+          enum: [open, closed]
+        labels:
+          type: array
+          items:
+            type: string
+        html_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    PullRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        title:
+          type: string
+        state:
+          type: string
+          enum: [open, closed, merged]
+        html_url:
+          type: string
+        author_github:
+          type: string
+          nullable: true
+        merged_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    SyncJob:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    IssueApplicationRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Optional cover message
+
+    OpenSourceWeekEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    CreateOSWEventRequest:
+      type: object
+      required: [title, starts_at, ends_at]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+
+    AdminUser:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          type: string
+        github_username:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [user, admin]
+        kyc_status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    SetUserRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [user, admin]
+
+    KYCStartResponse:
+      type: object
+      properties:
+        session_url:
+          type: string
+          format: uri
+        session_id:
+          type: string
+
+    KYCStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [none, pending, approved, rejected]
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    FilterOptions:
+      type: object
+      properties:
+        ecosystems:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ecosystem'
+        labels:
+          type: array
+          items:
+            type: string
+
+paths:
+  /:
+    get:
+      summary: Root health check
+      operationId: getRoot
+      tags: [System]
+      responses:
+        '200':
+          description: Service info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootResponse'
+
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: getHealth
+      tags: [System]
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      summary: Readiness probe
+      operationId: getReady
+      tags: [System]
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/nonce:
+    post:
+      summary: Request a sign-in nonce for a wallet address
+      operationId: authNonce
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NonceRequest'
+      responses:
+        '200':
+          description: Nonce generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NonceResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/verify:
+    post:
+      summary: Verify wallet signature and obtain JWT
+      operationId: authVerify
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+        '401':
+          description: Invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/github/login/start:
+    get:
+      summary: Start GitHub OAuth login flow
+      operationId: githubLoginStart
+      tags: [Auth, GitHub]
+      responses:
+        '302':
+          description: Redirect to GitHub OAuth
+
+  /auth/github/login/callback:
+    get:
+      summary: GitHub OAuth unified callback
+      operationId: githubLoginCallback
+      tags: [Auth, GitHub]
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to frontend with token
+
+  /auth/github/start:
+    post:
+      summary: Start linking GitHub to existing account
+      operationId: githubLinkStart
+      tags: [Auth, GitHub]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: OAuth URL generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    format: uri
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/github/callback:
+    get:
+      summary: GitHub OAuth callback (legacy link flow)
+      operationId: githubLinkCallback
+      tags: [Auth, GitHub]
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to frontend
+
+  /auth/github/status:
+    get:
+      summary: Check GitHub link status for current user
+      operationId: githubStatus
+      tags: [Auth, GitHub]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: GitHub link status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linked:
+                    type: boolean
+                  github_username:
+                    type: string
+                    nullable: true
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/github/app/install/start:
+    post:
+      summary: Start GitHub App installation
+      operationId: githubAppInstallStart
+      tags: [Auth, GitHub]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Installation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    format: uri
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/github/app/install/callback:
+    get:
+      summary: GitHub App installation callback
+      operationId: githubAppInstallCallback
+      tags: [Auth, GitHub]
+      parameters:
+        - name: installation_id
+          in: query
+          schema:
+            type: string
+        - name: setup_action
+          in: query
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to frontend
+
+  /auth/kyc/start:
+    post:
+      summary: Start KYC verification session
+      operationId: kycStart
+      tags: [Auth, KYC]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: KYC session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KYCStartResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/kyc/status:
+    get:
+      summary: Get KYC verification status
+      operationId: kycStatus
+      tags: [Auth, KYC]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: KYC status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KYCStatusResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /me:
+    get:
+      summary: Get current authenticated user
+      operationId: getMe
+      tags: [User]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /me/github/resync:
+    post:
+      summary: Re-sync GitHub profile data for current user
+      operationId: resyncGitHub
+      tags: [User]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Resync triggered
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile:
+    get:
+      summary: Get full profile for authenticated user
+      operationId: getProfile
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/public:
+    get:
+      summary: Get public profile by address or username
+      operationId: getPublicProfile
+      tags: [Profile]
+      parameters:
+        - name: address
+          in: query
+          schema:
+            type: string
+        - name: username
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/calendar:
+    get:
+      summary: Get contribution calendar for authenticated user
+      operationId: getContributionCalendar
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Contribution calendar
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContributionCalendar'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/activity:
+    get:
+      summary: Get recent contribution activity for authenticated user
+      operationId: getContributionActivity
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Contribution activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContributionActivity'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/projects:
+    get:
+      summary: Get projects contributed to by authenticated user
+      operationId: getProfileProjects
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Projects contributed to
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/projects-led:
+    get:
+      summary: Get projects led by authenticated user
+      operationId: getProfileProjectsLed
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Projects led
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/update:
+    put:
+      summary: Update authenticated user profile
+      operationId: updateProfile
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/avatar:
+    put:
+      summary: Update authenticated user avatar
+      operationId: updateAvatar
+      tags: [Profile]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAvatarRequest'
+      responses:
+        '200':
+          description: Avatar updated
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /ecosystems:
+    get:
+      summary: List all active ecosystems
+      operationId: listEcosystems
+      tags: [Ecosystems]
+      responses:
+        '200':
+          description: List of ecosystems
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Ecosystem'
+
+  /ecosystems/{id}:
+    get:
+      summary: Get ecosystem by ID
+      operationId: getEcosystem
+      tags: [Ecosystems]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ecosystem detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ecosystem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /leaderboard:
+    get:
+      summary: Get public contributor leaderboard
+      operationId: getLeaderboard
+      tags: [Leaderboard]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: ecosystem_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Leaderboard entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LeaderboardEntry'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /stats/landing:
+    get:
+      summary: Get landing page statistics
+      operationId: getLandingStats
+      tags: [Stats]
+      responses:
+        '200':
+          description: Landing stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingStats'
+
+  /open-source-week/events:
+    get:
+      summary: List public Open Source Week events
+      operationId: listOSWEvents
+      tags: [Open Source Week]
+      responses:
+        '200':
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OpenSourceWeekEvent'
+
+  /open-source-week/events/{id}:
+    get:
+      summary: Get a public Open Source Week event by ID
+      operationId: getOSWEvent
+      tags: [Open Source Week]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Event detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenSourceWeekEvent'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects:
+    get:
+      summary: List public projects with optional filters
+      operationId: listProjects
+      tags: [Projects]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: ecosystem_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: label
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Search query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated projects list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+    post:
+      summary: Create a new project
+      operationId: createProject
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectRequest'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/recommended:
+    get:
+      summary: Get recommended projects
+      operationId: getRecommendedProjects
+      tags: [Projects]
+      responses:
+        '200':
+          description: Recommended projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+
+  /projects/filters:
+    get:
+      summary: Get available project filter options
+      operationId: getProjectFilters
+      tags: [Projects]
+      responses:
+        '200':
+          description: Filter options
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilterOptions'
+
+  /projects/mine:
+    get:
+      summary: Get projects owned by authenticated user
+      operationId: getMyProjects
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: My projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/pending-setup:
+    get:
+      summary: Get projects pending GitHub App setup
+      operationId: getPendingSetupProjects
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Projects pending setup
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}:
+    get:
+      summary: Get project by ID
+      operationId: getProject
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/metadata:
+    put:
+      summary: Update project metadata
+      operationId: updateProjectMetadata
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectMetadataRequest'
+      responses:
+        '200':
+          description: Metadata updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/public:
+    get:
+      summary: List public issues for a project
+      operationId: listPublicIssues
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Public issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Issue'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /projects/{id}/prs/public:
+    get:
+      summary: List public pull requests for a project
+      operationId: listPublicPRs
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Public PRs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PullRequest'
+
+  /projects/{id}/verify:
+    post:
+      summary: Trigger project verification
+      operationId: verifyProject
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Verification triggered
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/sync:
+    post:
+      summary: Enqueue a full sync job for a project
+      operationId: enqueueProjectSync
+      tags: [Projects, Sync]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '202':
+          description: Sync job enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/sync/jobs:
+    get:
+      summary: List sync jobs for a project
+      operationId: listSyncJobs
+      tags: [Projects, Sync]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Sync jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SyncJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues:
+    get:
+      summary: List issues for a project (authenticated)
+      operationId: listProjectIssues
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Issues list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Issue'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/prs:
+    get:
+      summary: List pull requests for a project (authenticated)
+      operationId: listProjectPRs
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: PRs list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PullRequest'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/events:
+    get:
+      summary: List events for a project
+      operationId: listProjectEvents
+      tags: [Projects]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/apply:
+    post:
+      summary: Apply to work on an issue
+      operationId: applyToIssue
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueApplicationRequest'
+      responses:
+        '200':
+          description: Application submitted
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/bot-comment:
+    post:
+      summary: Post a bot comment on an issue
+      operationId: postBotComment
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Bot comment posted
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/withdraw:
+    post:
+      summary: Withdraw application from an issue
+      operationId: withdrawFromIssue
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Application withdrawn
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/assign:
+    post:
+      summary: Assign a contributor to an issue
+      operationId: assignIssue
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Contributor assigned
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/unassign:
+    post:
+      summary: Unassign a contributor from an issue
+      operationId: unassignIssue
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Contributor unassigned
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{id}/issues/{number}/reject:
+    post:
+      summary: Reject an issue application
+      operationId: rejectIssueApplication
+      tags: [Issue Applications]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Application rejected
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/bootstrap:
+    post:
+      summary: Bootstrap the first admin user
+      operationId: adminBootstrap
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  description: Admin bootstrap token
+      responses:
+        '200':
+          description: Admin bootstrapped
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/users:
+    get:
+      summary: List all users (admin only)
+      operationId: adminListUsers
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Users list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminUser'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/users/{id}/role:
+    put:
+      summary: Set role for a user (admin only)
+      operationId: adminSetUserRole
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetUserRoleRequest'
+      responses:
+        '200':
+          description: Role updated
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/ecosystems:
+    get:
+      summary: List all ecosystems (admin)
+      operationId: adminListEcosystems
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Ecosystems list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Ecosystem'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Create ecosystem (admin)
+      operationId: adminCreateEcosystem
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEcosystemRequest'
+      responses:
+        '201':
+          description: Ecosystem created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ecosystem'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/ecosystems/{id}:
+    get:
+      summary: Get ecosystem by ID (admin)
+      operationId: adminGetEcosystem
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ecosystem detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ecosystem'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Update ecosystem (admin)
+      operationId: adminUpdateEcosystem
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEcosystemRequest'
+      responses:
+        '200':
+          description: Ecosystem updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ecosystem'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete ecosystem (admin)
+      operationId: adminDeleteEcosystem
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Ecosystem deleted
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/open-source-week/events:
+    get:
+      summary: List Open Source Week events (admin)
+      operationId: adminListOSWEvents
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Events list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OpenSourceWeekEvent'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Create Open Source Week event (admin)
+      operationId: adminCreateOSWEvent
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOSWEventRequest'
+      responses:
+        '201':
+          description: Event created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenSourceWeekEvent'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/open-source-week/events/{id}:
+    delete:
+      summary: Delete Open Source Week event (admin)
+      operationId: adminDeleteOSWEvent
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Event deleted
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /webhooks/github:
+    post:
+      summary: Receive GitHub webhook events
+      operationId: receiveGitHubWebhook
+      tags: [Webhooks]
+      parameters:
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: GitHub webhook payload (varies by event type)
+      responses:
+        '200':
+          description: Webhook received
+        '400':
+          description: Invalid payload or signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /webhooks/didit:
+    get:
+      summary: Didit KYC callback redirect
+      operationId: receiveDiditWebhookGet
+      tags: [Webhooks]
+      responses:
+        '302':
+          description: Redirect after KYC completion
+    post:
+      summary: Receive Didit KYC webhook events
+      operationId: receiveDiditWebhookPost
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Didit webhook payload
+      responses:
+        '200':
+          description: Webhook received
+
+  /docs:
+    get:
+      summary: Interactive API documentation (Swagger UI)
+      operationId: getDocs
+      tags: [System]
+      responses:
+        '200':
+          description: Swagger UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      summary: Raw OpenAPI 3.1 specification
+      operationId: getOpenAPISpec
+      tags: [System]
+      responses:
+        '200':
+          description: OpenAPI YAML spec
+          content:
+            application/yaml:
+              schema:
+                type: string

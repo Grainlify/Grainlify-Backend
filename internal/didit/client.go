@@ -4,25 +4,61 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 const BaseURL = "https://verification.didit.me/v2"
 
+var (
+	ErrMalformedResponse = errors.New("malformed didit response")
+	ErrSessionNotFound   = errors.New("didit session not found")
+)
+
+// APIError represents a non-2xx response from the Didit API.
+// The raw response body is available via Body but is intentionally
+// excluded from Error() to prevent PII leaking into logs.
+type APIError struct {
+	StatusCode int
+	Message    string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("didit API error: status %d, error: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("didit API error: status %d", e.StatusCode)
+}
+
+func (e *APIError) Is(target error) bool {
+	if target == ErrSessionNotFound && e.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return false
+}
+
 type Client struct {
-	HTTP      *http.Client
-	APIKey    string
-	UserAgent string
+	HTTP         *http.Client
+	APIKey       string
+	UserAgent    string
+	BaseURL      string
+	PollInterval time.Duration
+	MaxPolls     int
 }
 
 func NewClient(apiKey string) *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		APIKey:    apiKey,
-		UserAgent: "patchwork-backend",
+		HTTP:         &http.Client{Timeout: 30 * time.Second},
+		APIKey:       apiKey,
+		UserAgent:    "grainlify-backend",
+		BaseURL:      BaseURL,
+		PollInterval: 2 * time.Second,
+		MaxPolls:     15,
 	}
 }
 
@@ -41,8 +77,8 @@ type CreateSessionResponse struct {
 
 // CreateSession creates a new KYC verification session
 func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (CreateSessionResponse, error) {
-	url := BaseURL + "/session/"
-	
+	url := strings.TrimRight(c.baseURL(), "/") + "/session/"
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return CreateSessionResponse{}, fmt.Errorf("marshal request: %w", err)
@@ -79,7 +115,7 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (C
 			Detail  string `json:"detail"`
 		}
 		_ = json.Unmarshal(bodyBytes, &errBody)
-		
+
 		// Build error message with all available information
 		errMsg := errBody.Error
 		if errMsg == "" {
@@ -89,18 +125,15 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (C
 			errMsg = errBody.Detail
 		}
 		if errMsg == "" {
-			errMsg = string(bodyBytes)
+			errMsg = "unexpected error"
 		}
-		if errMsg == "" {
-			errMsg = "unknown error"
-		}
-		
-		return CreateSessionResponse{}, fmt.Errorf("didit create session failed: status %d, error: %s, body: %s", resp.StatusCode, errMsg, string(bodyBytes))
+
+		return CreateSessionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errMsg, Body: string(bodyBytes)}
 	}
 
 	var result CreateSessionResponse
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return CreateSessionResponse{}, fmt.Errorf("decode response: %w, body: %s", err, string(bodyBytes))
+		return CreateSessionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("decode response: %s", err), Body: string(bodyBytes)}
 	}
 
 	return result, nil
@@ -116,9 +149,37 @@ type SessionDecisionResponse struct {
 	ExtraFields map[string]interface{} `json:"-"`
 }
 
-// GetSessionDecision retrieves the verification decision for a session
+// GetSessionDecision retrieves the verification decision for a session and polls until Didit returns a terminal status.
 func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (SessionDecisionResponse, error) {
-	url := fmt.Sprintf("%s/session/%s/decision/", BaseURL, sessionID)
+	maxPolls := c.MaxPolls
+	if maxPolls <= 0 {
+		maxPolls = 1
+	}
+
+	var last SessionDecisionResponse
+	for attempt := 0; attempt < maxPolls; attempt++ {
+		decision, err := c.getSessionDecisionOnce(ctx, sessionID)
+		if err != nil {
+			return SessionDecisionResponse{}, err
+		}
+		if isTerminalStatus(decision.Status) {
+			return decision, nil
+		}
+		last = decision
+
+		if attempt == maxPolls-1 {
+			break
+		}
+		if err := sleepContext(ctx, c.pollInterval()); err != nil {
+			return SessionDecisionResponse{}, err
+		}
+	}
+
+	return last, nil
+}
+
+func (c *Client) getSessionDecisionOnce(ctx context.Context, sessionID string) (SessionDecisionResponse, error) {
+	url := fmt.Sprintf("%s/session/%s/decision/", strings.TrimRight(c.baseURL(), "/"), sessionID)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -144,16 +205,32 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody struct {
-			Error string `json:"error"`
+			Error   string `json:"error"`
+			Message string `json:"message"`
+			Detail  string `json:"detail"`
 		}
 		_ = json.Unmarshal(bodyBytes, &errBody)
-		return SessionDecisionResponse{}, fmt.Errorf("didit get decision failed: status %d, error: %s, body: %s", resp.StatusCode, errBody.Error, string(bodyBytes))
+
+		errMsg := errBody.Error
+		if errMsg == "" {
+			errMsg = errBody.Message
+		}
+		if errMsg == "" {
+			errMsg = errBody.Detail
+		}
+		if errBody.Message != "" && errBody.Message != errMsg {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, errBody.Message)
+		}
+		if errMsg == "" {
+			errMsg = "unexpected error"
+		}
+		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: errMsg, Body: string(bodyBytes)}
 	}
 
 	// First, unmarshal into a generic map to capture all fields
 	var rawMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
-		return SessionDecisionResponse{}, fmt.Errorf("decode response: %w, body: %s", err, string(bodyBytes))
+		return SessionDecisionResponse{}, &APIError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("decode response: %s", err), Body: string(bodyBytes)}
 	}
 
 	// Extract known fields
@@ -162,8 +239,10 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 		ExtraFields: make(map[string]interface{}),
 	}
 
-	if status, ok := rawMap["status"].(string); ok {
+	if status, ok := rawMap["status"].(string); ok && strings.TrimSpace(status) != "" {
 		result.Status = status
+	} else {
+		return SessionDecisionResponse{}, fmt.Errorf("%w: missing status", ErrMalformedResponse)
 	}
 	if decision, ok := rawMap["decision"].(map[string]interface{}); ok {
 		result.Decision = decision
@@ -182,3 +261,36 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 	return result, nil
 }
 
+func (c *Client) baseURL() string {
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return BaseURL
+	}
+	return c.BaseURL
+}
+
+func (c *Client) pollInterval() time.Duration {
+	if c.PollInterval <= 0 {
+		return 2 * time.Second
+	}
+	return c.PollInterval
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isTerminalStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "approved", "verified", "rejected", "declined", "expired", "error", "failed":
+		return true
+	default:
+		return false
+	}
+}

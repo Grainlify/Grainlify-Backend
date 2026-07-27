@@ -17,10 +17,14 @@ package ingest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/ingest"
@@ -47,7 +51,7 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 	}
 
 	// Apply all migrations so the schema is up to date.
-	if err := migrate.Up(ctx, pool); err != nil {
+	if err := migrate.Up(ctx, pool, true); err != nil {
 		pool.Close()
 		t.Fatalf("migrate.Up: %v", err)
 	}
@@ -145,6 +149,205 @@ func TestIngest_Idempotency(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id = $1`, ev.DeliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, ev.DeliveryID)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Replay-attack protection – same delivery ID twice is a no-op on second call
+// ---------------------------------------------------------------------------
+
+func TestIngest_ReplayProtection_SameDeliveryIDNoOp(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	deliveryID := "replay-test-" + time.Now().Format("20060102150405.000000000")
+	ev := events.GitHubWebhookReceived{
+		DeliveryID:   deliveryID,
+		Event:        "ping",
+		Payload:      json.RawMessage(`{"zen":"Keep it logically awesome."}`),
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	var firstCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&firstCount); err != nil {
+		t.Fatalf("count dedup: %v", err)
+	}
+	if firstCount != 1 {
+		t.Errorf("expected 1 dedup record after first ingest, got %d", firstCount)
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("second Ingest: %v", err)
+	}
+
+	var totalCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&totalCount); err != nil {
+		t.Fatalf("count dedup after replay: %v", err)
+	}
+	if totalCount != 1 {
+		t.Errorf("expected 1 dedup record after replay, got %d", totalCount)
+	}
+
+	// Second replay should not create a github_events row either.
+	var ghEventCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM github_events WHERE delivery_id = $1`, deliveryID,
+	).Scan(&ghEventCount); err != nil {
+		t.Fatalf("count github_events: %v", err)
+	}
+	if ghEventCount != 1 {
+		t.Errorf("expected 1 github_events row, got %d", ghEventCount)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, deliveryID)
+	})
+}
+
+func TestIngest_ReplayProtection_DifferentDeliveryIDsProcessed(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	ts := time.Now().Format("20060102150405.000000000")
+	ids := []string{"replay-diff-" + ts + "-1", "replay-diff-" + ts + "-2"}
+	for _, id := range ids {
+		ev := events.GitHubWebhookReceived{
+			DeliveryID: id,
+			Event:      "ping",
+			Payload:    json.RawMessage(`{"zen":"Keep it logically awesome."}`),
+		}
+		if err := ing.Ingest(ctx, ev); err != nil {
+			t.Fatalf("Ingest %q: %v", id, err)
+		}
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id LIKE $1`, "replay-diff-"+ts+"%",
+	).Scan(&count); err != nil {
+		t.Fatalf("count dedup: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 dedup records, got %d", count)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id LIKE $1`, "replay-diff-"+ts+"%")
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id LIKE $1`, "replay-diff-"+ts+"%")
+	})
+}
+
+func TestIngest_ReplayProtection_FirstTimeDeliveryProcessesNormally(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	deliveryID := "replay-normal-" + time.Now().Format("20060102150405.000000000")
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: deliveryID,
+		Event:      "ping",
+		Payload:    json.RawMessage(`{"zen":"Approachable is better than simple."}`),
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	var dedupCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&dedupCount); err != nil {
+		t.Fatalf("count dedup: %v", err)
+	}
+	if dedupCount != 1 {
+		t.Errorf("expected 1 dedup record, got %d", dedupCount)
+	}
+
+	var ghCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM github_events WHERE delivery_id = $1`, deliveryID,
+	).Scan(&ghCount); err != nil {
+		t.Fatalf("count github_events: %v", err)
+	}
+	if ghCount != 1 {
+		t.Errorf("expected 1 github_events record, got %d", ghCount)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, deliveryID)
+	})
+}
+
+func TestIngest_ReplayProtection_CleanupDedup(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	deliveryID := "replay-cleanup-" + time.Now().Format("20060102150405.000000000")
+	if err := ing.Ingest(ctx, events.GitHubWebhookReceived{
+		DeliveryID: deliveryID,
+		Event:      "ping",
+		Payload:    json.RawMessage(`{"zen":"test"}`),
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Artificially age the record so cleanup removes it.
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhook_delivery_dedup SET created_at = now() - INTERVAL '25 hours' WHERE delivery_id = $1`,
+		deliveryID,
+	); err != nil {
+		t.Fatalf("age dedup record: %v", err)
+	}
+
+	if err := ing.CleanupDedup(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("CleanupDedup: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count after cleanup: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 records after cleanup, got %d", count)
+	}
+
+	// After cleanup, the same delivery ID should be processable again.
+	if err := ing.Ingest(ctx, events.GitHubWebhookReceived{
+		DeliveryID: deliveryID,
+		Event:      "ping",
+		Payload:    json.RawMessage(`{"zen":"test"}`),
+	}); err != nil {
+		t.Fatalf("Ingest after cleanup: %v", err)
+	}
+
+	var reIngestedCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&reIngestedCount); err != nil {
+		t.Fatalf("count after re-ingest: %v", err)
+	}
+	if reIngestedCount != 1 {
+		t.Errorf("expected 1 record after re-ingest, got %d", reIngestedCount)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, deliveryID)
 	})
 }
@@ -430,3 +633,135 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, ev.DeliveryID)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Mock DBPool unit tests for handleInstallationEvent added branch error & warning logging
+// ---------------------------------------------------------------------------
+
+type mockDBPool struct {
+	execFunc func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (m *mockDBPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if m.execFunc != nil {
+		return m.execFunc(ctx, sql, args...)
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+
+func (m *mockDBPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, nil
+}
+
+func (m *mockDBPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return nil
+}
+
+func (m *mockDBPool) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+
+func (m *mockDBPool) Ping(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockDBPool) Close() {}
+
+func (m *mockDBPool) Config() *pgxpool.Config {
+	return nil
+}
+
+func TestIngest_InstallationRepositoriesAdded_ExecError(t *testing.T) {
+	ctx := context.Background()
+	var executedRepos []string
+
+	mockPool := &mockDBPool{
+		execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			if strings.Contains(sql, "UPDATE projects") {
+				repoName := args[0].(string)
+				executedRepos = append(executedRepos, repoName)
+				if repoName == "acme/failing-repo" {
+					return pgconn.CommandTag{}, errors.New("db connection failure")
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	}
+
+	ing := &ingest.GitHubWebhookIngestor{Pool: mockPool}
+
+	payload := mustJSON(t, map[string]any{
+		"action": "added",
+		"installation": map[string]any{
+			"id": json.Number("123"),
+		},
+		"repositories_added": []map[string]any{
+			{"full_name": "acme/failing-repo"},
+			{"full_name": "acme/successful-repo"},
+		},
+	})
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: "",
+		Event:      "installation_repositories",
+		Action:     "added",
+		Payload:    payload,
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Ingest returned error: %v", err)
+	}
+
+	if len(executedRepos) != 2 {
+		t.Fatalf("expected 2 Exec calls for repos, got %d", len(executedRepos))
+	}
+	if executedRepos[0] != "acme/failing-repo" || executedRepos[1] != "acme/successful-repo" {
+		t.Errorf("unexpected executed repos order/content: %v", executedRepos)
+	}
+}
+
+func TestIngest_InstallationRepositoriesAdded_ZeroRowsAffected(t *testing.T) {
+	ctx := context.Background()
+	var executedRepos []string
+
+	mockPool := &mockDBPool{
+		execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			if strings.Contains(sql, "UPDATE projects") {
+				repoName := args[0].(string)
+				executedRepos = append(executedRepos, repoName)
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			}
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		},
+	}
+
+	ing := &ingest.GitHubWebhookIngestor{Pool: mockPool}
+
+	payload := mustJSON(t, map[string]any{
+		"action": "added",
+		"installation": map[string]any{
+			"id": json.Number("123"),
+		},
+		"repositories_added": []map[string]any{
+			{"full_name": "acme/nonexistent-repo"},
+		},
+	})
+	ev := events.GitHubWebhookReceived{
+		DeliveryID: "",
+		Event:      "installation_repositories",
+		Action:     "added",
+		Payload:    payload,
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("Ingest returned error: %v", err)
+	}
+
+	if len(executedRepos) != 1 {
+		t.Fatalf("expected 1 Exec call for repo, got %d", len(executedRepos))
+	}
+	if executedRepos[0] != "acme/nonexistent-repo" {
+		t.Errorf("unexpected executed repo: %s", executedRepos[0])
+	}
+}
+

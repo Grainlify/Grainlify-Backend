@@ -3,22 +3,35 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 )
 
 type GitHubWebhookIngestor struct {
-	Pool *pgxpool.Pool
+	Pool db.DBPool
 }
 
 func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebhookReceived) error {
 	if i == nil || i.Pool == nil {
 		return nil
+	}
+
+	if e.DeliveryID != "" {
+		tag, err := i.Pool.Exec(ctx, `
+INSERT INTO webhook_delivery_dedup (delivery_id) VALUES ($1)
+ON CONFLICT (delivery_id) DO NOTHING
+`, e.DeliveryID)
+		if err != nil {
+			slog.Warn("failed to check delivery dedup", "delivery_id", e.DeliveryID, "error", err)
+			return fmt.Errorf("check delivery dedup: %w", err)
+		} else if tag.RowsAffected() == 0 {
+			return nil
+		}
 	}
 
 	// Parse minimal envelope for mapping to project and snapshot upserts.
@@ -193,10 +206,14 @@ WHERE github_full_name = $1
 	} else if action == "added" && e.Event == "installation_repositories" {
 		// Repositories were added back to installation - restore them
 		if installationPayload.RepositoriesAdded != nil {
+			slog.Info("adding repositories to installation",
+				"count", len(installationPayload.RepositoriesAdded),
+				"installation_id", installationID,
+			)
 			for _, repo := range installationPayload.RepositoriesAdded {
 				repoFullName := strings.TrimSpace(repo.FullName)
 				if repoFullName != "" {
-					_, _ = i.Pool.Exec(ctx, `
+					result, err := i.Pool.Exec(ctx, `
 UPDATE projects
 SET deleted_at = NULL,
     status = 'verified',
@@ -205,6 +222,22 @@ WHERE github_full_name = $1
   AND github_app_installation_id = $2
   AND deleted_at IS NOT NULL
 `, repoFullName, installationID)
+					if err != nil {
+						slog.Error("failed to restore project", "repo", repoFullName, "error", err)
+						continue
+					}
+					rowsAffected := result.RowsAffected()
+					if rowsAffected > 0 {
+						slog.Info("restored project for installation",
+							"repo", repoFullName,
+							"installation_id", installationID,
+						)
+					} else {
+						slog.Warn("no project found to restore",
+							"repo", repoFullName,
+							"installation_id", installationID,
+						)
+					}
 				}
 			}
 		}
@@ -266,13 +299,23 @@ type ghInstallationInfo struct {
 	ID json.Number `json:"id"` // GitHub returns installation ID as a number
 }
 
+// CleanupDedup deletes dedup records older than the given retention duration.
+func (i *GitHubWebhookIngestor) CleanupDedup(ctx context.Context, retention time.Duration) error {
+	if i == nil || i.Pool == nil {
+		return nil
+	}
+	_, err := i.Pool.Exec(ctx, `
+DELETE FROM webhook_delivery_dedup WHERE created_at < now() - make_interval(secs => $1)
+`, int64(retention.Seconds()))
+	return err
+}
+
 func nullIfEmpty(s string) any {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	return s
 }
-
 
 
 

@@ -3,6 +3,7 @@ package soroban
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
@@ -50,6 +51,7 @@ func (tb *TransactionBuilder) BuildAndSubmit(ctx context.Context, operations []t
 			IncrementSequenceNum: true,
 			BaseFee:              txnbuild.MinBaseFee,
 			Operations:           operations,
+			Preconditions:        txnbuild.Preconditions{TimeBounds: txnbuild.NewTimeout(60)},
 		},
 	)
 	if err != nil {
@@ -198,23 +200,15 @@ func (tb *TransactionBuilder) WaitForConfirmation(ctx context.Context, txHash st
 func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 	// Contract ID is typically a hex string (64 chars) or base64
 	var hash xdr.Hash
-	
+
 	// Try hex first (64 hex chars = 32 bytes)
 	if len(contractID) == 64 {
-		// Parse hex string
-		var err error
-		for i := 0; i < 32; i++ {
-			var b byte
-			_, err = fmt.Sscanf(contractID[i*2:i*2+2], "%02x", &b)
-			if err != nil {
-				break
-			}
-			hash[i] = b
-		}
-		if err == nil {
+		decoded, err := hex.DecodeString(contractID)
+		if err == nil && len(decoded) == 32 {
+			copy(hash[:], decoded)
 			contractId := xdr.ContractId(hash)
 			return xdr.ScAddress{
-				Type:        xdr.ScAddressTypeScAddressTypeContract,
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
 				ContractId: &contractId,
 			}, nil
 		}
@@ -232,7 +226,7 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 
 	contractId := xdr.ContractId(hash)
 	return xdr.ScAddress{
-		Type:        xdr.ScAddressTypeScAddressTypeContract,
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
 		ContractId: &contractId,
 	}, nil
 }

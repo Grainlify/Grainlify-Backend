@@ -3,6 +3,8 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,11 +12,22 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestIssueAndParseJWTRoundTrip(t *testing.T) {
-	secret := "test-secret"
-	userID := uuid.New()
+func withJWTNow(t *testing.T, now time.Time) {
+	t.Helper()
+	original := jwtNow
+	jwtNow = func() time.Time { return now }
+	t.Cleanup(func() { jwtNow = original })
+}
 
-	token, err := IssueJWT(secret, userID, "admin", WalletTypeEVM, "0xabc", time.Hour)
+func TestIssueAndParseJWTClaims(t *testing.T) {
+	issuedAt := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	withJWTNow(t, issuedAt)
+
+	secret := "unit-test-jwt-secret"
+	userID := uuid.MustParse("d1dd49d6-1f8b-4d33-a8ac-f0a507c6700f")
+	ttl := 30 * time.Minute
+
+	token, err := IssueJWT(secret, userID, "admin", WalletTypeEVM, "0xabc", ttl)
 	if err != nil {
 		t.Fatalf("IssueJWT returned error: %v", err)
 	}
@@ -36,10 +49,72 @@ func TestIssueAndParseJWTRoundTrip(t *testing.T) {
 	if claims.Address != "0xabc" {
 		t.Fatalf("address = %q, want 0xabc", claims.Address)
 	}
+	if claims.IssuedAt == nil || !claims.IssuedAt.Time.Equal(issuedAt) {
+		t.Fatalf("issued_at = %v, want %s", claims.IssuedAt, issuedAt)
+	}
+	if claims.ExpiresAt == nil || !claims.ExpiresAt.Time.Equal(issuedAt.Add(ttl)) {
+		t.Fatalf("expires_at = %v, want %s", claims.ExpiresAt, issuedAt.Add(ttl))
+	}
+}
+
+func TestParseJWTExpiryBoundary(t *testing.T) {
+	issuedAt := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	secret := "unit-test-jwt-secret"
+	userID := uuid.New()
+	withJWTNow(t, issuedAt)
+	token, err := IssueJWT(secret, userID, "user", WalletTypeEVM, "0xabc", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueJWT returned error: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		now       time.Time
+		wantError error
+	}{
+		{
+			name: "valid one second before expiration",
+			now:  issuedAt.Add(time.Minute - time.Second),
+		},
+		{
+			name:      "expired exactly at expiration boundary with no clock skew leeway",
+			now:       issuedAt.Add(time.Minute),
+			wantError: ErrJWTExpired,
+		},
+		{
+			name:      "expired after expiration",
+			now:       issuedAt.Add(time.Minute + time.Second),
+			wantError: ErrJWTExpired,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withJWTNow(t, tt.now)
+			claims, err := ParseJWT(secret, token)
+			if tt.wantError != nil {
+				if !errors.Is(err, tt.wantError) {
+					t.Fatalf("ParseJWT error = %v, want %v", err, tt.wantError)
+				}
+				if claims != nil {
+					t.Fatalf("claims = %#v, want nil", claims)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseJWT returned error: %v", err)
+			}
+			if claims.Subject != userID.String() {
+				t.Fatalf("subject = %q, want %q", claims.Subject, userID.String())
+			}
+		})
+	}
 }
 
 func TestIssueJWTDefaultTTL(t *testing.T) {
-	before := time.Now()
+	issuedAt := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	withJWTNow(t, issuedAt)
+
 	token, err := IssueJWT("test-secret", uuid.New(), "user", WalletTypeEVM, "0xabc", 0)
 	if err != nil {
 		t.Fatalf("IssueJWT returned error: %v", err)
@@ -49,31 +124,69 @@ func TestIssueJWTDefaultTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseJWT returned error: %v", err)
 	}
-	if claims.ExpiresAt == nil {
-		t.Fatal("ExpiresAt is nil")
-	}
-
-	minExpiry := before.Add(14 * time.Minute)
-	maxExpiry := time.Now().Add(16 * time.Minute)
-	if claims.ExpiresAt.Time.Before(minExpiry) || claims.ExpiresAt.Time.After(maxExpiry) {
-		t.Fatalf("default expiry = %s, want between %s and %s", claims.ExpiresAt.Time, minExpiry, maxExpiry)
+	if claims.ExpiresAt == nil || !claims.ExpiresAt.Time.Equal(issuedAt.Add(15*time.Minute)) {
+		t.Fatalf("default expiry = %v, want %s", claims.ExpiresAt, issuedAt.Add(15*time.Minute))
 	}
 }
 
-func TestJWTRejectsInvalidSecretsAndTokens(t *testing.T) {
-	if _, err := IssueJWT("", uuid.New(), "user", WalletTypeEVM, "0xabc", time.Minute); err == nil {
-		t.Fatal("IssueJWT with empty secret returned nil error")
-	}
-	if _, err := ParseJWT("", "token"); err == nil {
-		t.Fatal("ParseJWT with empty secret returned nil error")
-	}
-
-	token, err := IssueJWT("right-secret", uuid.New(), "user", WalletTypeEVM, "0xabc", time.Minute)
+func TestParseJWTRejectsInvalidTokens(t *testing.T) {
+	secret := "right-secret"
+	withJWTNow(t, time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC))
+	token, err := IssueJWT(secret, uuid.New(), "user", WalletTypeEVM, "0xabc", time.Minute)
 	if err != nil {
 		t.Fatalf("IssueJWT returned error: %v", err)
 	}
-	if _, err := ParseJWT("wrong-secret", token); err == nil {
-		t.Fatal("ParseJWT with wrong secret returned nil error")
+	tamperedToken := token[:strings.LastIndex(token, ".")+1] + "tampered-signature"
+
+	tests := []struct {
+		name    string
+		secret  string
+		token   string
+		wantErr error
+	}{
+		{
+			name:    "empty parse secret",
+			secret:  "",
+			token:   token,
+			wantErr: ErrJWTInvalid,
+		},
+		{
+			name:    "wrong secret rejects signature",
+			secret:  "wrong-secret",
+			token:   token,
+			wantErr: ErrJWTInvalid,
+		},
+		{
+			name:    "tampered signature",
+			secret:  secret,
+			token:   tamperedToken,
+			wantErr: ErrJWTInvalid,
+		},
+		{
+			name:    "malformed token",
+			secret:  secret,
+			token:   "not-a-jwt",
+			wantErr: ErrJWTInvalid,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseJWT(tt.secret, tt.token)
+			if tt.secret == "" {
+				if err == nil {
+					t.Fatal("ParseJWT returned nil error")
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ParseJWT error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	if _, err := IssueJWT("", uuid.New(), "user", WalletTypeEVM, "0xabc", time.Minute); err == nil {
+		t.Fatal("IssueJWT with empty secret returned nil error")
 	}
 }
 
@@ -90,8 +203,8 @@ func TestParseJWTRejectsUnexpectedSigningMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create none token: %v", err)
 	}
-	if _, err := ParseJWT("test-secret", noneToken); err == nil {
-		t.Fatal("ParseJWT accepted alg=none token")
+	if _, err := ParseJWT("test-secret", noneToken); !errors.Is(err, ErrJWTInvalid) {
+		t.Fatalf("ParseJWT alg=none error = %v, want %v", err, ErrJWTInvalid)
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -102,7 +215,7 @@ func TestParseJWTRejectsUnexpectedSigningMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create RS256 token: %v", err)
 	}
-	if _, err := ParseJWT("test-secret", rsToken); err == nil {
-		t.Fatal("ParseJWT accepted RS256 token")
+	if _, err := ParseJWT("test-secret", rsToken); !errors.Is(err, ErrJWTInvalid) {
+		t.Fatalf("ParseJWT RS256 error = %v, want %v", err, ErrJWTInvalid)
 	}
 }
