@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -197,12 +198,12 @@ SELECT
 FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
-`, projectID).Scan(
+	`, projectID).Scan(
 			&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount,
 			&openIssuesCount, &openPRsCount, &contributorsCount,
 			&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug,
 		)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
 		}
 		if err != nil {

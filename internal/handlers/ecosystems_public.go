@@ -43,10 +43,8 @@ FROM ecosystems e
 WHERE e.id = $1 AND e.status = 'active'
 `, ecoID).Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &about, &linksJSON, &keyAreasJSON, &technologiesJSON)
 		if err != nil {
-			if err.Error() == "no rows in result set" {
-				return httpx.RespondError(c, fiber.StatusNotFound, "ecosystem_not_found", "")
-			}
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_lookup_failed", "")
+			status, code := ecosystemLookupFailure(err)
+			return c.Status(status).JSON(fiber.Map{"error": code})
 		}
 
 		var links, keyAreas, technologies interface{}

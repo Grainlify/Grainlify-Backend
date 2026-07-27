@@ -3,9 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
-	"net/url"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -132,10 +132,8 @@ FROM ecosystems e
 WHERE e.id = $1
 `, ecoID).Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &about, &linksJSON, &keyAreasJSON, &technologiesJSON)
 		if err != nil {
-			if err.Error() == "no rows in result set" {
-				return httpx.RespondError(c, fiber.StatusNotFound, "ecosystem_not_found", "")
-			}
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "ecosystem_lookup_failed", "")
+			status, code := ecosystemLookupFailure(err)
+			return c.Status(status).JSON(fiber.Map{"error": code})
 		}
 		var links, keyAreas, technologies interface{}
 		if len(linksJSON) > 0 {
@@ -185,34 +183,34 @@ type ecosystemUpsertRequest struct {
 // validateEcosystemInput validates the upsert request.
 // isUpdate indicates whether this is an update (partial) request.
 func validateEcosystemInput(req *ecosystemUpsertRequest, isUpdate bool) error {
-    // Name is required on create.
-    name := strings.TrimSpace(req.Name)
-    if !isUpdate && name == "" {
-        return errors.New("name_required")
-    }
-    if name != "" {
-        // Ensure generated slug is not empty.
-        slug := normalizeSlug(name)
-        if slug == "" {
-            return errors.New("invalid_slug")
-        }
-    }
-    // Description length limit (example: 1000 chars).
-    if len(req.Description) > 1000 {
-        return errors.New("description_too_long")
-    }
-    // Validate URLs if provided.
-    if strings.TrimSpace(req.WebsiteURL) != "" {
-        if _, err := url.ParseRequestURI(strings.TrimSpace(req.WebsiteURL)); err != nil {
-            return errors.New("website_url_invalid")
-        }
-    }
-    if strings.TrimSpace(req.LogoURL) != "" {
-        if _, err := url.ParseRequestURI(strings.TrimSpace(req.LogoURL)); err != nil {
-            return errors.New("logo_url_invalid")
-        }
-    }
-    return nil
+	// Name is required on create.
+	name := strings.TrimSpace(req.Name)
+	if !isUpdate && name == "" {
+		return errors.New("name_required")
+	}
+	if name != "" {
+		// Ensure generated slug is not empty.
+		slug := normalizeSlug(name)
+		if slug == "" {
+			return errors.New("invalid_slug")
+		}
+	}
+	// Description length limit (example: 1000 chars).
+	if len(req.Description) > 1000 {
+		return errors.New("description_too_long")
+	}
+	// Validate URLs if provided.
+	if strings.TrimSpace(req.WebsiteURL) != "" {
+		if _, err := url.ParseRequestURI(strings.TrimSpace(req.WebsiteURL)); err != nil {
+			return errors.New("website_url_invalid")
+		}
+	}
+	if strings.TrimSpace(req.LogoURL) != "" {
+		if _, err := url.ParseRequestURI(strings.TrimSpace(req.LogoURL)); err != nil {
+			return errors.New("logo_url_invalid")
+		}
+	}
+	return nil
 }
 
 func (h *EcosystemsAdminHandler) Create() fiber.Handler {
@@ -256,7 +254,6 @@ func (h *EcosystemsAdminHandler) Create() fiber.Handler {
 		if exists {
 			return httpx.RespondError(c, fiber.StatusConflict, "slug_collision", "")
 		}
-
 
 		var id uuid.UUID
 		err := h.db.Pool.QueryRow(c.Context(), `
@@ -303,7 +300,7 @@ func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 			if slug == "" {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "name_must_contain_valid_characters", "")
 			}
-			
+
 			var exists bool
 			_ = h.db.Pool.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM ecosystems WHERE slug = $1 AND id != $2)`, slug, ecoID).Scan(&exists)
 			if exists {
