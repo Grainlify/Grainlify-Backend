@@ -127,7 +127,21 @@ func (h *ProjectsPublicHandler) installationToken(ctx context.Context, installat
 	return tok
 }
 
-// Get returns a single verified project by id, enriched with GitHub repo metadata and language breakdown.
+// projectGetError carries the HTTP status and error code a getFetch failure
+// must be reported with. Unlike listFetch/recommendedFetch/filterOptionsFetch
+// (which only ever fail with a generic 500), getFetch can fail with several
+// distinct, meaningful statuses (404 not found, 404 not accessible), so a
+// single fixed status at the call site would misreport those cases.
+type projectGetError struct {
+	status int
+	code   httpx.Code
+}
+
+func (e *projectGetError) Error() string { return string(e.code) }
+
+// Get returns a single verified project by id, enriched with GitHub repo
+// metadata and language breakdown. Routed through h.cache the same way
+// List/Recommended/FilterOptions are, keyed by project ID.
 func (h *ProjectsPublicHandler) Get() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		projectIDParam := c.Params("id")
@@ -152,18 +166,51 @@ func (h *ProjectsPublicHandler) Get() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_project_id", "")
 		}
 
-		// Load project from DB (verified + not deleted)
-		var id uuid.UUID
-		var fullName string
-		var installationID *string
-		var language, category *string
-		var tagsJSON []byte
-		var starsCount, forksCount *int
-		var openIssuesCount, openPRsCount, contributorsCount int
-		var createdAt, updatedAt time.Time
-		var ecosystemName, ecosystemSlug *string
+		// Cache key matches the "project:<id>" namespace InvalidateProject
+		// already targets. A getFetch error (not found / not accessible /
+		// lookup failed) is never cached: ProjectsCache.Do only stores the
+		// result when fetch returns a nil error, so a 404 can never be served
+		// stale as a cached 200 body -- the next request simply re-fetches.
+		cacheKey := "project:" + projectID.String()
 
-		err = h.db.Pool.QueryRow(c.Context(), `
+		var body []byte
+		if h.cache != nil {
+			body, err = h.cache.Do(cacheKey, "get", func() ([]byte, error) {
+				return h.getFetch(c, projectID)
+			})
+		} else {
+			body, err = h.getFetch(c, projectID)
+		}
+		if err != nil {
+			var gerr *projectGetError
+			if errors.As(err, &gerr) {
+				return httpx.RespondError(c, gerr.status, gerr.code, "")
+			}
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_get_failed", "")
+		}
+
+		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+		return c.Status(fiber.StatusOK).Send(body)
+	}
+}
+
+// getFetch loads a verified project plus its live GitHub enrichment
+// (repo metadata, language breakdown, README) and returns the serialized
+// response body. Cacheable errors (not found, not accessible) are returned
+// as *projectGetError so Get() can map them back to the correct status.
+func (h *ProjectsPublicHandler) getFetch(c *fiber.Ctx, projectID uuid.UUID) ([]byte, error) {
+	// Load project from DB (verified + not deleted)
+	var id uuid.UUID
+	var fullName string
+	var installationID *string
+	var language, category *string
+	var tagsJSON []byte
+	var starsCount, forksCount *int
+	var openIssuesCount, openPRsCount, contributorsCount int
+	var createdAt, updatedAt time.Time
+	var ecosystemName, ecosystemSlug *string
+
+	err := h.db.Pool.QueryRow(c.Context(), `
 SELECT 
   p.id,
   p.github_full_name,
@@ -199,145 +246,144 @@ FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
 WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 	`, projectID).Scan(
-			&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount,
-			&openIssuesCount, &openPRsCount, &contributorsCount,
-			&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return httpx.RespondError(c, fiber.StatusNotFound, "project_not_found", "")
-		}
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_lookup_failed", "")
-		}
+		&id, &fullName, &installationID, &language, &tagsJSON, &category, &starsCount, &forksCount,
+		&openIssuesCount, &openPRsCount, &contributorsCount,
+		&createdAt, &updatedAt, &ecosystemName, &ecosystemSlug,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, &projectGetError{status: fiber.StatusNotFound, code: "project_not_found"}
+	}
+	if err != nil {
+		return nil, &projectGetError{status: fiber.StatusInternalServerError, code: "project_lookup_failed"}
+	}
 
-		// Parse tags JSONB
-		var tags []string
-		if len(tagsJSON) > 0 {
-			_ = json.Unmarshal(tagsJSON, &tags)
-		}
+	// Parse tags JSONB
+	var tags []string
+	if len(tagsJSON) > 0 {
+		_ = json.Unmarshal(tagsJSON, &tags)
+	}
 
-		// Default stars/forks to 0 if nil
-		stars := 0
-		if starsCount != nil {
-			stars = *starsCount
-		}
-		forks := 0
-		if forksCount != nil {
-			forks = *forksCount
-		}
+	// Default stars/forks to 0 if nil
+	stars := 0
+	if starsCount != nil {
+		stars = *starsCount
+	}
+	forks := 0
+	if forksCount != nil {
+		forks = *forksCount
+	}
 
-		// Enrich from GitHub (best effort).
-		ctx, cancel := context.WithTimeout(c.Context(), 6*time.Second)
-		defer cancel()
-		gh := github.NewClient()
-		token := ""
-		if installationID != nil {
-			token = h.installationToken(ctx, *installationID)
-		}
+	// Enrich from GitHub (best effort).
+	ctx, cancel := context.WithTimeout(c.Context(), 6*time.Second)
+	defer cancel()
+	gh := github.NewClient()
+	token := ""
+	if installationID != nil {
+		token = h.installationToken(ctx, *installationID)
+	}
 
-		var repo github.Repo
-		repoOK := false
-		r, repoErr := gh.GetRepo(ctx, token, fullName)
-		if repoErr != nil {
-			// If GitHub fetch fails (404/403), it's likely a private repo
-			errStr := repoErr.Error()
-			if strings.Contains(errStr, "404") || strings.Contains(errStr, "403") || strings.Contains(errStr, "Not Found") {
-				slog.Info("project is private or inaccessible",
-					"project_id", projectID,
-					"github_full_name", fullName,
-					"error", repoErr,
-				)
-				return httpx.RespondError(c, fiber.StatusNotFound, "project_not_accessible", "")
-			}
-			slog.Warn("failed to fetch repo metadata from GitHub",
+	var repo github.Repo
+	repoOK := false
+	r, repoErr := gh.GetRepo(ctx, token, fullName)
+	if repoErr != nil {
+		// If GitHub fetch fails (404/403), it's likely a private repo
+		errStr := repoErr.Error()
+		if strings.Contains(errStr, "404") || strings.Contains(errStr, "403") || strings.Contains(errStr, "Not Found") {
+			slog.Info("project is private or inaccessible",
 				"project_id", projectID,
 				"github_full_name", fullName,
 				"error", repoErr,
 			)
-		} else {
-			// Check if repo is private
-			if r.Private {
-				slog.Info("project is private",
-					"project_id", projectID,
-					"github_full_name", fullName,
-				)
-				return httpx.RespondError(c, fiber.StatusNotFound, "project_not_accessible", "")
-			}
-			repo = r
-			repoOK = true
-			// Prefer live counts from GitHub if available
-			stars = repo.StargazersCount
-			forks = repo.ForksCount
-			// Best-effort persist
-			_, _ = h.db.Pool.Exec(c.Context(), `
+			return nil, &projectGetError{status: fiber.StatusNotFound, code: "project_not_accessible"}
+		}
+		slog.Warn("failed to fetch repo metadata from GitHub",
+			"project_id", projectID,
+			"github_full_name", fullName,
+			"error", repoErr,
+		)
+	} else {
+		// Check if repo is private
+		if r.Private {
+			slog.Info("project is private",
+				"project_id", projectID,
+				"github_full_name", fullName,
+			)
+			return nil, &projectGetError{status: fiber.StatusNotFound, code: "project_not_accessible"}
+		}
+		repo = r
+		repoOK = true
+		// Prefer live counts from GitHub if available
+		stars = repo.StargazersCount
+		forks = repo.ForksCount
+		// Best-effort persist
+		_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE projects SET stars_count=$2, forks_count=$3, updated_at=now()
 WHERE id=$1
 `, projectID, stars, forks)
-		}
-
-		// GitHub language breakdown (best effort)
-		var langsOut []fiber.Map
-		if m, err := gh.GetRepoLanguages(ctx, token, fullName); err == nil && len(m) > 0 {
-			var total int64
-			for _, v := range m {
-				total += v
-			}
-			if total > 0 {
-				for name, v := range m {
-					pct := float64(v) * 100.0 / float64(total)
-					langsOut = append(langsOut, fiber.Map{
-						"name":       name,
-						"percentage": pct,
-					})
-				}
-			}
-		}
-
-		// Fetch README content (best effort)
-		var readmeContent string
-		if readme, err := gh.GetReadme(ctx, token, fullName); err == nil {
-			readmeContent = readme
-		} else {
-			slog.Warn("failed to fetch README for project",
-				"project_id", projectID,
-				"github_full_name", fullName,
-				"error", err,
-			)
-		}
-
-		resp := fiber.Map{
-			"id":                 id.String(),
-			"github_full_name":   fullName,
-			"language":           language,
-			"tags":               tags,
-			"category":           category,
-			"stars_count":        stars,
-			"forks_count":        forks,
-			"contributors_count": contributorsCount,
-			"open_issues_count":  openIssuesCount,
-			"open_prs_count":     openPRsCount,
-			"ecosystem_name":     ecosystemName,
-			"ecosystem_slug":     ecosystemSlug,
-			"created_at":         createdAt,
-			"updated_at":         updatedAt,
-			"languages":          langsOut,
-			"readme":             readmeContent,
-		}
-
-		if repoOK {
-			resp["repo"] = fiber.Map{
-				"full_name":         repo.FullName,
-				"html_url":          repo.HTMLURL,
-				"homepage":          repo.Homepage,
-				"description":       repo.Description,
-				"open_issues_count": repo.OpenIssuesCount,
-				"owner_login":       repo.Owner.Login,
-				"owner_avatar_url":  repo.Owner.AvatarURL,
-			}
-		}
-
-		return c.Status(fiber.StatusOK).JSON(resp)
 	}
+
+	// GitHub language breakdown (best effort)
+	var langsOut []fiber.Map
+	if m, err := gh.GetRepoLanguages(ctx, token, fullName); err == nil && len(m) > 0 {
+		var total int64
+		for _, v := range m {
+			total += v
+		}
+		if total > 0 {
+			for name, v := range m {
+				pct := float64(v) * 100.0 / float64(total)
+				langsOut = append(langsOut, fiber.Map{
+					"name":       name,
+					"percentage": pct,
+				})
+			}
+		}
+	}
+
+	// Fetch README content (best effort)
+	var readmeContent string
+	if readme, err := gh.GetReadme(ctx, token, fullName); err == nil {
+		readmeContent = readme
+	} else {
+		slog.Warn("failed to fetch README for project",
+			"project_id", projectID,
+			"github_full_name", fullName,
+			"error", err,
+		)
+	}
+
+	resp := fiber.Map{
+		"id":                 id.String(),
+		"github_full_name":   fullName,
+		"language":           language,
+		"tags":               tags,
+		"category":           category,
+		"stars_count":        stars,
+		"forks_count":        forks,
+		"contributors_count": contributorsCount,
+		"open_issues_count":  openIssuesCount,
+		"open_prs_count":     openPRsCount,
+		"ecosystem_name":     ecosystemName,
+		"ecosystem_slug":     ecosystemSlug,
+		"created_at":         createdAt,
+		"updated_at":         updatedAt,
+		"languages":          langsOut,
+		"readme":             readmeContent,
+	}
+
+	if repoOK {
+		resp["repo"] = fiber.Map{
+			"full_name":         repo.FullName,
+			"html_url":          repo.HTMLURL,
+			"homepage":          repo.Homepage,
+			"description":       repo.Description,
+			"open_issues_count": repo.OpenIssuesCount,
+			"owner_login":       repo.Owner.Login,
+			"owner_avatar_url":  repo.Owner.AvatarURL,
+		}
+	}
+
+	return json.Marshal(resp)
 }
 
 // IssuesPublic returns recent issues for a verified project (read-only, no auth).
