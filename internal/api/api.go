@@ -226,27 +226,37 @@ func New(cfg config.Config, deps Deps, build handlers.BuildInfo) *fiber.App {
 	app.Post("/projects/:id/issues/:number/unassign", auth.RequireAuth(cfg.JWTSecret), issueApps.Unassign())
 	app.Post("/projects/:id/issues/:number/reject", auth.RequireAuth(cfg.JWTSecret), issueApps.Reject())
 
+	// Admin routes re-verify the caller's role against the live database on
+	// every request (auth.RequireCurrentRole) rather than trusting the role
+	// claim embedded in their JWT (auth.RequireRole). Admin tokens live for
+	// up to an hour (see handlers/admin.go), and a demoted admin's
+	// still-unexpired token must stop granting access immediately rather
+	// than up to an hour later.
+	var adminPool db.DBPool
+	if deps.DB != nil {
+		adminPool = deps.DB.Pool
+	}
 	admin := handlers.NewAdminHandler(cfg, deps.DB)
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
-	adminGroup.Get("/users", auth.RequireRole("admin"), admin.ListUsers())
-	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), admin.SetUserRole())
+	adminGroup.Get("/users", auth.RequireCurrentRole(adminPool, "admin"), admin.ListUsers())
+	adminGroup.Put("/users/:id/role", auth.RequireCurrentRole(adminPool, "admin"), admin.SetUserRole())
 
 	ecosystemsAdmin := handlers.NewEcosystemsAdminHandler(deps.DB)
 	// Wire cache invalidation: ecosystem CUD operations invalidate all public project cache entries
 	// since ecosystem name/slug appears in every project list response.
 	ecosystemsAdmin.SetCacheInvalidator(projectsPublic.InvalidateAll)
-	adminGroup.Get("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.List())
-	adminGroup.Get("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.GetByID())
-	adminGroup.Post("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.Create())
-	adminGroup.Put("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.Update())
-	adminGroup.Delete("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.Delete())
+	adminGroup.Get("/ecosystems", auth.RequireCurrentRole(adminPool, "admin"), ecosystemsAdmin.List())
+	adminGroup.Get("/ecosystems/:id", auth.RequireCurrentRole(adminPool, "admin"), ecosystemsAdmin.GetByID())
+	adminGroup.Post("/ecosystems", auth.RequireCurrentRole(adminPool, "admin"), ecosystemsAdmin.Create())
+	adminGroup.Put("/ecosystems/:id", auth.RequireCurrentRole(adminPool, "admin"), ecosystemsAdmin.Update())
+	adminGroup.Delete("/ecosystems/:id", auth.RequireCurrentRole(adminPool, "admin"), ecosystemsAdmin.Delete())
 
 	// Open Source Week (admin)
 	oswAdmin := handlers.NewOpenSourceWeekAdminHandler(deps.DB)
-	adminGroup.Get("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.List())
-	adminGroup.Post("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.Create())
-	adminGroup.Delete("/open-source-week/events/:id", auth.RequireRole("admin"), oswAdmin.Delete())
+	adminGroup.Get("/open-source-week/events", auth.RequireCurrentRole(adminPool, "admin"), oswAdmin.List())
+	adminGroup.Post("/open-source-week/events", auth.RequireCurrentRole(adminPool, "admin"), oswAdmin.Create())
+	adminGroup.Delete("/open-source-week/events/:id", auth.RequireCurrentRole(adminPool, "admin"), oswAdmin.Delete())
 
 	webhooks := handlers.NewGitHubWebhooksHandler(cfg, deps.DB, deps.Bus)
 	// Register webhook endpoint with explicit OPTIONS support for CORS

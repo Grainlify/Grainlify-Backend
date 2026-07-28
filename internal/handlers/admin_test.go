@@ -503,13 +503,22 @@ func TestListUsers_Integration(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, fiber.StatusOK, resp.StatusCode)
-	var result map[string][]map[string]interface{}
+	// ListUsers now returns PaginatedResponse's flat envelope
+	// ({"users": [...], "limit": N, "offset": N, "total": N, "has_more":
+	// bool}), not a map of purely array-of-object fields, so decode
+	// generically and pull out "users" rather than assuming every top-level
+	// value has the same array shape.
+	var result map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	require.NoError(t, err)
-	assert.NotEmpty(t, result["users"])
+	users, ok := result["users"].([]interface{})
+	require.True(t, ok, "expected \"users\" to be a JSON array, got %T", result["users"])
+	assert.NotEmpty(t, users)
 
 	found := false
-	for _, u := range result["users"] {
+	for _, raw := range users {
+		u, ok := raw.(map[string]interface{})
+		require.True(t, ok, "expected user entry to be an object, got %T", raw)
 		if u["id"] == userID.String() {
 			found = true
 			assert.Equal(t, "contributor", u["role"])
