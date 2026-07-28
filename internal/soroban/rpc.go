@@ -39,8 +39,28 @@ type RPCError struct {
         Data    string `json:"data,omitempty"`
 }
 
-// Call makes a JSON-RPC call to the Soroban RPC endpoint
+// Call makes a JSON-RPC call to the Soroban RPC endpoint.
+//
+// Call is guarded by c.breaker (see breaker.go): once the breaker is open it
+// fails fast with ErrCircuitOpen instead of attempting the RPC request, and
+// every attempt reports its outcome back to the breaker.
 func (c *Client) Call(ctx context.Context, method string, params interface{}) (*RPCResponse, error) {
+        if err := c.breaker.Allow(); err != nil {
+                return nil, err
+        }
+
+        resp, err := c.doCall(ctx, method, params)
+        if err != nil {
+                c.breaker.RecordFailure()
+                return nil, err
+        }
+        c.breaker.RecordSuccess()
+        return resp, nil
+}
+
+// doCall performs the actual JSON-RPC request without consulting the circuit
+// breaker; see Call.
+func (c *Client) doCall(ctx context.Context, method string, params interface{}) (*RPCResponse, error) {
         req := RPCRequest{
                 JSONRPC: "2.0",
                 ID:      1,

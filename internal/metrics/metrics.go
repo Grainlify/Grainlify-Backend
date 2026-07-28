@@ -114,6 +114,16 @@ var (
 		Name:      "public_cache_total",
 		Help:      "Total number of public projects cache lookups by route and result (hit, miss).",
 	}, []string{"route", "result"})
+
+	// SorobanCircuitBreakerState reports the current state of the circuit
+	// breaker guarding outbound Soroban RPC calls (internal/soroban/breaker.go):
+	// 0=closed, 1=open, 2=half-open.
+	SorobanCircuitBreakerState = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "grainlify",
+		Subsystem: "soroban",
+		Name:      "circuit_breaker_state",
+		Help:      "Current state of the Soroban RPC circuit breaker (0=closed, 1=open, 2=half-open).",
+	})
 )
 
 // NormalizePath replaces dynamic path segments (UUIDs, numeric IDs) with ":id"
