@@ -4,14 +4,36 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/keypair"
+	"github.com/stellar/go/network"
 	"github.com/stellar/go/xdr"
 )
+
+// newFakeProgramEscrowContract builds a ProgramEscrowContract with a real
+// TransactionBuilder wired against srv, mirroring newFakeEscrowContract in
+// escrow_test.go (same package) for tests that need BuildAndSubmit /
+// WaitForConfirmation to actually run against a fake Horizon server.
+func newFakeProgramEscrowContract(kp *keypair.Full, srv *httptest.Server) *ProgramEscrowContract {
+	client := &Client{
+		networkPassphrase: network.TestNetworkPassphrase,
+		horizonClient: &horizonclient.Client{
+			HorizonURL: srv.URL,
+			HTTP:       srv.Client(),
+		},
+	}
+	return &ProgramEscrowContract{
+		client:          client,
+		txBuilder:       &TransactionBuilder{client: client, sourceKP: kp},
+		contractAddress: "0000000000000000000000000000000000000000000000000000000000000002",
+	}
+}
 
 // programScVal constructs a representative ScMap returned by get_program_info.
 func programScVal(programID string, totalFunds, remainingBalance int64, authKey, tokenAddr string) xdr.ScVal {
@@ -239,5 +261,90 @@ func TestGetRemainingBalance_InvalidContract(t *testing.T) {
 	_, err := pec.GetRemainingBalance(context.Background())
 	if err == nil {
 		t.Fatal("expected error for invalid contract, got nil")
+	}
+}
+
+// TestBatchPayout_ConfirmationFailureReturnsConfirmationUnknownError is the
+// regression test for issue #297, covering BatchPayout as required by the
+// issue's acceptance criteria: a nil error here would risk a caller
+// recording a batch of payouts as delivered without on-chain confirmation.
+// A WaitForConfirmation failure must return a non-nil error satisfying
+// errors.Is(err, ErrConfirmationUnknown), while still returning the
+// submitted TransactionResult (hash + "pending" status).
+func TestBatchPayout_ConfirmationFailureReturnsConfirmationUnknownError(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	pec := newFakeProgramEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := pec.BatchPayout(ctx, []PayoutItem{{Recipient: kp.Address(), Amount: 100}})
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("BatchPayout error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil || result.Hash != txHash {
+		t.Fatalf("expected TransactionResult with hash %q, got %+v", txHash, result)
+	}
+	if result.Status != "pending" {
+		t.Errorf("status: want %q, got %q", "pending", result.Status)
+	}
+}
+
+// TestLockProgramFunds_ConfirmationFailureReturnsConfirmationUnknownError and
+// TestSinglePayout_ConfirmationFailureReturnsConfirmationUnknownError round
+// out coverage for the remaining two program-escrow fund-moving methods.
+func TestLockProgramFunds_ConfirmationFailureReturnsConfirmationUnknownError(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	pec := newFakeProgramEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := pec.LockProgramFunds(ctx, 100)
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("LockProgramFunds error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil || result.Hash != txHash {
+		t.Fatalf("expected TransactionResult with hash %q, got %+v", txHash, result)
+	}
+}
+
+func TestSinglePayout_ConfirmationFailureReturnsConfirmationUnknownError(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	pec := newFakeProgramEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := pec.SinglePayout(ctx, kp.Address(), 100)
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("SinglePayout error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil || result.Hash != txHash {
+		t.Fatalf("expected TransactionResult with hash %q, got %+v", txHash, result)
 	}
 }
