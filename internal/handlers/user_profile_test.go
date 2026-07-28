@@ -1,14 +1,22 @@
 package handlers_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
 
@@ -354,4 +362,121 @@ func TestContributionActivity_BoundaryValues(t *testing.T) {
 			}
 		})
 	}
+}
+// rankFixtureUser is one seeded contributor for TestProfile_RankPositionOrdering.
+type rankFixtureUser struct {
+	userID     uuid.UUID
+	login      string
+	issueCount int
+	prCount    int
+}
+
+// seedRankFixture creates users/github_accounts/a verified project/issues/PRs
+// for TestProfile_RankPositionOrdering, and registers cleanup that removes
+// everything it inserted (project delete cascades to issues/PRs; user delete
+// cascades to github_accounts).
+func seedRankFixture(t *testing.T, pool db.DBPool, users []rankFixtureUser) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	suffix := uuid.New().String()[:8]
+
+	ownerID := users[0].userID
+	for _, u := range users {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO users (id, role) VALUES ($1, 'contributor')`, u.userID)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx,
+			`INSERT INTO github_accounts (user_id, github_user_id, login, access_token) VALUES ($1, $2, $3, $4)`,
+			u.userID, int64(uuid.New().ID()), u.login, []byte("test-token"))
+		require.NoError(t, err)
+	}
+
+	var projectID uuid.UUID
+	fullName := fmt.Sprintf("rank-fixture/%s", suffix)
+	err := pool.QueryRow(ctx,
+		`INSERT INTO projects (owner_user_id, github_full_name, status) VALUES ($1, $2, 'verified') RETURNING id`,
+		ownerID, fullName).Scan(&projectID)
+	require.NoError(t, err)
+
+	issueNum, prNum := 1, 1
+	for _, u := range users {
+		for i := 0; i < u.issueCount; i++ {
+			_, err := pool.Exec(ctx,
+				`INSERT INTO github_issues (project_id, github_issue_id, number, author_login) VALUES ($1, $2, $3, $4)`,
+				projectID, int64(1_000_000+issueNum), issueNum, u.login)
+			require.NoError(t, err)
+			issueNum++
+		}
+		for i := 0; i < u.prCount; i++ {
+			_, err := pool.Exec(ctx,
+				`INSERT INTO github_pull_requests (project_id, github_pr_id, number, author_login) VALUES ($1, $2, $3, $4)`,
+				projectID, int64(2_000_000+prNum), prNum, u.login)
+			require.NoError(t, err)
+			prNum++
+		}
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM projects WHERE id = $1`, projectID)
+		for _, u := range users {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, u.userID)
+		}
+	})
+
+	return projectID
+}
+
+// TestProfile_RankPositionOrdering locks in correct rank-position computation
+// for Profile()'s rankPosition query after rewriting it to compute each
+// contributor's contribution count once (issue_counts/pr_counts CTEs) instead
+// of via duplicated correlated subqueries (issue #291). Rather than asserting
+// an absolute rank number -- which would be fragile against any other data
+// already present in a shared test database -- this seeds three contributors
+// with distinct, known contribution counts and asserts their ranks come back
+// in the correct relative, consecutive order.
+func TestProfile_RankPositionOrdering(t *testing.T) {
+	pool := openTestPool(t)
+
+	users := []rankFixtureUser{
+		{userID: uuid.New(), login: "rank-fixture-mid-" + uuid.New().String()[:8], issueCount: 2, prCount: 1}, // 3
+		{userID: uuid.New(), login: "rank-fixture-top-" + uuid.New().String()[:8], issueCount: 5, prCount: 0}, // 5
+		{userID: uuid.New(), login: "rank-fixture-low-" + uuid.New().String()[:8], issueCount: 0, prCount: 1}, // 1
+	}
+	mid, top, low := users[0], users[1], users[2]
+	seedRankFixture(t, pool, users)
+
+	cfg := config.Config{JWTSecret: "test-jwt-secret-for-rank-position-fixture"}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: pool})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), h.Profile())
+
+	rankOf := func(u rankFixtureUser) int {
+		token, err := auth.IssueJWT(cfg.JWTSecret, u.userID, "contributor", "evm", "0x123", time.Hour)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+		var body struct {
+			Rank struct {
+				Position *int `json:"position"`
+			} `json:"rank"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		require.NotNil(t, body.Rank.Position, "expected a non-nil rank position for %s", u.login)
+		return *body.Rank.Position
+	}
+
+	posTop := rankOf(top)
+	posMid := rankOf(mid)
+	posLow := rankOf(low)
+
+	assert.Less(t, posTop, posMid, "top contributor (5) should rank above mid (3)")
+	assert.Less(t, posMid, posLow, "mid contributor (3) should rank above low (1)")
+	assert.Equal(t, posTop+1, posMid, "mid should be exactly one position behind top")
+	assert.Equal(t, posMid+1, posLow, "low should be exactly one position behind mid")
 }
