@@ -469,6 +469,21 @@ type assignRequest struct {
 }
 
 // Assign adds the applicant as assignee on GitHub and posts a congratulations bot comment. Maintainer only.
+// assigneeWasApplied reports whether login appears (case-insensitively,
+// matching GitHub's own case-insensitive username handling) among the
+// assignees GitHub's AddIssueAssignees response confirmed were actually
+// applied. GitHub returns 2xx and silently omits invalid logins from that
+// list rather than erroring, so this check -- not just a nil error -- is
+// what determines whether the assignment may be persisted (issue #293).
+func assigneeWasApplied(applied []string, login string) bool {
+	for _, a := range applied {
+		if strings.EqualFold(a, login) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *IssueApplicationsHandler) Assign() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -535,9 +550,20 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 		}
 
 		gh := github.NewClient()
-		if err := gh.AddIssueAssignees(c.Context(), token, fullName, issueNumber, []string{req.Assignee}); err != nil {
+		appliedAssignees, err := gh.AddIssueAssignees(c.Context(), token, fullName, issueNumber, []string{req.Assignee})
+		if err != nil {
 			slog.Warn("failed to add assignee on GitHub", "project_id", projectID.String(), "issue_number", issueNumber, "assignee", req.Assignee, "error", err)
 			return httpx.RespondError(c, fiber.StatusBadGateway, "github_assign_failed", "")
+		}
+
+		// A nil error only means the request succeeded -- GitHub silently
+		// drops logins that aren't valid assignees (not a collaborator,
+		// insufficient permissions, doesn't exist) from the resulting
+		// assignees array instead of erroring. Only persist the assignment
+		// if GitHub's response confirms it was actually applied.
+		if !assigneeWasApplied(appliedAssignees, req.Assignee) {
+			slog.Warn("github did not apply the requested assignee (no repo access?)", "project_id", projectID.String(), "issue_number", issueNumber, "assignee", req.Assignee, "github_assignees", appliedAssignees)
+			return httpx.RespondError(c, fiber.StatusBadGateway, "assignee_not_applied_by_github", "")
 		}
 
 		assigneesJSON, _ := json.Marshal([]map[string]string{{"login": req.Assignee}})
