@@ -196,14 +196,20 @@ func (c *ProjectsCache) Len() int {
 	return n
 }
 
-// evictLoop periodically removes expired entries.  It runs at TTL/2, minimum 5 s.
+// minEvictInterval floors the background sweep interval so a very short TTL
+// can't make evictLoop busy-loop. It's a var rather than a const purely so
+// tests can shrink it — production callers always use TTLs in the tens of
+// seconds (see the package doc comment), where this floor never binds.
+var minEvictInterval = 5 * time.Second
+
+// evictLoop periodically removes expired entries.  It runs at TTL/2, minimum minEvictInterval.
 func (c *ProjectsCache) evictLoop(stopCh <-chan struct{}) {
 	if c.ttl <= 0 {
 		return
 	}
 	interval := c.ttl / 2
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
+	if interval < minEvictInterval {
+		interval = minEvictInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

@@ -232,7 +232,13 @@ func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, inst
 
 		all = append(all, pageResult.Repositories...)
 
-		if len(pageResult.Repositories) < 100 || len(all) >= pageResult.TotalCount {
+		// Stop once we've accumulated everything the server reports via
+		// total_count, or once a page comes back empty. Do NOT treat a
+		// short page (fewer than per_page items) as "last page": GitHub's
+		// total_count is the authoritative signal for this endpoint, and a
+		// page can legitimately be shorter than per_page while more pages
+		// remain.
+		if len(pageResult.Repositories) == 0 || len(all) >= pageResult.TotalCount {
 			break
 		}
 
