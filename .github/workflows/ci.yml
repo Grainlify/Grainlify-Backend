@@ -46,7 +46,18 @@ jobs:
       - name: Test
         env:
           TEST_DB_URL: postgres://postgres:postgres@localhost:5432/grainlify_test?sslmode=disable
-        run: go test -count=1 -cover ./...
+        # -p 1 runs one package's test binary at a time. Several packages
+        # (internal/migrate, internal/ingest, internal/handlers, ...) run
+        # integration tests against the single shared Postgres service
+        # container above, and some of them mutate global state in it
+        # directly (schema_migrations version/dirty flags, full-DB
+        # TRUNCATE/DROP). Go's default test runner executes different
+        # packages' test binaries concurrently, so without -p 1 those
+        # packages race on that shared mutable state (e.g. one package
+        # observes another's schema_migrations row mid-write and fails
+        # with "Dirty database version N" or "relation ... does not
+        # exist"). Serializing package execution removes that hazard.
+        run: go test -count=1 -p 1 -cover ./...
 
       - name: Fuzz smoke run (XDR decode helpers)
         # Run each fuzz target for 10 s.  The corpus seeds in testdata/fuzz/

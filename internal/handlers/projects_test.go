@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -553,8 +554,14 @@ func TestProjectsPagination_Integration(t *testing.T) {
 	})
 
 	t.Run("filter change (by ecosystem) resets pagination state appropriately", func(t *testing.T) {
-		// Go ecosystem filter
-		reqGo := httptest.NewRequest("GET", fmt.Sprintf("/projects?ecosystem=%s&limit=2&offset=0", goEcoName), nil)
+		// Go ecosystem filter. Ecosystem names are seeded as "Go <uuid-suffix>"
+		// / "Rust <uuid-suffix>" (see seedProjectsDataset), so they contain a
+		// literal space -- url.QueryEscape it rather than interpolating it
+		// raw into the request target. An unescaped space in the target
+		// breaks httptest.NewRequest's internal raw HTTP request line
+		// (net/http.ReadRequest sees more than 3 space-separated tokens and
+		// panics with "malformed HTTP version").
+		reqGo := httptest.NewRequest("GET", fmt.Sprintf("/projects?ecosystem=%s&limit=2&offset=0", url.QueryEscape(goEcoName)), nil)
 		respGo, err := app.Test(reqGo)
 		require.NoError(t, err)
 		defer respGo.Body.Close()
@@ -570,7 +577,7 @@ func TestProjectsPagination_Integration(t *testing.T) {
 		assert.Equal(t, goEcoName, bodyGo.Projects[1].EcosystemName)
 
 		// Rust ecosystem filter
-		reqRust := httptest.NewRequest("GET", fmt.Sprintf("/projects?ecosystem=%s&limit=2&offset=0", rustEcoName), nil)
+		reqRust := httptest.NewRequest("GET", fmt.Sprintf("/projects?ecosystem=%s&limit=2&offset=0", url.QueryEscape(rustEcoName)), nil)
 		respRust, err := app.Test(reqRust)
 		require.NoError(t, err)
 		defer respRust.Body.Close()

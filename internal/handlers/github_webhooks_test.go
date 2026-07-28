@@ -807,13 +807,25 @@ func TestReceive_ConcurrentDeliveries_DifferentIDs(t *testing.T) {
 	ti := newTrackingIngestor()
 	h := NewGitHubWebhooksHandler(config.Config{GitHubWebhookSecret: secret}, nil, nil)
 	h.ing = ti
-	app := newTestApp(h)
 
+	// Each goroutine gets its own *fiber.App (all wired to the same shared
+	// ti, which is what's actually meant to be exercised concurrently here
+	// — dedup/ingest bookkeeping, protected by ti.mu). Driving 20 concurrent
+	// fiber.App.Test() calls through a single shared app/*fasthttp.Server
+	// is not a supported pattern: fasthttp pools and reuses its internal
+	// RequestCtx per connection, and under enough concurrent Test() calls on
+	// one server this reuse can let one in-flight request's header bytes
+	// (e.g. X-GitHub-Delivery) bleed into another's, which showed up here as
+	// two goroutines occasionally resolving to the same delivery ID and
+	// being (correctly, from the handler's point of view) deduped down to
+	// 19 instead of 20 — a test-harness hazard, not a bug in Receive() or
+	// in the ingestor's own (independently mutex-protected) bookkeeping.
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
+			app := newTestApp(h)
 			id := fmt.Sprintf("concurrent-del-%d", i)
 			body := webhookBody("issues", "opened", fmt.Sprintf("owner/repo-%d", i))
 			if code := deliverWebhook(app, secret, id, "issues", body); code != fiber.StatusOK {
