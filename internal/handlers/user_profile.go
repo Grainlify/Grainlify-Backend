@@ -224,42 +224,41 @@ LIMIT 10
 			})
 		}
 
-		// Get user's rank position in leaderboard
-		// Use a more efficient query with CTE
+		// Get user's rank position in leaderboard.
+		// issue_counts/pr_counts pre-compute each login's count once and are
+		// reused for both the projected contribution_count and the WHERE
+		// filter, instead of running the same pair of correlated subqueries
+		// twice per row — the same fix already applied to leaderboardBaseQuery
+		// in leaderboard.go. Matching stays case-sensitive on ga.login/
+		// author_login, unchanged from before this fix.
 		var rankPosition *int
 		err = h.db.Pool.QueryRow(c.Context(), `
-WITH contribution_counts AS (
-  SELECT 
+WITH issue_counts AS (
+  SELECT i.author_login, COUNT(*) AS cnt
+  FROM github_issues i
+  INNER JOIN projects p ON i.project_id = p.id
+  WHERE p.status = 'verified'
+  GROUP BY i.author_login
+),
+pr_counts AS (
+  SELECT pr.author_login, COUNT(*) AS cnt
+  FROM github_pull_requests pr
+  INNER JOIN projects p ON pr.project_id = p.id
+  WHERE p.status = 'verified'
+  GROUP BY pr.author_login
+),
+contribution_counts AS (
+  SELECT
     ga.login,
-    (
-      SELECT COUNT(*) 
-      FROM github_issues i
-      INNER JOIN projects p ON i.project_id = p.id
-      WHERE i.author_login = ga.login AND p.status = 'verified'
-    ) +
-    (
-      SELECT COUNT(*) 
-      FROM github_pull_requests pr
-      INNER JOIN projects p ON pr.project_id = p.id
-      WHERE pr.author_login = ga.login AND p.status = 'verified'
-    ) as contribution_count
+    (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) as contribution_count
   FROM github_accounts ga
   INNER JOIN users u ON ga.user_id = u.id
-  WHERE (
-    SELECT COUNT(*) 
-    FROM github_issues i
-    INNER JOIN projects p ON i.project_id = p.id
-    WHERE i.author_login = ga.login AND p.status = 'verified'
-  ) +
-  (
-    SELECT COUNT(*) 
-    FROM github_pull_requests pr
-    INNER JOIN projects p ON pr.project_id = p.id
-    WHERE pr.author_login = ga.login AND p.status = 'verified'
-  ) > 0
+  LEFT JOIN issue_counts ic ON ic.author_login = ga.login
+  LEFT JOIN pr_counts pc ON pc.author_login = ga.login
+  WHERE (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) > 0
 ),
 ranked_users AS (
-  SELECT 
+  SELECT
     login,
     ROW_NUMBER() OVER (
       ORDER BY contribution_count DESC, login ASC
