@@ -330,6 +330,7 @@ WHERE id = $1
 
 func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName string, token string) error {
 	totalIssues := 0
+	failedIssues := 0
 	for page := 1; page <= 50; page++ { // safety cap
 		if err := w.limiter.Wait(ctx); err != nil {
 			return err
@@ -344,6 +345,9 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				"repo", fullName,
 				"total_issues", totalIssues,
 			)
+			if failedIssues > 0 {
+				return fmt.Errorf("sync issues: %d/%d rows failed to persist", failedIssues, totalIssues)
+			}
 			return nil
 		}
 
@@ -411,7 +415,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				}
 			}
 
-			_, _ = w.pool.Exec(ctx, `
+			if _, err := w.pool.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
@@ -429,7 +433,16 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
   updated_at_github = COALESCE(EXCLUDED.updated_at_github, github_issues.updated_at_github),
   closed_at_github = COALESCE(EXCLUDED.closed_at_github, github_issues.closed_at_github),
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt)
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt); err != nil {
+				failedIssues++
+				slog.Error("failed to upsert issue",
+					"project_id", projectID,
+					"repo", fullName,
+					"issue_id", it.ID,
+					"issue_number", it.Number,
+					"error", err,
+				)
+			}
 		}
 	}
 
@@ -439,11 +452,15 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 		"pages_fetched", 50,
 		"total_issues", totalIssues,
 	)
+	if failedIssues > 0 {
+		return fmt.Errorf("sync issues: %d/%d rows failed to persist", failedIssues, totalIssues)
+	}
 	return nil
 }
 
 func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName string, token string) error {
 	totalPRs := 0
+	failedPRs := 0
 	for page := 1; page <= 50; page++ { // safety cap
 		if err := w.limiter.Wait(ctx); err != nil {
 			return err
@@ -464,6 +481,9 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 				"repo", fullName,
 				"total_prs", totalPRs,
 			)
+			if failedPRs > 0 {
+				return fmt.Errorf("sync PRs: %d/%d rows failed to persist", failedPRs, totalPRs)
+			}
 			return nil
 		}
 
@@ -493,7 +513,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 				}
 			}
 
-			_, _ = w.pool.Exec(ctx, `
+			if _, err := w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
@@ -509,7 +529,16 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   closed_at_github = EXCLUDED.closed_at_github,
   merged_at_github = EXCLUDED.merged_at_github,
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt)
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt); err != nil {
+				failedPRs++
+				slog.Error("failed to upsert pull request",
+					"project_id", projectID,
+					"repo", fullName,
+					"pr_id", it.ID,
+					"pr_number", it.Number,
+					"error", err,
+				)
+			}
 		}
 	}
 	slog.Warn("sync PRs hit pagination cap, results may be incomplete",
@@ -518,6 +547,9 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 		"pages_fetched", 50,
 		"total_prs", totalPRs,
 	)
+	if failedPRs > 0 {
+		return fmt.Errorf("sync PRs: %d/%d rows failed to persist", failedPRs, totalPRs)
+	}
 	return nil
 }
 

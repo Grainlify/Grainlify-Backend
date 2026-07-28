@@ -353,6 +353,95 @@ func TestIngest_ReplayProtection_CleanupDedup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Transactional dedup – a failed snapshot upsert must roll back the dedup
+// row too, so a legitimate GitHub redelivery isn't permanently dropped
+// (issue #296).
+// ---------------------------------------------------------------------------
+
+func TestIngest_TransactionalRollback_FailedSnapshotUpsertDoesNotCommitDedup(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
+
+	projectID := seedProject(t, pool, "acme/rollback-test", "install-rb")
+
+	// Pre-seed a conflicting issue: same (project_id, number) but a
+	// different github_issue_id. The upsert's ON CONFLICT only targets
+	// (project_id, github_issue_id), so inserting a *new* github_issue_id
+	// with the same number hits the (project_id, number) unique constraint
+	// instead -- a genuine, realistic snapshot-upsert failure.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO github_issues (project_id, github_issue_id, number, state, title)
+		VALUES ($1, 999999, 42, 'open', 'pre-existing conflicting issue')
+	`, projectID); err != nil {
+		t.Fatalf("seed conflicting issue: %v", err)
+	}
+
+	body := loadFixture(t, "issue_opened.json") // issue id=1001, number=42
+	deliveryID := "rollback-test-" + time.Now().Format("20060102150405.000000000")
+	ev := events.GitHubWebhookReceived{
+		DeliveryID:   deliveryID,
+		Event:        "issues",
+		Action:       "opened",
+		RepoFullName: "acme/rollback-test",
+		Payload:      body,
+	}
+
+	if err := ing.Ingest(ctx, ev); err == nil {
+		t.Fatal("expected Ingest to return an error from the constraint-violating snapshot upsert")
+	}
+
+	// Without the fix, both of these would be committed unconditionally
+	// regardless of the snapshot upsert's outcome -- permanently marking
+	// this delivery ID as processed even though nothing was persisted.
+	var dedupCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&dedupCount); err != nil {
+		t.Fatalf("count dedup: %v", err)
+	}
+	if dedupCount != 0 {
+		t.Errorf("expected 0 dedup rows after a failed Ingest, got %d -- a legitimate redelivery would be silently dropped forever", dedupCount)
+	}
+
+	var eventCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM github_events WHERE delivery_id = $1`, deliveryID,
+	).Scan(&eventCount); err != nil {
+		t.Fatalf("count github_events: %v", err)
+	}
+	if eventCount != 0 {
+		t.Errorf("expected 0 github_events rows after a failed Ingest, got %d", eventCount)
+	}
+
+	// Simulate the underlying problem being resolved, then redeliver the
+	// SAME delivery ID via GitHub's "Redeliver": it must be processed
+	// normally now, not treated as an already-seen duplicate.
+	if _, err := pool.Exec(ctx, `DELETE FROM github_issues WHERE project_id = $1 AND github_issue_id = 999999`, projectID); err != nil {
+		t.Fatalf("remove conflicting issue: %v", err)
+	}
+
+	if err := ing.Ingest(ctx, ev); err != nil {
+		t.Fatalf("redelivery after the conflict is resolved should succeed, got: %v", err)
+	}
+
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID,
+	).Scan(&dedupCount); err != nil {
+		t.Fatalf("count dedup after redelivery: %v", err)
+	}
+	if dedupCount != 1 {
+		t.Errorf("expected 1 dedup row after successful redelivery, got %d", dedupCount)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM webhook_delivery_dedup WHERE delivery_id = $1`, deliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_events WHERE delivery_id = $1`, deliveryID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_issues WHERE project_id = $1`, projectID)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Issue upsert – fields written correctly; second ingest updates on conflict
 // ---------------------------------------------------------------------------
 

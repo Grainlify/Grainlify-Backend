@@ -5,6 +5,7 @@ import (
 
 	"fmt"
 	"log/slog"
+	"mime"
 	"strings"
 	"time"
 	"net/url"
@@ -224,42 +225,41 @@ LIMIT 10
 			})
 		}
 
-		// Get user's rank position in leaderboard
-		// Use a more efficient query with CTE
+		// Get user's rank position in leaderboard.
+		// issue_counts/pr_counts pre-compute each login's count once and are
+		// reused for both the projected contribution_count and the WHERE
+		// filter, instead of running the same pair of correlated subqueries
+		// twice per row — the same fix already applied to leaderboardBaseQuery
+		// in leaderboard.go. Matching stays case-sensitive on ga.login/
+		// author_login, unchanged from before this fix.
 		var rankPosition *int
 		err = h.db.Pool.QueryRow(c.Context(), `
-WITH contribution_counts AS (
-  SELECT 
+WITH issue_counts AS (
+  SELECT i.author_login, COUNT(*) AS cnt
+  FROM github_issues i
+  INNER JOIN projects p ON i.project_id = p.id
+  WHERE p.status = 'verified'
+  GROUP BY i.author_login
+),
+pr_counts AS (
+  SELECT pr.author_login, COUNT(*) AS cnt
+  FROM github_pull_requests pr
+  INNER JOIN projects p ON pr.project_id = p.id
+  WHERE p.status = 'verified'
+  GROUP BY pr.author_login
+),
+contribution_counts AS (
+  SELECT
     ga.login,
-    (
-      SELECT COUNT(*) 
-      FROM github_issues i
-      INNER JOIN projects p ON i.project_id = p.id
-      WHERE i.author_login = ga.login AND p.status = 'verified'
-    ) +
-    (
-      SELECT COUNT(*) 
-      FROM github_pull_requests pr
-      INNER JOIN projects p ON pr.project_id = p.id
-      WHERE pr.author_login = ga.login AND p.status = 'verified'
-    ) as contribution_count
+    (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) as contribution_count
   FROM github_accounts ga
   INNER JOIN users u ON ga.user_id = u.id
-  WHERE (
-    SELECT COUNT(*) 
-    FROM github_issues i
-    INNER JOIN projects p ON i.project_id = p.id
-    WHERE i.author_login = ga.login AND p.status = 'verified'
-  ) +
-  (
-    SELECT COUNT(*) 
-    FROM github_pull_requests pr
-    INNER JOIN projects p ON pr.project_id = p.id
-    WHERE pr.author_login = ga.login AND p.status = 'verified'
-  ) > 0
+  LEFT JOIN issue_counts ic ON ic.author_login = ga.login
+  LEFT JOIN pr_counts pc ON pc.author_login = ga.login
+  WHERE (COALESCE(ic.cnt, 0) + COALESCE(pc.cnt, 0)) > 0
 ),
 ranked_users AS (
-  SELECT 
+  SELECT
     login,
     ROW_NUMBER() OVER (
       ORDER BY contribution_count DESC, login ASC
@@ -1387,6 +1387,55 @@ WHERE id = $%d
 	}
 }
 
+// allowedAvatarMIMETypes are the only media types accepted for a data: URI
+// avatar. image/svg+xml is deliberately excluded: SVG is XML that can embed
+// <script> elements and event-handler attributes, and a data: URI avatar may
+// end up rendered somewhere other than a strict <img> tag by a frontend this
+// backend doesn't control (e.g. a CSS background-image or <object> tag).
+var allowedAvatarMIMETypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// maxAvatarDataURILen bounds a data: URI avatar independent of, and tighter
+// than, the generic per-route body limit — otherwise a user could store up
+// to ~1MB of arbitrary base64 payload as their avatar and have it re-served
+// verbatim on every profile view.
+const maxAvatarDataURILen = 300 * 1024 // 300KB
+
+// validateAvatarURL applies the same rules UpdateAvatar enforces on
+// avatar_url: http(s):// URLs are accepted as-is (no fetch/content
+// validation, unchanged from before), while data: URIs must stay under
+// maxAvatarDataURILen and declare an allowlisted raster image MIME type.
+// Returns an httpx error code to reject with, or "" if avatarURL is
+// acceptable.
+func validateAvatarURL(avatarURL string) httpx.Code {
+	if strings.HasPrefix(avatarURL, "http://") || strings.HasPrefix(avatarURL, "https://") {
+		return ""
+	}
+	if !strings.HasPrefix(avatarURL, "data:") {
+		return "invalid_avatar_url_format"
+	}
+	if len(avatarURL) > maxAvatarDataURILen {
+		return "avatar_url_too_large"
+	}
+
+	header, _, found := strings.Cut(avatarURL, ",")
+	if !found {
+		return "invalid_avatar_url_format"
+	}
+	// header is "data:<mediatype>[;base64]". ";base64" is a data-URI flag,
+	// not a real MIME parameter, so it's stripped before mime.ParseMediaType.
+	mediaSpec := strings.TrimSuffix(strings.TrimPrefix(header, "data:"), ";base64")
+	mediaType, _, err := mime.ParseMediaType(mediaSpec)
+	if err != nil || !allowedAvatarMIMETypes[mediaType] {
+		return "invalid_avatar_url_format"
+	}
+	return ""
+}
+
 // UpdateAvatar updates user avatar URL
 func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -1414,11 +1463,10 @@ func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "avatar_url_required", "")
 		}
 
-		// Validate URL format (either http/https URL or data URL)
-		if !strings.HasPrefix(avatarURL, "http://") &&
-			!strings.HasPrefix(avatarURL, "https://") &&
-			!strings.HasPrefix(avatarURL, "data:image/") {
-			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_avatar_url_format", "")
+		// Validate URL format (either http/https URL, or a data: URI with an
+		// allowlisted raster MIME type and bounded size — see validateAvatarURL).
+		if errCode := validateAvatarURL(avatarURL); errCode != "" {
+			return httpx.RespondError(c, fiber.StatusBadRequest, errCode, "")
 		}
 
 		_, err = h.db.Pool.Exec(c.Context(), `

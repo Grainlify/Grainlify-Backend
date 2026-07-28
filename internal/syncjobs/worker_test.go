@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -557,5 +558,142 @@ func TestSyncPRs_NormalCompletion(t *testing.T) {
 
 	if !infoFound {
 		t.Error("expected slog.Info log for normal PR sync completion, but none was recorded")
+	}
+}
+
+// failingExecDBPool wraps mockWorkerDBPool but fails Exec for the first
+// failCount calls, then succeeds -- simulating one or more rows in a batch
+// that fail to persist while the rest of the page upserts fine.
+type failingExecDBPool struct {
+	mockWorkerDBPool
+	mu        sync.Mutex
+	failCount int
+	execCalls int
+}
+
+func (m *failingExecDBPool) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.execCalls++
+	if m.execCalls <= m.failCount {
+		return pgconn.CommandTag{}, errors.New("simulated constraint violation")
+	}
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+// TestSyncIssues_RowFailurePropagatesError is the regression test for issue
+// #294: a failed per-row upsert must not be silently discarded. Before the
+// fix, syncIssues always returned nil once pagination finished, so runJob
+// would report the sync job "completed" even though every row failed to
+// persist -- the job-level retry/backoff/dead-letter machinery in
+// jobFinalState never engaged.
+func TestSyncIssues_RowFailurePropagatesError(t *testing.T) {
+	// First page has 2 issues; fail the first upsert, succeed the second,
+	// then a second (empty) page ends pagination.
+	var pageCount int
+	var mu sync.Mutex
+	rt := &mockRoundTripper{
+		fn: func(req *http.Request) (*http.Response, error) {
+			mu.Lock()
+			pageCount++
+			current := pageCount
+			mu.Unlock()
+
+			var data []byte
+			if current == 1 {
+				items := []github.IssueListItem{
+					{ID: 1, Number: 1, State: "open", Title: "Issue 1"},
+					{ID: 2, Number: 2, State: "open", Title: "Issue 2"},
+				}
+				data, _ = json.Marshal(items)
+			} else {
+				data = []byte("[]")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(data)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	w := &Worker{
+		pool:    &failingExecDBPool{failCount: 1},
+		limiter: rate.NewLimiter(rate.Inf, 0),
+		gh: &github.Client{
+			HTTP: &http.Client{Transport: rt},
+		},
+	}
+
+	err := w.syncIssues(context.Background(), uuid.New(), "owner/repo", "token")
+	if err == nil {
+		t.Fatal("syncIssues returned nil error despite a failed row upsert; the sync job would be silently marked completed")
+	}
+}
+
+// TestSyncPRs_RowFailurePropagatesError is the PR-sync counterpart of
+// TestSyncIssues_RowFailurePropagatesError.
+func TestSyncPRs_RowFailurePropagatesError(t *testing.T) {
+	var pageCount int
+	var mu sync.Mutex
+	rt := &mockRoundTripper{
+		fn: func(req *http.Request) (*http.Response, error) {
+			mu.Lock()
+			pageCount++
+			current := pageCount
+			mu.Unlock()
+
+			var data []byte
+			if current == 1 {
+				items := []github.PRListItem{
+					{ID: 100, Number: 10, State: "open", Title: "PR 10"},
+				}
+				data, _ = json.Marshal(items)
+			} else {
+				data = []byte("[]")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(data)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	w := &Worker{
+		pool:    &failingExecDBPool{failCount: 1},
+		limiter: rate.NewLimiter(rate.Inf, 0),
+		gh: &github.Client{
+			HTTP: &http.Client{Transport: rt},
+		},
+	}
+
+	err := w.syncPRs(context.Background(), uuid.New(), "owner/repo", "token")
+	if err == nil {
+		t.Fatal("syncPRs returned nil error despite a failed row upsert; the sync job would be silently marked completed")
+	}
+}
+
+// TestJobFinalState_RowFailureErrorTriggersRetryOrDeadLetter proves the
+// error produced by a row-failure (the "sync issues: N/M rows failed to
+// persist" shape) flows correctly into the existing jobFinalState
+// retry/backoff/dead-letter logic, exactly like any other runErr -- closing
+// the loop from "per-row failure" to "job not marked completed."
+func TestJobFinalState_RowFailureErrorTriggersRetryOrDeadLetter(t *testing.T) {
+	rowFailureErr := fmt.Errorf("sync issues: %d/%d rows failed to persist", 1, 2)
+
+	// Below the dead-letter threshold: reschedules with backoff, not "completed".
+	state := jobFinalState(rowFailureErr, 0, 5, 30*time.Second, time.Hour)
+	if state.status != "pending" {
+		t.Fatalf("status = %q, want pending (job must not be marked completed)", state.status)
+	}
+	if state.runAt == nil {
+		t.Fatal("expected a backoff runAt to be set")
+	}
+
+	// At the dead-letter threshold: job is dead-lettered, not "completed".
+	deadState := jobFinalState(rowFailureErr, 4, 5, 30*time.Second, time.Hour)
+	if deadState.status != "dead" {
+		t.Fatalf("status = %q, want dead", deadState.status)
 	}
 }

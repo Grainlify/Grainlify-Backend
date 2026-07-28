@@ -1,11 +1,34 @@
 package soroban
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/stellar/go/xdr"
 )
+
+// ErrConfirmationUnknown wraps the error returned by a fund-moving contract
+// method (EscrowContract.Init/LockFunds/ReleaseFunds/Refund,
+// ProgramEscrowContract.LockProgramFunds/SinglePayout/BatchPayout) when the
+// submitted transaction's on-chain confirmation could not be verified --
+// WaitForConfirmation timed out or errored, not that the transaction failed.
+//
+// Callers must not treat this as a hard failure to retry from scratch: the
+// transaction may still be submitted and could later confirm on-chain, so
+// blindly retrying risks a double-submission of a funds-moving operation.
+// Use errors.Is(err, ErrConfirmationUnknown) to detect this case, and poll
+// for the transaction's actual status later using the TransactionResult
+// (still returned alongside this error) and its Hash field.
+var ErrConfirmationUnknown = errors.New("transaction submitted but confirmation could not be verified")
+
+// wrapConfirmationUnknown wraps waitErr (a WaitForConfirmation failure) with
+// ErrConfirmationUnknown so callers can distinguish "confirmation unknown"
+// from "confirmed" via errors.Is, while still returning result -- with its
+// tx hash and "pending" status -- so the caller can poll for it later.
+func wrapConfirmationUnknown(result *TransactionResult, waitErr error) (*TransactionResult, error) {
+	return result, fmt.Errorf("%w: tx_hash=%s: %v", ErrConfirmationUnknown, result.Hash, waitErr)
+}
 
 // Network represents the Stellar network (testnet or mainnet)
 type Network string

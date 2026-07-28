@@ -33,6 +33,9 @@ type Client struct {
 	// PollTransactionStatus. See PollTransactionStatus for details.
 	mu       sync.Mutex
 	inFlight map[string]*inFlightPoll
+
+	// breaker guards outbound RPC calls made via Call (rpc.go); see breaker.go.
+	breaker *circuitBreaker
 }
 
 // Config holds the endpoint, network, and timeout settings used by NewClient.
@@ -41,13 +44,22 @@ type Client struct {
 // NetworkPassphrase is optional; when empty, NewClient derives the Stellar public
 // or test network passphrase from Network. HTTPTimeout controls both the Soroban
 // RPC HTTP client and the Horizon client used by TransactionBuilder in tx.go.
-// Configuration validation errors returned by NewClient are terminal; retrying
-// with the same Config will return the same error.
+// CircuitBreakerThreshold and CircuitBreakerCooldown configure the breaker
+// that guards Call (rpc.go); see breaker.go. Configuration validation errors
+// returned by NewClient are terminal; retrying with the same Config will
+// return the same error.
 type Config struct {
 	RPCURL            string  // Soroban RPC endpoint
 	NetworkPassphrase string  // Network passphrase
 	Network           Network // "testnet" or "mainnet"
 	HTTPTimeout       time.Duration
+
+	// CircuitBreakerThreshold is the number of consecutive Call failures that
+	// trips the breaker open. Defaults to 5 when zero.
+	CircuitBreakerThreshold int
+	// CircuitBreakerCooldown is how long the breaker stays open before
+	// allowing a half-open probe call through. Defaults to 30s when zero.
+	CircuitBreakerCooldown time.Duration
 }
 
 // NewClient validates cfg and creates a Client for Soroban RPC and Horizon.
@@ -76,6 +88,12 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.HTTPTimeout == 0 {
 		cfg.HTTPTimeout = 30 * time.Second
 	}
+	if cfg.CircuitBreakerThreshold == 0 {
+		cfg.CircuitBreakerThreshold = 5
+	}
+	if cfg.CircuitBreakerCooldown == 0 {
+		cfg.CircuitBreakerCooldown = 30 * time.Second
+	}
 	// Create Horizon client
 	horizonURL := "https://horizon-testnet.stellar.org"
 	if cfg.Network == NetworkMainnet {
@@ -96,6 +114,7 @@ func NewClient(cfg Config) (*Client, error) {
 		},
 		network:  cfg.Network,
 		inFlight: make(map[string]*inFlightPoll),
+		breaker:  newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerCooldown),
 	}, nil
 }
 

@@ -4,6 +4,8 @@
 package metrics
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"regexp"
 	"strconv"
 	"time"
@@ -114,6 +116,16 @@ var (
 		Name:      "public_cache_total",
 		Help:      "Total number of public projects cache lookups by route and result (hit, miss).",
 	}, []string{"route", "result"})
+
+	// SorobanCircuitBreakerState reports the current state of the circuit
+	// breaker guarding outbound Soroban RPC calls (internal/soroban/breaker.go):
+	// 0=closed, 1=open, 2=half-open.
+	SorobanCircuitBreakerState = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "grainlify",
+		Subsystem: "soroban",
+		Name:      "circuit_breaker_state",
+		Help:      "Current state of the Soroban RPC circuit breaker (0=closed, 1=open, 2=half-open).",
+	})
 )
 
 // NormalizePath replaces dynamic path segments (UUIDs, numeric IDs) with ":id"
@@ -157,13 +169,27 @@ func Handler() fiber.Handler {
 // TokenGate returns a Fiber middleware that requires the caller to supply the
 // configured bearer token via the Authorization header. If token is empty the
 // middleware is a no-op (useful when /metrics is protected at the network level).
+// secureCompare reports whether a and b are equal using a constant-time
+// comparison, so response timing can't leak how many leading bytes of a
+// guess matched the real secret. Hashing both inputs first (rather than
+// padding/truncating) ensures the comparison runs on fixed-length buffers
+// regardless of a/b's own lengths. Mirrors the identical helper in
+// internal/handlers/admin.go's secureCompare -- duplicated here rather than
+// imported since internal/handlers already imports internal/metrics, and
+// the reverse import would create a cycle.
+func secureCompare(a, b string) bool {
+	aHash := sha256.Sum256([]byte(a))
+	bHash := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
+}
+
 func TokenGate(token string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if token == "" {
 			return c.Next()
 		}
 		auth := c.Get(fiber.HeaderAuthorization)
-		if auth == "Bearer "+token {
+		if secureCompare(auth, "Bearer "+token) {
 			return c.Next()
 		}
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
