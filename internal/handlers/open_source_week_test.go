@@ -1,10 +1,21 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 func TestValidateCreate(t *testing.T) {
@@ -406,3 +417,97 @@ func TestIsTimeInCampaignWindowDST(t *testing.T) {
 	})
 }
 
+// oswFakeExecPool implements db.DBPool for Delete() tests. Only Exec is
+// exercised; every other method panics so a test fails loudly if the
+// handler starts calling something unexpected.
+type oswFakeExecPool struct {
+	execTag pgconn.CommandTag
+	execErr error
+}
+
+func (p *oswFakeExecPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return p.execTag, p.execErr
+}
+func (p *oswFakeExecPool) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("not implemented")
+}
+func (p *oswFakeExecPool) QueryRow(context.Context, string, ...any) pgx.Row {
+	panic("not implemented")
+}
+func (p *oswFakeExecPool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	panic("not implemented")
+}
+func (p *oswFakeExecPool) Ping(context.Context) error { return nil }
+func (p *oswFakeExecPool) Close()                     {}
+func (p *oswFakeExecPool) Config() *pgxpool.Config    { return nil }
+
+func deleteTestApp(pool db.DBPool) *fiber.App {
+	h := NewOpenSourceWeekAdminHandler(&db.DB{Pool: pool})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Delete("/admin/open-source-week/events/:id", h.Delete())
+	return app
+}
+
+// TestDelete_ExecErrorReturns500NotFound is the regression test for issue
+// #292: a real Exec failure (error returned alongside the zero-value
+// CommandTag pgx always returns on error) must be reported as 500, not
+// masked as 404 by a RowsAffected()==0 check that runs before err is
+// checked.
+func TestDelete_ExecErrorReturns500(t *testing.T) {
+	app := deleteTestApp(&oswFakeExecPool{
+		execTag: pgconn.CommandTag{}, // zero-value, exactly what pgx returns alongside an error
+		execErr: errors.New("connection reset by peer"),
+	})
+
+	req := httptest.NewRequest("DELETE", "/admin/open-source-week/events/"+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d (500 osw_event_delete_failed)", resp.StatusCode, fiber.StatusInternalServerError)
+	}
+}
+
+// TestDelete_NoRowsAffectedReturns404 confirms a genuinely nonexistent event
+// (Exec succeeds, zero rows affected) still responds 404, unchanged by the
+// #292 fix.
+func TestDelete_NoRowsAffectedReturns404(t *testing.T) {
+	app := deleteTestApp(&oswFakeExecPool{
+		execTag: pgconn.NewCommandTag("DELETE 0"),
+		execErr: nil,
+	})
+
+	req := httptest.NewRequest("DELETE", "/admin/open-source-week/events/"+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("status = %d, want %d (404 event_not_found)", resp.StatusCode, fiber.StatusNotFound)
+	}
+}
+
+// TestDelete_SuccessReturns200 confirms the happy path (Exec succeeds, one
+// row affected) is unaffected by the #292 fix.
+func TestDelete_SuccessReturns200(t *testing.T) {
+	app := deleteTestApp(&oswFakeExecPool{
+		execTag: pgconn.NewCommandTag("DELETE 1"),
+		execErr: nil,
+	})
+
+	req := httptest.NewRequest("DELETE", "/admin/open-source-week/events/"+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
+	}
+}

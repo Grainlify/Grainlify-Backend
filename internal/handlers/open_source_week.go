@@ -278,12 +278,18 @@ func (h *OpenSourceWeekAdminHandler) Delete() fiber.Handler {
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_event_id", "")
 		}
+		// A real Exec failure must be reported as 500, not masked as 404: pgx
+		// returns a zero-value CommandTag alongside any error, and a
+		// zero-value CommandTag.RowsAffected() is 0 -- so err must be checked
+		// first, before RowsAffected() is trusted to mean "no such event."
+		// (pgx.ErrNoRows is a QueryRow.Scan sentinel and is never returned by
+		// Exec, so that check was dead code.)
 		ct, err := h.db.Pool.Exec(c.Context(), `DELETE FROM open_source_week_events WHERE id = $1`, evID)
-		if errors.Is(err, pgx.ErrNoRows) || ct.RowsAffected() == 0 {
-			return httpx.RespondError(c, fiber.StatusNotFound, "event_not_found", "")
-		}
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "osw_event_delete_failed", "")
+		}
+		if ct.RowsAffected() == 0 {
+			return httpx.RespondError(c, fiber.StatusNotFound, "event_not_found", "")
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
