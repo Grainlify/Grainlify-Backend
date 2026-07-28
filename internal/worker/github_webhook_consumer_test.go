@@ -406,6 +406,20 @@ func (i *idempotentIngestor) Ingest(_ context.Context, e events.GitHubWebhookRec
 	return nil
 }
 
+// failFirstIngestor returns errOnFirst on the first call and nil on all subsequent calls.
+type failFirstIngestor struct {
+	errOnFirst error
+	count      int
+}
+
+func (f *failFirstIngestor) Ingest(_ context.Context, _ events.GitHubWebhookReceived) error {
+	f.count++
+	if f.count == 1 {
+		return f.errOnFirst
+	}
+	return nil
+}
+
 func makeWebhookMsg(t *testing.T, deliveryID, event string) *nats.Msg {
 	t.Helper()
 	payload, err := json.Marshal(events.GitHubWebhookReceived{
@@ -462,13 +476,13 @@ func TestGitHubWebhookConsumer_EmptyDeliveryIDIsRejected(t *testing.T) {
 	}
 }
 
-// markSeen must be goroutine-safe (no data race).
+// alreadyProcessed/beginInFlight/clearInFlight/recordProcessed must be goroutine-safe (no data race).
 func TestGitHubWebhookConsumer_MarkSeenIsConcurrentlySafe(t *testing.T) {
 	consumer := &GitHubWebhookConsumer{}
 	done := make(chan struct{})
 	for i := 0; i < 20; i++ {
 		go func(n int) {
-			consumer.markSeen("delivery-concurrent")
+			consumer.alreadyProcessed("delivery-concurrent")
 			done <- struct{}{}
 		}(i)
 	}
@@ -512,5 +526,57 @@ func TestGitHubWebhookConsumer_MarkSeenEvictsOldest(t *testing.T) {
 	consumer.handleMessage(ctx, makeWebhookMsg(t, "id-1", "issues"))
 	if ingestor.count != 5 {
 		t.Fatalf("expected id-1 to be processed again as it was evicted, got count=%d", ingestor.count)
+	}
+}
+
+// TestGitHubWebhookConsumer_FailedIngestDoesNotBlockRedelivery verifies that
+// when Ingest returns an error the delivery ID is NOT recorded as processed, so
+// a subsequent redelivery of the same X-GitHub-Delivery ID is retried instead
+// of being silently discarded as a duplicate.
+//
+// This is the critical regression test for the bug described in the issue:
+// GitHub's "Redeliver" feature sends the same X-GitHub-Delivery ID. Without
+// this fix, the ID would be marked seen on the first (failed) attempt, causing
+// the redelivery to be discarded and the event to be permanently lost.
+func TestGitHubWebhookConsumer_FailedIngestDoesNotBlockRedelivery(t *testing.T) {
+	// First call fails; all subsequent calls succeed.
+	ingestor := &failFirstIngestor{errOnFirst: errors.New("transient db error")}
+	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
+	ctx := context.Background()
+
+	// First delivery — Ingest fails.
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "redeliver-1", "issues"))
+	if ingestor.count != 1 {
+		t.Fatalf("expected Ingest called once after first delivery, got %d", ingestor.count)
+	}
+
+	// GitHub redelivers the same delivery ID. Ingest should be called again
+	// (not silently dropped as a duplicate).
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "redeliver-1", "issues"))
+	if ingestor.count != 2 {
+		t.Fatalf("expected Ingest called again on redelivery after failure, got %d (redelivery was incorrectly dropped as duplicate)", ingestor.count)
+	}
+
+	// After the successful second call the ID should be permanently recorded.
+	// A third delivery of the same ID must now be treated as a duplicate.
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "redeliver-1", "issues"))
+	if ingestor.count != 2 {
+		t.Fatalf("expected Ingest NOT called after successful ingest (true duplicate), got %d", ingestor.count)
+	}
+}
+
+// TestGitHubWebhookConsumer_SuccessfulIngestDeduplicatesOnRedelivery is the
+// complementary case: once a delivery ID is successfully ingested, a later
+// redelivery of the same ID must be silently discarded.
+func TestGitHubWebhookConsumer_SuccessfulIngestDeduplicatesOnRedelivery(t *testing.T) {
+	ingestor := &recordingIngestor{}
+	consumer := &GitHubWebhookConsumer{Ingest: ingestor}
+	ctx := context.Background()
+
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "success-then-dup", "issues"))
+	consumer.handleMessage(ctx, makeWebhookMsg(t, "success-then-dup", "issues")) // redelivery
+
+	if ingestor.count != 1 {
+		t.Errorf("expected Ingest called exactly once for a successful+redelivered ID, got %d", ingestor.count)
 	}
 }

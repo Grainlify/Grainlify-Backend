@@ -25,6 +25,14 @@ type GitHubWebhookIngestor interface {
 // GitHubWebhookConsumer subscribes to the NATS webhook subject and dispatches
 // events to the configured Ingestor. Duplicate X-GitHub-Delivery IDs are
 // detected and discarded before Ingest is called (in-process de-duplication).
+//
+// De-duplication correctness guarantee: a delivery ID is only recorded as
+// "seen" after Ingest succeeds. If Ingest fails the ID remains eligible for
+// re-processing on the next GitHub redelivery. Concurrent redeliveries of the
+// same ID that arrive while one attempt is in flight are detected via the
+// inFlightIDs set and discarded for that window; they will be retried on the
+// next redelivery once the in-flight attempt has finished (and either succeeded
+// or failed).
 type GitHubWebhookConsumer struct {
 	Sub    *nats.Subscription
 	Ingest GitHubWebhookIngestor
@@ -44,10 +52,14 @@ type GitHubWebhookConsumer struct {
 	processingCtx    context.Context
 	cancelProcessing context.CancelFunc
 
-	// seenMu guards seenDeliveryIDs and seenDeliveryList.
+	// seenMu guards seenDeliveryIDs, seenDeliveryList, and inFlightIDs.
 	seenMu           sync.Mutex
 	seenDeliveryIDs  map[string]*list.Element
 	seenDeliveryList *list.List
+	// inFlightIDs tracks delivery IDs whose Ingest call has started but not yet
+	// succeeded or permanently failed. A concurrent redelivery of the same ID
+	// is treated like a duplicate for the duration of the in-flight attempt.
+	inFlightIDs map[string]struct{}
 	// maxSeenIDs caps the in-memory set size; eviction drops the oldest by insertion-order
 	// approximation (reset the map when full). Default 0 means no cap.
 	maxSeenIDs int
@@ -147,11 +159,63 @@ func (c *GitHubWebhookConsumer) drainOnShutdown(ctx context.Context, sub *nats.S
 	slog.Info("github webhook consumer drained in-flight messages")
 }
 
-// markSeen returns true if deliveryID has been seen before (duplicate), false if new.
-// Thread-safe. An empty deliveryID is never de-duplicated (pass-through).
-func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
+// alreadyProcessed returns true if deliveryID has already been successfully
+// ingested (permanent duplicate) or is currently being processed by another
+// goroutine (transient in-flight duplicate).
+// Thread-safe. An empty deliveryID always returns false (pass-through).
+func (c *GitHubWebhookConsumer) alreadyProcessed(deliveryID string) bool {
 	if deliveryID == "" {
 		return false
+	}
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+
+	if c.seenDeliveryIDs != nil {
+		if _, ok := c.seenDeliveryIDs[deliveryID]; ok {
+			return true // already successfully ingested
+		}
+	}
+	if c.inFlightIDs != nil {
+		if _, ok := c.inFlightIDs[deliveryID]; ok {
+			return true // currently in flight — treat as transient duplicate
+		}
+	}
+	return false
+}
+
+// beginInFlight marks deliveryID as in-flight so that concurrent redeliveries
+// of the same ID are treated as transient duplicates while the current attempt
+// is running. Call clearInFlight when the attempt finishes.
+func (c *GitHubWebhookConsumer) beginInFlight(deliveryID string) {
+	if deliveryID == "" {
+		return
+	}
+	c.seenMu.Lock()
+	if c.inFlightIDs == nil {
+		c.inFlightIDs = make(map[string]struct{})
+	}
+	c.inFlightIDs[deliveryID] = struct{}{}
+	c.seenMu.Unlock()
+}
+
+// clearInFlight removes deliveryID from the in-flight set. Always call this
+// after an Ingest attempt (success or failure).
+func (c *GitHubWebhookConsumer) clearInFlight(deliveryID string) {
+	if deliveryID == "" {
+		return
+	}
+	c.seenMu.Lock()
+	if c.inFlightIDs != nil {
+		delete(c.inFlightIDs, deliveryID)
+	}
+	c.seenMu.Unlock()
+}
+
+// recordProcessed marks deliveryID as permanently processed (successful ingest).
+// Subsequent calls to alreadyProcessed for this ID will return true.
+func (c *GitHubWebhookConsumer) recordProcessed(deliveryID string) {
+	if deliveryID == "" {
+		return
 	}
 	c.seenMu.Lock()
 	defer c.seenMu.Unlock()
@@ -162,7 +226,7 @@ func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
 	}
 
 	if _, ok := c.seenDeliveryIDs[deliveryID]; ok {
-		return true
+		return // already recorded
 	}
 
 	cap := c.maxSeenIDs
@@ -180,8 +244,6 @@ func (c *GitHubWebhookConsumer) markSeen(deliveryID string) bool {
 			delete(c.seenDeliveryIDs, oldest.Value.(string))
 		}
 	}
-
-	return false
 }
 
 func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg) {
@@ -196,8 +258,14 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 		return
 	}
 
-	// De-duplicate by X-GitHub-Delivery ID before forwarding to Ingest.
-	if c.markSeen(e.DeliveryID) {
+	// De-duplicate by X-GitHub-Delivery ID.
+	// alreadyProcessed covers two cases:
+	//   1. Permanent: the ID was successfully ingested before.
+	//   2. Transient: a concurrent goroutine is currently ingesting the same ID.
+	// In both cases we discard the message here. If the in-flight attempt later
+	// fails the ID is cleared from inFlightIDs, so GitHub's redelivery of the
+	// same ID will be retried on the next delivery.
+	if c.alreadyProcessed(e.DeliveryID) {
 		slog.Debug("duplicate github webhook delivery discarded", "delivery_id", e.DeliveryID)
 		return
 	}
@@ -205,7 +273,14 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 	if c.Ingest == nil {
 		return
 	}
-	if err := c.Ingest.Ingest(ctx, e); err != nil {
+
+	// Mark the ID as in-flight so that concurrent redeliveries arriving while
+	// Ingest is running are treated as transient duplicates.
+	c.beginInFlight(e.DeliveryID)
+	err := c.Ingest.Ingest(ctx, e)
+	c.clearInFlight(e.DeliveryID)
+
+	if err != nil {
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("github webhook message processing cancelled",
 				"error", err,
@@ -214,9 +289,15 @@ func (c *GitHubWebhookConsumer) handleMessage(ctx context.Context, msg *nats.Msg
 			)
 			return
 		}
+		// Ingest failed — do NOT record the ID as processed. GitHub's redelivery
+		// of the same X-GitHub-Delivery ID will be retried instead of discarded.
 		slog.Error("webhook ingest failed", "error", err)
 		return
 	}
+
+	// Only record the delivery ID as successfully processed after Ingest returns
+	// nil. This ensures a failed ingest never permanently blocks redelivery.
+	c.recordProcessed(e.DeliveryID)
 	if c.LivenessTracker != nil {
 		c.LivenessTracker.Tick()
 	}
