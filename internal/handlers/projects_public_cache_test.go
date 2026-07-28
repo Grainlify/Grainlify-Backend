@@ -297,22 +297,32 @@ func TestPaginationResponse_Structure(t *testing.T) {
 		t.Fatalf("failed to unmarshal pagination response: %v", err)
 	}
 
-	// Verify structure
-	if parsed["data_key"] != "projects" {
-		t.Errorf("expected data_key='projects', got %v", parsed["data_key"])
+	// PaginatedResponse returns a flat envelope, not a nested "pagination"
+	// object with a separate "data_key" discriminator -- see its doc
+	// comment: {"<itemsKey>": [...], "limit": N, "offset": N, "total": N,
+	// "has_more": bool}. This flat shape is what every real caller
+	// (List/Recommended/etc.) and every other passing pagination test in
+	// this package (e.g. TestProjectsPagination_Integration) actually
+	// decodes, so this test asserts that real shape rather than a
+	// different, unused envelope.
+	if _, ok := parsed["projects"]; !ok {
+		t.Errorf("expected a top-level %q items key, got keys: %v", "projects", parsed)
 	}
 
-	pagination, ok := parsed["pagination"].(map[string]interface{})
-	if !ok {
-		t.Fatal("pagination field missing or wrong type")
+	if parsed["total"] != float64(100) {
+		t.Errorf("expected total=100, got %v", parsed["total"])
 	}
 
-	if pagination["total"] != float64(100) {
-		t.Errorf("expected total=100, got %v", pagination["total"])
+	if parsed["limit"] != float64(50) {
+		t.Errorf("expected limit=50, got %v", parsed["limit"])
 	}
 
-	if pagination["limit"] != float64(50) {
-		t.Errorf("expected limit=50, got %v", pagination["limit"])
+	if parsed["offset"] != float64(0) {
+		t.Errorf("expected offset=0, got %v", parsed["offset"])
+	}
+
+	if parsed["has_more"] != true {
+		t.Errorf("expected has_more=true (offset 0 + limit 50 < total 100), got %v", parsed["has_more"])
 	}
 }
 

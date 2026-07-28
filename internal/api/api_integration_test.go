@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +25,15 @@ import (
 )
 
 // mockDBPool is a stub implementation of db.DBPool interface used for integration tests.
-type mockDBPool struct{}
+// rolesByUserID lets a test seed a specific user ID -> role mapping so
+// auth.RequireCurrentRole (which re-verifies the caller's role against the
+// live database rather than trusting the JWT's role claim) can resolve a
+// role for requests that are meant to reach an admin-gated handler. Any user
+// ID not present in the map falls back to the previous always-ErrNoRows
+// behavior, matching every other mocked query in this file.
+type mockDBPool struct {
+	rolesByUserID map[uuid.UUID]string
+}
 
 // Exec implements db.DBPool.
 func (m *mockDBPool) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
@@ -37,6 +47,13 @@ func (m *mockDBPool) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 
 // QueryRow implements db.DBPool.
 func (m *mockDBPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "SELECT role FROM users WHERE id") && len(args) == 1 {
+		if id, ok := args[0].(uuid.UUID); ok {
+			if role, found := m.rolesByUserID[id]; found {
+				return &mockRoleRow{role: role}
+			}
+		}
+	}
 	return &mockRow{}
 }
 
@@ -112,6 +129,24 @@ func (m *mockRow) Scan(dest ...any) error {
 	return pgx.ErrNoRows
 }
 
+// mockRoleRow is a stub pgx.Row that resolves a single "role" text column.
+// Used by mockDBPool.QueryRow to answer auth.RequireCurrentRole's
+// `SELECT role FROM users WHERE id = $1` lookup for a seeded user ID.
+type mockRoleRow struct{ role string }
+
+// Scan implements pgx.Row.
+func (m *mockRoleRow) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return fmt.Errorf("mockRoleRow: expected 1 scan destination, got %d", len(dest))
+	}
+	ptr, ok := dest[0].(*string)
+	if !ok {
+		return fmt.Errorf("mockRoleRow: unsupported scan destination %T", dest[0])
+	}
+	*ptr = m.role
+	return nil
+}
+
 // mockRows is a stub implementation of pgx.Rows interface that has no rows.
 type mockRows struct{}
 
@@ -168,7 +203,8 @@ func TestAPIIntegration(t *testing.T) {
 		MaxBodyBytes: 1024 * 1024,
 	}
 
-	mockDB := &db.DB{Pool: &mockDBPool{}}
+	mockPool := &mockDBPool{}
+	mockDB := &db.DB{Pool: mockPool}
 	busInstance := &mockBus{}
 	buildInfo := handlers.BuildInfo{
 		Version:   "1.0.0-test",
@@ -179,15 +215,23 @@ func TestAPIIntegration(t *testing.T) {
 	app := api.New(cfg, api.Deps{DB: mockDB, Bus: busInstance}, buildInfo)
 
 	// Helper to generate valid JWT tokens for test requests
-	generateToken := func(role string) string {
-		token, err := auth.IssueJWT(jwtSecret, uuid.New(), role, auth.WalletTypeEVM, "0x1234567890123456789012345678901234567890", 1*time.Hour)
+	generateToken := func(role string) (string, uuid.UUID) {
+		userID := uuid.New()
+		token, err := auth.IssueJWT(jwtSecret, userID, role, auth.WalletTypeEVM, "0x1234567890123456789012345678901234567890", 1*time.Hour)
 		require.NoError(t, err)
-		return "Bearer " + token
+		return "Bearer " + token, userID
 	}
 
-	validUserToken := generateToken("user")
-	validAdminToken := generateToken("admin")
+	validUserToken, _ := generateToken("user")
+	validAdminToken, validAdminUserID := generateToken("admin")
 	invalidToken := "Bearer invalid-token-sig"
+
+	// auth.RequireCurrentRole re-verifies the caller's role against the live
+	// database rather than trusting the JWT's role claim (see its doc
+	// comment). Seed the mock pool so the admin token's user ID resolves to
+	// role "admin" -- the non-admin user token deliberately has no entry and
+	// falls back to ErrNoRows, which correctly denies it too.
+	mockPool.rolesByUserID = map[uuid.UUID]string{validAdminUserID: "admin"}
 
 	tests := []struct {
 		name           string
