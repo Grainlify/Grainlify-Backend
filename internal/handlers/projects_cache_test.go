@@ -232,6 +232,16 @@ func TestProjectsCache_Concurrent(t *testing.T) {
 // TestProjectsCache_EvictionLoop verifies that the background eviction goroutine
 // cleans up expired entries periodically.
 func TestProjectsCache_EvictionLoop(t *testing.T) {
+	// evictLoop floors its sweep interval at minEvictInterval (5s in
+	// production; see the doc comment on evictLoop) so a very short TTL
+	// like the one below never triggers a real background sweep within a
+	// reasonable test timeout. Shrink the floor for the duration of this
+	// test only; Go runs tests within a package sequentially (no
+	// t.Parallel here), so this global is safely scoped by t.Cleanup.
+	origInterval := minEvictInterval
+	minEvictInterval = 20 * time.Millisecond
+	t.Cleanup(func() { minEvictInterval = origInterval })
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	ttl := 50 * time.Millisecond

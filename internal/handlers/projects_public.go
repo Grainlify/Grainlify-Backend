@@ -152,10 +152,6 @@ func (h *ProjectsPublicHandler) Get() fiber.Handler {
 			"request_id", c.Locals("requestid"),
 		)
 
-		if h.db == nil || h.db.Pool == nil {
-			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
-		}
-
 		projectID, err := uuid.Parse(projectIDParam)
 		if err != nil {
 			slog.Warn("projects/:id: invalid project ID format",
@@ -173,15 +169,23 @@ func (h *ProjectsPublicHandler) Get() fiber.Handler {
 		// stale as a cached 200 body -- the next request simply re-fetches.
 		cacheKey := "project:" + projectID.String()
 
+		fetch := func() ([]byte, error) {
+			if h.db == nil || h.db.Pool == nil {
+				return nil, errDBNotConfigured
+			}
+			return h.getFetch(c, projectID)
+		}
+
 		var body []byte
 		if h.cache != nil {
-			body, err = h.cache.Do(cacheKey, "get", func() ([]byte, error) {
-				return h.getFetch(c, projectID)
-			})
+			body, err = h.cache.Do(cacheKey, "get", fetch)
 		} else {
-			body, err = h.getFetch(c, projectID)
+			body, err = fetch()
 		}
 		if err != nil {
+			if errors.Is(err, errDBNotConfigured) {
+				return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
+			}
 			var gerr *projectGetError
 			if errors.As(err, &gerr) {
 				return httpx.RespondError(c, gerr.status, gerr.code, "")
@@ -547,6 +551,31 @@ SELECT COUNT(*) FROM github_pull_requests WHERE project_id = $1
 	}
 }
 
+// errDBNotConfigured is returned by a fetch closure when h.db/h.db.Pool is
+// nil. It is deferred into the closure (rather than checked eagerly before
+// the cache lookup) so that a cache HIT can still be served even while the
+// database is unavailable — only a cache MISS actually needs a live pool.
+var errDBNotConfigured = errors.New("projects_public: db not configured")
+
+// respondProjectsFetchError maps an error returned by one of this handler's
+// cached fetch closures to the correct HTTP response.
+//
+//   - ErrPaginationResponded means ParsePagination already wrote a 400
+//     directly to c; the caller must return nil so Fiber doesn't overwrite
+//     that committed response with a 500 (see ParsePagination's doc comment).
+//   - errDBNotConfigured means the fetch never had a live DB pool to query.
+//   - anything else is an opaque internal failure reported via genericCode.
+func respondProjectsFetchError(c *fiber.Ctx, err error, genericCode httpx.Code) error {
+	switch {
+	case errors.Is(err, ErrPaginationResponded):
+		return nil
+	case errors.Is(err, errDBNotConfigured):
+		return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
+	default:
+		return httpx.RespondError(c, fiber.StatusInternalServerError, genericCode, "")
+	}
+}
+
 // List returns a filtered list of verified projects.
 // Query parameters:
 //   - ecosystem: filter by ecosystem name (case-insensitive)
@@ -557,27 +586,25 @@ SELECT COUNT(*) FROM github_pull_requests WHERE project_id = $1
 //   - offset: pagination offset (default 0)
 func (h *ProjectsPublicHandler) List() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
-		}
-
 		// Cache key: stable sort of all query params so ?a=1&b=2 and ?b=2&a=1 hit the same entry.
 		cacheKey := "list:" + c.OriginalURL()
 
-		if h.cache != nil {
-			body, err := h.cache.Do(cacheKey, "list", func() ([]byte, error) {
-				return h.listFetch(c)
-			})
-			if err != nil {
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+		fetch := func() ([]byte, error) {
+			if h.db == nil || h.db.Pool == nil {
+				return nil, errDBNotConfigured
 			}
-			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-			return c.Status(fiber.StatusOK).Send(body)
+			return h.listFetch(c)
 		}
 
-		body, err := h.listFetch(c)
+		var body []byte
+		var err error
+		if h.cache != nil {
+			body, err = h.cache.Do(cacheKey, "list", fetch)
+		} else {
+			body, err = fetch()
+		}
 		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+			return respondProjectsFetchError(c, err, "projects_list_failed")
 		}
 		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		return c.Status(fiber.StatusOK).Send(body)
@@ -742,24 +769,24 @@ WHERE %s
 //   - offset: pagination offset (default 0)
 func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
+		cacheKey := "recommended:" + c.OriginalURL()
+
+		fetch := func() ([]byte, error) {
+			if h.db == nil || h.db.Pool == nil {
+				return nil, errDBNotConfigured
+			}
+			return h.recommendedFetch(c)
 		}
 
-		cacheKey := "recommended:" + c.OriginalURL()
+		var body []byte
+		var err error
 		if h.cache != nil {
-			body, err := h.cache.Do(cacheKey, "recommended", func() ([]byte, error) {
-				return h.recommendedFetch(c)
-			})
-			if err != nil {
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
-			}
-			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-			return c.Status(fiber.StatusOK).Send(body)
+			body, err = h.cache.Do(cacheKey, "recommended", fetch)
+		} else {
+			body, err = fetch()
 		}
-		body, err := h.recommendedFetch(c)
 		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "recommended_projects_failed", "")
+			return respondProjectsFetchError(c, err, "recommended_projects_failed")
 		}
 		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		return c.Status(fiber.StatusOK).Send(body)
@@ -878,24 +905,24 @@ WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = fals
 // FilterOptions returns available filter values (languages, categories, tags) from verified projects.
 func (h *ProjectsPublicHandler) FilterOptions() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return httpx.RespondError(c, fiber.StatusServiceUnavailable, "db_not_configured", "")
+		cacheKey := "filters:" + c.OriginalURL()
+
+		fetch := func() ([]byte, error) {
+			if h.db == nil || h.db.Pool == nil {
+				return nil, errDBNotConfigured
+			}
+			return h.filterOptionsFetch(c)
 		}
 
-		cacheKey := "filters:" + c.OriginalURL()
+		var body []byte
+		var err error
 		if h.cache != nil {
-			body, err := h.cache.Do(cacheKey, "filters", func() ([]byte, error) {
-				return h.filterOptionsFetch(c)
-			})
-			if err != nil {
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
-			}
-			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-			return c.Status(fiber.StatusOK).Send(body)
+			body, err = h.cache.Do(cacheKey, "filters", fetch)
+		} else {
+			body, err = fetch()
 		}
-		body, err := h.filterOptionsFetch(c)
 		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "filter_options_failed", "")
+			return respondProjectsFetchError(c, err, "filter_options_failed")
 		}
 		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		return c.Status(fiber.StatusOK).Send(body)

@@ -27,7 +27,11 @@ func IssueJWT(secret string, userID uuid.UUID, role string, walletType WalletTyp
 	if secret == "" {
 		return "", fmt.Errorf("JWT_SECRET is required")
 	}
-	if ttl <= 0 {
+	// Only an unset (zero) ttl falls back to the default. A negative ttl is
+	// a deliberate, legitimate way to mint an already-expired token (e.g.
+	// tests exercising expiry handling: IssueJWT(..., -time.Hour)) and must
+	// be honored rather than silently clamped to a valid future expiry.
+	if ttl == 0 {
 		ttl = 15 * time.Minute
 	}
 
