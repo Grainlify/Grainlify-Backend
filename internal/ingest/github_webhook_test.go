@@ -582,7 +582,12 @@ func TestIngest_InstallationDeleted_SoftDeletesProjects(t *testing.T) {
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/del-test", "install-del-99")
+	// The seeded github_app_installation_id must match the string form the
+	// handler derives from the webhook payload's numeric installation.id
+	// (json.Number.String() on 99 yields "99", not a prefixed fixture name)
+	// — otherwise the UPDATE ... WHERE github_app_installation_id = $1 below
+	// never matches this row and the test's own assertions fail.
+	projectID := seedProject(t, pool, "acme/del-test", "99")
 
 	payload := mustJSON(t, map[string]any{
 		"action": "deleted",
@@ -629,7 +634,9 @@ func TestIngest_InstallationRepositoriesRemoved_SoftDeletesProject(t *testing.T)
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/repo-removed", "install-rm-77")
+	// Must match the string form of the payload's numeric installation.id
+	// (see comment in TestIngest_InstallationDeleted_SoftDeletesProjects).
+	projectID := seedProject(t, pool, "acme/repo-removed", "77")
 
 	payload := mustJSON(t, map[string]any{
 		"action": "removed",
@@ -675,7 +682,9 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 	ctx := context.Background()
 	ing := &ingest.GitHubWebhookIngestor{Pool: pool}
 
-	projectID := seedProject(t, pool, "acme/repo-restored", "install-add-55")
+	// Must match the string form of the payload's numeric installation.id
+	// (see comment in TestIngest_InstallationDeleted_SoftDeletesProjects).
+	projectID := seedProject(t, pool, "acme/repo-restored", "55")
 
 	// First, soft-delete it manually.
 	if _, err := pool.Exec(ctx, `

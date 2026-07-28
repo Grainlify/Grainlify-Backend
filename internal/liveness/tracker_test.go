@@ -3,6 +3,7 @@ package liveness
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -104,6 +105,16 @@ func TestConcurrentTicks(t *testing.T) {
 
 func TestConcurrentTicksAndReads(t *testing.T) {
 	tr := NewTracker(time.Minute)
+	// Tick synchronously once before launching the concurrent-access
+	// goroutine below. Without this, the final "expected Started" assertion
+	// races the goroutine scheduler: on a busy/CPU-constrained runner the
+	// background goroutine can still be unscheduled by the time the 1000
+	// atomic reads below finish and done is closed, so Tick() may never
+	// have run even once. Ticking here removes that scheduling dependency
+	// while the loop below still exercises concurrent Tick+read access
+	// (and remains meaningful under `go test -race`).
+	tr.Tick()
+
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -201,14 +212,24 @@ func TestServeAndShutdown(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", tr.HealthzHandler())
-	srv := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
-	go srv.ListenAndServe()
-	time.Sleep(100 * time.Millisecond)
 
-	addr := tr.ServerAddr()
-	if addr == "" {
-		addr = srv.Addr
+	// Bind explicitly via net.Listen instead of http.Server.ListenAndServe
+	// so we can read back the OS-assigned port. "127.0.0.1:0" asks the OS
+	// for an ephemeral port; http.Server never mutates its own Addr field
+	// with the resolved address, so a request built from srv.Addr would
+	// literally dial port 0 and fail with "connection refused". Using the
+	// listener's real Addr() avoids that and also removes the fixed
+	// 100ms sleep — the listener is already accepting connections the
+	// moment net.Listen returns.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
 	}
+	addr := ln.Addr().String()
+
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+
 	resp, err := http.Get("http://" + addr + "/healthz")
 	if err != nil {
 		t.Fatalf("failed to GET /healthz: %v", err)

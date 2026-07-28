@@ -259,6 +259,14 @@ func TestNeedsMigration_Dirty(t *testing.T) {
 	pool := setupTestPool(t)
 	dropSchemaMigrations(t, pool)
 	insertSchemaMigrations(t, pool, 28, true)
+	// This test deliberately leaves schema_migrations in a dirty state to
+	// exercise NeedsMigration's handling of it. The database (TEST_DB_URL)
+	// is shared with other packages' integration tests (internal/ingest,
+	// internal/handlers), so a dirty row left behind here would poison
+	// every subsequent migrate.Up call anywhere in the test run — restore
+	// a clean (absent-table) state once this test is done, regardless of
+	// test ordering.
+	t.Cleanup(func() { dropSchemaMigrations(t, pool) })
 
 	needs, err := NeedsMigration(context.Background(), pool)
 	if err != nil {
@@ -370,6 +378,12 @@ func TestPendingMigrations_Dirty(t *testing.T) {
 	pool := setupTestPool(t)
 	dropSchemaMigrations(t, pool)
 	insertSchemaMigrations(t, pool, 5, true)
+	// See the matching comment in TestNeedsMigration_Dirty: schema_migrations
+	// lives in a database shared across packages (TEST_DB_URL), so a dirty
+	// row left behind here would cause unrelated tests elsewhere (e.g.
+	// internal/ingest, internal/handlers) to fail with "Dirty database
+	// version 5" — restore a clean state once this test is done.
+	t.Cleanup(func() { dropSchemaMigrations(t, pool) })
 
 	_, err := PendingMigrations(context.Background(), pool)
 	if err == nil {

@@ -10,12 +10,14 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
@@ -201,12 +203,23 @@ func newIssueApplicationsApp() *fiber.App {
 
 // newIssueApplicationsAppWithPool is like newIssueApplicationsApp but uses the provided pool
 // instead of a nil pool, allowing tests to exercise the idempotency cache-miss path.
+//
+// Apply() reads the authenticated user ID from c.Locals(auth.LocalUserID),
+// which RequireAuth normally populates from the JWT. This test app has no
+// auth middleware in front of the handler, so — mirroring the pattern used
+// elsewhere in this package (e.g. admin_test.go, project_data_test.go) — a
+// tiny inline middleware injects a valid user ID directly. Without it every
+// request fails at the very first "invalid_user" 401 check, before ever
+// reaching the idempotency cache-miss logic these tests exist to exercise.
 func newIssueApplicationsAppWithPool(pool db.DBPool) *fiber.App {
 	cfg := config.Config{
 		TokenEncKeyB64: "dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleQ==", // "testkeykey..." base64 (valid length)
 	}
 	h := handlers.NewIssueApplicationsHandler(cfg, &db.DB{Pool: pool})
 	app := fiber.New()
-	app.Post("/projects/:id/issues/:number/apply", h.Apply())
+	app.Post("/projects/:id/issues/:number/apply", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return h.Apply()(c)
+	})
 	return app
 }
