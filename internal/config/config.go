@@ -179,6 +179,14 @@ type Config struct {
 	RateLimitPublicPerMin int
 	// TrustedProxies contains the IPs or CIDRs that are allowed to supply X-Forwarded-For values (TRUSTED_PROXIES, default "127.0.0.1,::1").
 	TrustedProxies []string
+
+	// configErrs holds messages for any numeric/duration env var (DB pool
+	// sizes, sync-job retry settings, timeouts, body limits, rate limits)
+	// that was set but malformed, negative, or an unsupported explicit zero.
+	// Empty when every such field was either unset or valid. Checked by
+	// Validate() so bad input fails fast at startup instead of silently
+	// falling back to the default, the same reasoning as jetStreamAckWaitErr.
+	configErrs []string
 }
 
 func Load() Config {
@@ -193,6 +201,45 @@ func Load() Config {
 		httpAddr = ":" + port
 	}
 
+	var configErrs []string
+	addErr := func(errMsg string) {
+		if errMsg != "" {
+			configErrs = append(configErrs, errMsg)
+		}
+	}
+
+	// allowZero=true only where zero has real, documented meaning: DB_MIN_CONNS
+	// (no warm minimum) and the two rate limits (0 disables that limiter, per
+	// internal/api/ratelimit.go's `> 0` gate).
+	dbMaxConns, errMsg := getEnvInt32Validated("DB_MAX_CONNS", 10, false)
+	addErr(errMsg)
+	dbMinConns, errMsg := getEnvInt32Validated("DB_MIN_CONNS", 0, true)
+	addErr(errMsg)
+	dbMaxConnLifetime, errMsg := getEnvDurationValidated("DB_MAX_CONN_LIFETIME", 30*time.Minute)
+	addErr(errMsg)
+	dbMaxConnIdleTime, errMsg := getEnvDurationValidated("DB_MAX_CONN_IDLE_TIME", 5*time.Minute)
+	addErr(errMsg)
+	syncJobsMaxAttempts, errMsg := getEnvIntValidated("SYNC_JOBS_MAX_ATTEMPTS", 5, false)
+	addErr(errMsg)
+	syncJobsBackoffBase, errMsg := getEnvDurationValidated("SYNC_JOBS_BACKOFF_BASE", 30*time.Second)
+	addErr(errMsg)
+	syncJobsBackoffMax, errMsg := getEnvDurationValidated("SYNC_JOBS_BACKOFF_MAX", time.Hour)
+	addErr(errMsg)
+	syncJobsFailureAttentionThreshold, errMsg := getEnvIntValidated("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5, false)
+	addErr(errMsg)
+	shutdownTimeout, errMsg := getEnvDurationValidated("SHUTDOWN_TIMEOUT", 10*time.Second)
+	addErr(errMsg)
+	workerLivenessStaleThreshold, errMsg := getEnvDurationValidated("WORKER_LIVENESS_STALE_THRESHOLD", 30*time.Second)
+	addErr(errMsg)
+	maxBodyBytes, errMsg := getEnvIntValidated("MAX_BODY_BYTES", 1048576, false)
+	addErr(errMsg)
+	webhookMaxBodyBytes, errMsg := getEnvIntValidated("WEBHOOK_MAX_BODY_BYTES", 10*1024*1024, false)
+	addErr(errMsg)
+	rateLimitAuthPerMin, errMsg := getEnvIntValidated("RATE_LIMIT_AUTH_PER_MIN", 60, true)
+	addErr(errMsg)
+	rateLimitPublicPerMin, errMsg := getEnvIntValidated("RATE_LIMIT_PUBLIC_PER_MIN", 300, true)
+	addErr(errMsg)
+
 	return Config{
 		Env:      env,
 		HTTPAddr: httpAddr,
@@ -201,10 +248,10 @@ func Load() Config {
 		DBURL:       getEnv("DB_URL", ""),
 		AutoMigrate: getEnvBool("AUTO_MIGRATE", false),
 
-		DBMaxConns:        getEnvInt32("DB_MAX_CONNS", 10),
-		DBMinConns:        getEnvInt32("DB_MIN_CONNS", 0),
-		DBMaxConnLifetime: getEnvDuration("DB_MAX_CONN_LIFETIME", 30*time.Minute),
-		DBMaxConnIdleTime: getEnvDuration("DB_MAX_CONN_IDLE_TIME", 5*time.Minute),
+		DBMaxConns:        dbMaxConns,
+		DBMinConns:        dbMinConns,
+		DBMaxConnLifetime: dbMaxConnLifetime,
+		DBMaxConnIdleTime: dbMaxConnIdleTime,
 
 		JWTSecret: getEnv("JWT_SECRET", ""),
 
@@ -254,22 +301,24 @@ func Load() Config {
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
-		SyncJobsMaxAttempts:               getEnvInt("SYNC_JOBS_MAX_ATTEMPTS", 5),
-		SyncJobsBackoffBase:               getEnvDuration("SYNC_JOBS_BACKOFF_BASE", 30*time.Second),
-		SyncJobsBackoffMax:                getEnvDuration("SYNC_JOBS_BACKOFF_MAX", time.Hour),
-		SyncJobsFailureAttentionThreshold: getEnvInt("SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", 5),
-		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
+		SyncJobsMaxAttempts:               syncJobsMaxAttempts,
+		SyncJobsBackoffBase:               syncJobsBackoffBase,
+		SyncJobsBackoffMax:                syncJobsBackoffMax,
+		SyncJobsFailureAttentionThreshold: syncJobsFailureAttentionThreshold,
+		ShutdownTimeout:                   shutdownTimeout,
 
 		WorkerLivenessAddr:           getEnv("WORKER_LIVENESS_ADDR", ":9091"),
-		WorkerLivenessStaleThreshold: getEnvDuration("WORKER_LIVENESS_STALE_THRESHOLD", 30*time.Second),
+		WorkerLivenessStaleThreshold: workerLivenessStaleThreshold,
 
-		MaxBodyBytes:          getEnvInt("MAX_BODY_BYTES", 1048576),
-		WebhookMaxBodyBytes:   getEnvInt("WEBHOOK_MAX_BODY_BYTES", 10*1024*1024),
-		RateLimitAuthPerMin:   getEnvInt("RATE_LIMIT_AUTH_PER_MIN", 60),
-		RateLimitPublicPerMin: getEnvInt("RATE_LIMIT_PUBLIC_PER_MIN", 300),
+		MaxBodyBytes:          maxBodyBytes,
+		WebhookMaxBodyBytes:   webhookMaxBodyBytes,
+		RateLimitAuthPerMin:   rateLimitAuthPerMin,
+		RateLimitPublicPerMin: rateLimitPublicPerMin,
 		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
 		MetricsToken:          strings.TrimSpace(getEnv("METRICS_TOKEN", "")),
 		GitHubRepoMetadataCacheTTL: getEnvDuration("GITHUB_REPO_CACHE_TTL", 60*time.Second),
+
+		configErrs: configErrs,
 	}
 }
 
@@ -313,6 +362,12 @@ func (c Config) Validate() error {
 	if c.jetStreamAckWaitErr != "" {
 		errs = append(errs, c.jetStreamAckWaitErr)
 	}
+
+	// --- DB pool / sync-job / timeout / body-limit / rate-limit fields ---
+	// Same reasoning as JS_ACK_WAIT: a malformed or out-of-range value is a
+	// correctness bug regardless of environment, so it's checked unconditionally
+	// rather than gated behind !c.IsDev().
+	errs = append(errs, c.configErrs...)
 
 	// --- SorobanNetwork ---
 	if net := strings.TrimSpace(c.SorobanNetwork); net != "" {
@@ -447,6 +502,54 @@ func getEnvDurationValidated(key string, fallback time.Duration) (time.Duration,
 		return fallback, fmt.Sprintf("%s must be greater than zero, got %q", key, raw)
 	}
 	return d, ""
+}
+
+// invalidIntMsg formats the "must be X, got Y" error shared by
+// getEnvIntValidated and getEnvInt32Validated.
+func invalidIntMsg(key, raw string, allowZero bool) string {
+	want := "zero or greater"
+	if !allowZero {
+		want = "greater than zero"
+	}
+	return fmt.Sprintf("%s must be %s, got %q", key, want, raw)
+}
+
+// getEnvIntValidated parses key as an int, mirroring getEnvDurationValidated:
+// unset/empty returns fallback with no error; a malformed value, a negative
+// value, or (when allowZero is false) an explicit zero returns fallback plus
+// an error string so Validate() can fail startup fast instead of masking it.
+// allowZero should be true only for fields where zero has real, documented
+// meaning (e.g. a rate limit of 0 disabling that limiter).
+func getEnvIntValidated(key string, fallback int, allowZero bool) (int, string) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, ""
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback, fmt.Sprintf("%s %q is not a valid integer: %v", key, raw, err)
+	}
+	if n < 0 || (n == 0 && !allowZero) {
+		return fallback, invalidIntMsg(key, raw, allowZero)
+	}
+	return n, ""
+}
+
+// getEnvInt32Validated is getEnvIntValidated for int32-typed fields (e.g. DB
+// pool sizes), additionally rejecting values outside the int32 range.
+func getEnvInt32Validated(key string, fallback int32, allowZero bool) (int32, string) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, ""
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return fallback, fmt.Sprintf("%s %q is not a valid integer: %v", key, raw, err)
+	}
+	if n < 0 || (n == 0 && !allowZero) {
+		return fallback, invalidIntMsg(key, raw, allowZero)
+	}
+	return int32(n), ""
 }
 
 func getEnvBool(key string, fallback bool) bool {

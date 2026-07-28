@@ -370,3 +370,162 @@ func TestValidate_JetStreamAckWaitCheckedInDev(t *testing.T) {
 		t.Fatal("expected JS_ACK_WAIT validation to run even in dev")
 	}
 }
+
+// TestGetEnvIntValidated and TestGetEnvInt32Validated cover the shared
+// unset/valid/malformed/zero matrix directly against the low-level helpers,
+// independent of which Config field consumes them.
+func TestGetEnvIntValidated(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		fallback  int
+		allowZero bool
+		want      int
+		wantErr   bool
+	}{
+		{name: "unset falls back, no error", raw: "", fallback: 60, want: 60},
+		{name: "valid positive value", raw: "120", fallback: 60, want: 120},
+		{name: "malformed value falls back with error", raw: "1O", fallback: 60, want: 60, wantErr: true},
+		{name: "negative value falls back with error", raw: "-1", fallback: 60, want: 60, wantErr: true},
+		{name: "explicit zero rejected when disallowed", raw: "0", fallback: 60, allowZero: false, want: 60, wantErr: true},
+		{name: "explicit zero accepted when allowed", raw: "0", fallback: 60, allowZero: true, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TEST_INT_VALIDATED", tc.raw)
+			got, errMsg := getEnvIntValidated("TEST_INT_VALIDATED", tc.fallback, tc.allowZero)
+			if got != tc.want {
+				t.Errorf("value = %d, want %d", got, tc.want)
+			}
+			if tc.wantErr && errMsg == "" {
+				t.Error("expected a non-empty error message")
+			}
+			if !tc.wantErr && errMsg != "" {
+				t.Errorf("expected no error message, got %q", errMsg)
+			}
+		})
+	}
+}
+
+func TestGetEnvInt32Validated(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		fallback  int32
+		allowZero bool
+		want      int32
+		wantErr   bool
+	}{
+		{name: "unset falls back, no error", raw: "", fallback: 10, want: 10},
+		{name: "valid positive value", raw: "25", fallback: 10, want: 25},
+		{name: "malformed value falls back with error", raw: "1O", fallback: 10, want: 10, wantErr: true},
+		{name: "out of int32 range falls back with error", raw: "99999999999", fallback: 10, want: 10, wantErr: true},
+		{name: "explicit zero rejected when disallowed", raw: "0", fallback: 10, allowZero: false, want: 10, wantErr: true},
+		{name: "explicit zero accepted when allowed", raw: "0", fallback: 10, allowZero: true, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TEST_INT32_VALIDATED", tc.raw)
+			got, errMsg := getEnvInt32Validated("TEST_INT32_VALIDATED", tc.fallback, tc.allowZero)
+			if got != tc.want {
+				t.Errorf("value = %d, want %d", got, tc.want)
+			}
+			if tc.wantErr && errMsg == "" {
+				t.Error("expected a non-empty error message")
+			}
+			if !tc.wantErr && errMsg != "" {
+				t.Errorf("expected no error message, got %q", errMsg)
+			}
+		})
+	}
+}
+
+// TestValidate_DBMaxConnsMalformedFailsFast covers the acceptance criterion
+// that DB_MAX_CONNS rejects a malformed value at Validate() time instead of
+// silently keeping the default, mirroring the JS_ACK_WAIT precedent above.
+func TestValidate_DBMaxConnsMalformedFailsFast(t *testing.T) {
+	t.Setenv("DB_MAX_CONNS", "1O") // letter O, not zero
+
+	cfg := Load()
+	if cfg.DBMaxConns != 10 {
+		t.Fatalf("expected fallback to default 10, got %d", cfg.DBMaxConns)
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for malformed DB_MAX_CONNS")
+	}
+	if !strings.Contains(err.Error(), "DB_MAX_CONNS") {
+		t.Fatalf("error should mention DB_MAX_CONNS, got: %v", err)
+	}
+}
+
+// TestValidate_RateLimitPublicPerMinMalformedFailsFast covers the acceptance
+// criterion that RATE_LIMIT_PUBLIC_PER_MIN rejects a malformed value at
+// Validate() time instead of silently keeping the default.
+func TestValidate_RateLimitPublicPerMinMalformedFailsFast(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PUBLIC_PER_MIN", "not-a-number")
+
+	cfg := Load()
+	if cfg.RateLimitPublicPerMin != 300 {
+		t.Fatalf("expected fallback to default 300, got %d", cfg.RateLimitPublicPerMin)
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for malformed RATE_LIMIT_PUBLIC_PER_MIN")
+	}
+	if !strings.Contains(err.Error(), "RATE_LIMIT_PUBLIC_PER_MIN") {
+		t.Fatalf("error should mention RATE_LIMIT_PUBLIC_PER_MIN, got: %v", err)
+	}
+}
+
+// TestValidate_RateLimitPublicPerMinZeroDisablesLimiterWithoutError documents
+// that an explicit 0 is accepted, not rejected: it has real meaning
+// (disables that rate limiter, per internal/api/ratelimit.go's `> 0` gate).
+func TestValidate_RateLimitPublicPerMinZeroDisablesLimiterWithoutError(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PUBLIC_PER_MIN", "0")
+
+	cfg := Load()
+	if cfg.RateLimitPublicPerMin != 0 {
+		t.Fatalf("expected explicit 0 to be honored, got %d", cfg.RateLimitPublicPerMin)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit RATE_LIMIT_PUBLIC_PER_MIN=0 should not fail validation, got: %v", err)
+	}
+}
+
+// TestValidate_MaxBodyBytesZeroFailsFast documents the opposite case: unlike
+// the rate limits, a body limit of 0 has no valid meaning (no request body
+// could ever be accepted), so it must be rejected rather than silently
+// coerced to the default.
+func TestValidate_MaxBodyBytesZeroFailsFast(t *testing.T) {
+	t.Setenv("MAX_BODY_BYTES", "0")
+
+	cfg := Load()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for explicit MAX_BODY_BYTES=0")
+	}
+	if !strings.Contains(err.Error(), "MAX_BODY_BYTES") {
+		t.Fatalf("error should mention MAX_BODY_BYTES, got: %v", err)
+	}
+}
+
+// TestValidate_NumericFieldsUncheckedInEnvAllValidNoError is a smoke test
+// that every converted field loads and validates cleanly when unset,
+// consistent with "unset env vars continue to fall back to their documented
+// defaults with no error."
+func TestValidate_NumericFieldsUnsetLoadCleanly(t *testing.T) {
+	for _, key := range []string{
+		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_LIFETIME", "DB_MAX_CONN_IDLE_TIME",
+		"SYNC_JOBS_MAX_ATTEMPTS", "SYNC_JOBS_BACKOFF_BASE", "SYNC_JOBS_BACKOFF_MAX",
+		"SYNC_JOBS_FAILURE_ATTENTION_THRESHOLD", "SHUTDOWN_TIMEOUT", "WORKER_LIVENESS_STALE_THRESHOLD",
+		"MAX_BODY_BYTES", "WEBHOOK_MAX_BODY_BYTES", "RATE_LIMIT_AUTH_PER_MIN", "RATE_LIMIT_PUBLIC_PER_MIN",
+	} {
+		t.Setenv(key, "")
+	}
+
+	cfg := Load()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("all-unset numeric config should not fail validation, got: %v", err)
+	}
+}
