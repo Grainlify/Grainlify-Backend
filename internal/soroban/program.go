@@ -109,7 +109,7 @@ func (pec *ProgramEscrowContract) LockProgramFunds(ctx context.Context, amount i
 	confirmed, err := pec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil
@@ -157,7 +157,7 @@ func (pec *ProgramEscrowContract) SinglePayout(ctx context.Context, recipientAdd
 	confirmed, err := pec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil
@@ -230,7 +230,7 @@ func (pec *ProgramEscrowContract) BatchPayout(ctx context.Context, payouts []Pay
 	confirmed, err := pec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil

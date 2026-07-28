@@ -68,7 +68,7 @@ func (ec *EscrowContract) Init(ctx context.Context, adminAddress, tokenAddress s
 	confirmed, err := ec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil
@@ -128,8 +128,7 @@ func (ec *EscrowContract) LockFunds(ctx context.Context, depositorAddress string
 	confirmed, err := ec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		// Return the initial result even if confirmation times out
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil
@@ -177,7 +176,7 @@ func (ec *EscrowContract) ReleaseFunds(ctx context.Context, bountyID uint64, con
 	confirmed, err := ec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil
@@ -219,7 +218,7 @@ func (ec *EscrowContract) Refund(ctx context.Context, bountyID uint64) (*Transac
 	confirmed, err := ec.txBuilder.WaitForConfirmation(ctx, result.Hash, 60*time.Second)
 	if err != nil {
 		slog.Warn("failed to wait for confirmation", "error", err, "tx_hash", result.Hash)
-		return result, nil
+		return wrapConfirmationUnknown(result, err)
 	}
 
 	return confirmed, nil

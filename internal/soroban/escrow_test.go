@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -389,6 +390,12 @@ func TestInit_WaitsForConfirmation(t *testing.T) {
 	}
 }
 
+// TestInit_ConfirmationFailureReturnsSubmissionResult is the regression test
+// for issue #297: a WaitForConfirmation failure must not be reported as a
+// nil (successful) error. Init must return a non-nil error satisfying
+// errors.Is(err, ErrConfirmationUnknown), while still returning the
+// submitted TransactionResult (hash + "pending" status) so the caller can
+// poll for it later instead of treating it as either confirmed or lost.
 func TestInit_ConfirmationFailureReturnsSubmissionResult(t *testing.T) {
 	kp, err := keypair.Random()
 	if err != nil {
@@ -405,13 +412,78 @@ func TestInit_ConfirmationFailureReturnsSubmissionResult(t *testing.T) {
 	cancel()
 
 	result, err := ec.Init(ctx, kp.Address(), kp.Address())
-	if err != nil {
-		t.Fatalf("Init: %v", err)
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("Init error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil {
+		t.Fatal("expected a non-nil TransactionResult even when confirmation is unknown")
 	}
 	if result.Hash != txHash {
 		t.Errorf("hash: want %q, got %q", txHash, result.Hash)
 	}
 	if result.Status != "pending" {
 		t.Errorf("status: want %q (unconfirmed submission result), got %q", "pending", result.Status)
+	}
+}
+
+// TestReleaseFunds_ConfirmationFailureReturnsConfirmationUnknownError covers
+// the same regression for ReleaseFunds specifically, as required by the
+// issue's acceptance criteria (a nil error here would risk a caller marking
+// a bounty as paid out without on-chain confirmation).
+func TestReleaseFunds_ConfirmationFailureReturnsConfirmationUnknownError(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	ec := newFakeEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := ec.ReleaseFunds(ctx, 1, kp.Address())
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("ReleaseFunds error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil || result.Hash != txHash {
+		t.Fatalf("expected TransactionResult with hash %q, got %+v", txHash, result)
+	}
+	if result.Status != "pending" {
+		t.Errorf("status: want %q, got %q", "pending", result.Status)
+	}
+}
+
+// TestRefund_ConfirmationFailureReturnsConfirmationUnknownError covers the
+// same regression for Refund, as required by the issue's acceptance
+// criteria (a nil error here would risk a caller recording a depositor
+// refund as complete without on-chain confirmation).
+func TestRefund_ConfirmationFailureReturnsConfirmationUnknownError(t *testing.T) {
+	kp, err := keypair.Random()
+	if err != nil {
+		t.Fatalf("keypair.Random: %v", err)
+	}
+	const txHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	srv, _ := newFakeHorizonServer(t, kp.Address(), txHash, "")
+	defer srv.Close()
+
+	ec := newFakeEscrowContract(kp, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := ec.Refund(ctx, 1)
+	if !errors.Is(err, ErrConfirmationUnknown) {
+		t.Fatalf("Refund error = %v, want errors.Is(err, ErrConfirmationUnknown)", err)
+	}
+	if result == nil || result.Hash != txHash {
+		t.Fatalf("expected TransactionResult with hash %q, got %+v", txHash, result)
+	}
+	if result.Status != "pending" {
+		t.Errorf("status: want %q, got %q", "pending", result.Status)
 	}
 }
