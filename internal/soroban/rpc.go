@@ -296,20 +296,31 @@ func waitForPoll(ctx context.Context, call *inFlightPoll) (map[string]interface{
 
 // pollTransactionStatusOnce contains the original polling loop, unchanged
 // in behavior from before the dedup layer was added.
+//
+// The timeout budget is enforced via a derived context rather than only
+// checking wall-clock time inside the ticker branch: with a plain
+// time.NewTicker(2 * time.Second), a timeout shorter than 2 seconds would
+// never fire until the first tick, delaying the timeout error by up to
+// ~2 seconds beyond what the caller requested.
 func (c *Client) pollTransactionStatusOnce(ctx context.Context, txHash string, timeout time.Duration) (map[string]interface{}, error) {
-        deadline := time.Now().Add(timeout)
+        timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+        defer cancel()
+
         ticker := time.NewTicker(2 * time.Second)
         defer ticker.Stop()
 
         for {
                 select {
-                case <-ctx.Done():
-                        return nil, ctx.Err()
-                case <-ticker.C:
-                        if time.Now().After(deadline) {
-                                return nil, fmt.Errorf("timeout waiting for transaction: %s", txHash)
+                case <-timeoutCtx.Done():
+                        // timeoutCtx.Done() also fires when the caller's own ctx is
+                        // cancelled/expires (it wraps ctx), so disambiguate by checking
+                        // ctx.Err() directly rather than relying on select's random
+                        // pick between two simultaneously-ready cases.
+                        if err := ctx.Err(); err != nil {
+                                return nil, err
                         }
-
+                        return nil, fmt.Errorf("timeout waiting for transaction: %s", txHash)
+                case <-ticker.C:
                         status, err := c.GetTransactionStatus(ctx, txHash)
                         if err != nil {
                                 // Transaction not found yet, continue polling
