@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,21 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 )
 
-// csrfTestPool opens a live DB for CSRF integration tests.
+var (
+	csrfPoolOnce sync.Once
+	csrfPool     *pgxpool.Pool
+	csrfPoolErr  error
+)
+
+// csrfTestPool returns a DB pool shared across every test in this file,
+// running migrate.Up exactly once per test binary instead of once per test.
+// Each test previously opened its own pool and re-ran the full migration
+// check independently; under CI, where this package's test binary can run
+// concurrently with others against the same TEST_DB_URL, that repeated
+// per-test migration/connection churn was a source of transient query
+// failures unrelated to any individual test's logic (observed as e.g. a
+// state_lookup_failed on a test whose own query never touches the DB
+// differently than its passing siblings).
 // Skips the test if TEST_DB_URL is not set.
 func csrfTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -50,13 +65,19 @@ func csrfTestPool(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DB_URL not set – skipping OAuth CSRF integration tests")
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	require.NoError(t, pool.Ping(ctx))
-	require.NoError(t, migrate.Up(ctx, pool, true))
-	t.Cleanup(pool.Close)
-	return pool
+	csrfPoolOnce.Do(func() {
+		ctx := context.Background()
+		csrfPool, csrfPoolErr = pgxpool.New(ctx, dsn)
+		if csrfPoolErr != nil {
+			return
+		}
+		if csrfPoolErr = csrfPool.Ping(ctx); csrfPoolErr != nil {
+			return
+		}
+		csrfPoolErr = migrate.Up(ctx, csrfPool, true)
+	})
+	require.NoError(t, csrfPoolErr)
+	return csrfPool
 }
 
 // minCfg returns the minimal config.Config required by CallbackUnified.
