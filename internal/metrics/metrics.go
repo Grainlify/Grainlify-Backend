@@ -4,6 +4,8 @@
 package metrics
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"regexp"
 	"strconv"
 	"time"
@@ -157,13 +159,27 @@ func Handler() fiber.Handler {
 // TokenGate returns a Fiber middleware that requires the caller to supply the
 // configured bearer token via the Authorization header. If token is empty the
 // middleware is a no-op (useful when /metrics is protected at the network level).
+// secureCompare reports whether a and b are equal using a constant-time
+// comparison, so response timing can't leak how many leading bytes of a
+// guess matched the real secret. Hashing both inputs first (rather than
+// padding/truncating) ensures the comparison runs on fixed-length buffers
+// regardless of a/b's own lengths. Mirrors the identical helper in
+// internal/handlers/admin.go's secureCompare -- duplicated here rather than
+// imported since internal/handlers already imports internal/metrics, and
+// the reverse import would create a cycle.
+func secureCompare(a, b string) bool {
+	aHash := sha256.Sum256([]byte(a))
+	bHash := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
+}
+
 func TokenGate(token string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if token == "" {
 			return c.Next()
 		}
 		auth := c.Get(fiber.HeaderAuthorization)
-		if auth == "Bearer "+token {
+		if secureCompare(auth, "Bearer "+token) {
 			return c.Next()
 		}
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
