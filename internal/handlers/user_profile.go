@@ -5,6 +5,7 @@ import (
 
 	"fmt"
 	"log/slog"
+	"mime"
 	"strings"
 	"time"
 	"net/url"
@@ -1387,6 +1388,55 @@ WHERE id = $%d
 	}
 }
 
+// allowedAvatarMIMETypes are the only media types accepted for a data: URI
+// avatar. image/svg+xml is deliberately excluded: SVG is XML that can embed
+// <script> elements and event-handler attributes, and a data: URI avatar may
+// end up rendered somewhere other than a strict <img> tag by a frontend this
+// backend doesn't control (e.g. a CSS background-image or <object> tag).
+var allowedAvatarMIMETypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// maxAvatarDataURILen bounds a data: URI avatar independent of, and tighter
+// than, the generic per-route body limit — otherwise a user could store up
+// to ~1MB of arbitrary base64 payload as their avatar and have it re-served
+// verbatim on every profile view.
+const maxAvatarDataURILen = 300 * 1024 // 300KB
+
+// validateAvatarURL applies the same rules UpdateAvatar enforces on
+// avatar_url: http(s):// URLs are accepted as-is (no fetch/content
+// validation, unchanged from before), while data: URIs must stay under
+// maxAvatarDataURILen and declare an allowlisted raster image MIME type.
+// Returns an httpx error code to reject with, or "" if avatarURL is
+// acceptable.
+func validateAvatarURL(avatarURL string) httpx.Code {
+	if strings.HasPrefix(avatarURL, "http://") || strings.HasPrefix(avatarURL, "https://") {
+		return ""
+	}
+	if !strings.HasPrefix(avatarURL, "data:") {
+		return "invalid_avatar_url_format"
+	}
+	if len(avatarURL) > maxAvatarDataURILen {
+		return "avatar_url_too_large"
+	}
+
+	header, _, found := strings.Cut(avatarURL, ",")
+	if !found {
+		return "invalid_avatar_url_format"
+	}
+	// header is "data:<mediatype>[;base64]". ";base64" is a data-URI flag,
+	// not a real MIME parameter, so it's stripped before mime.ParseMediaType.
+	mediaSpec := strings.TrimSuffix(strings.TrimPrefix(header, "data:"), ";base64")
+	mediaType, _, err := mime.ParseMediaType(mediaSpec)
+	if err != nil || !allowedAvatarMIMETypes[mediaType] {
+		return "invalid_avatar_url_format"
+	}
+	return ""
+}
+
 // UpdateAvatar updates user avatar URL
 func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -1414,11 +1464,10 @@ func (h *UserProfileHandler) UpdateAvatar() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "avatar_url_required", "")
 		}
 
-		// Validate URL format (either http/https URL or data URL)
-		if !strings.HasPrefix(avatarURL, "http://") &&
-			!strings.HasPrefix(avatarURL, "https://") &&
-			!strings.HasPrefix(avatarURL, "data:image/") {
-			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_avatar_url_format", "")
+		// Validate URL format (either http/https URL, or a data: URI with an
+		// allowlisted raster MIME type and bounded size — see validateAvatarURL).
+		if errCode := validateAvatarURL(avatarURL); errCode != "" {
+			return httpx.RespondError(c, fiber.StatusBadRequest, errCode, "")
 		}
 
 		_, err = h.db.Pool.Exec(c.Context(), `
