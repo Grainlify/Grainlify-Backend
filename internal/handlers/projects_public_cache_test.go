@@ -2,14 +2,20 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
@@ -307,5 +313,178 @@ func TestPaginationResponse_Structure(t *testing.T) {
 
 	if pagination["limit"] != float64(50) {
 		t.Errorf("expected limit=50, got %v", pagination["limit"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Get() caching — issue #298: Get() previously bypassed h.cache entirely,
+// unlike List/Recommended/FilterOptions.
+// ---------------------------------------------------------------------------
+
+// panicIfCalledDBPool implements db.DBPool with every method panicking, so a
+// test can affirmatively prove a code path never reaches the database
+// (stronger than just checking the response body, since a bug that
+// accidentally re-fetched but happened to return the same bytes wouldn't be
+// caught by a body comparison alone).
+type panicIfCalledDBPool struct{}
+
+func (panicIfCalledDBPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	panic("Exec should not be called on a cache hit")
+}
+func (panicIfCalledDBPool) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("Query should not be called on a cache hit")
+}
+func (panicIfCalledDBPool) QueryRow(context.Context, string, ...any) pgx.Row {
+	panic("QueryRow should not be called on a cache hit")
+}
+func (panicIfCalledDBPool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	panic("BeginTx should not be called on a cache hit")
+}
+func (panicIfCalledDBPool) Ping(context.Context) error { return nil }
+func (panicIfCalledDBPool) Close()                     {}
+func (panicIfCalledDBPool) Config() *pgxpool.Config    { return nil }
+
+// TestProjectsPublicHandler_GetCacheHit verifies that a cached project detail
+// response is served without ever touching the database, using a DBPool that
+// panics if called at all — a cache-hit bug that still happened to return the
+// right bytes (e.g. by re-fetching) would be caught here, unlike a body-only
+// comparison.
+func TestProjectsPublicHandler_GetCacheHit(t *testing.T) {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	cache := NewProjectsCache(10*time.Second, stopCh)
+	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{Pool: panicIfCalledDBPool{}}, cache)
+
+	app := fiber.New()
+	app.Get("/projects/:id", projectsPublic.Get())
+
+	projectID := uuid.New().String()
+	cacheKey := "project:" + projectID
+	cachedResponse := []byte(`{"id":"` + projectID + `","github_full_name":"acme/widget"}`)
+	cache.Set(cacheKey, cachedResponse)
+
+	req := httptest.NewRequest("GET", "/projects/"+projectID, nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != fiber.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Equal(body, cachedResponse) {
+		t.Errorf("expected cached response, got: %s", body)
+	}
+}
+
+// notFoundRow is a pgx.Row whose Scan always reports pgx.ErrNoRows, so a
+// getFetch call resolves to a 404 without needing a real database or any
+// GitHub network call — it never reaches the GitHub-enrichment code past the
+// project lookup.
+type notFoundRow struct{}
+
+func (notFoundRow) Scan(dest ...any) error { return pgx.ErrNoRows }
+
+// countingNotFoundDBPool implements db.DBPool, counting QueryRow calls and
+// always reporting "no such project." A small sleep simulates DB latency so
+// concurrent callers actually overlap in time, giving the singleflight
+// in-flight map something real to deduplicate.
+type countingNotFoundDBPool struct {
+	queryRowCalls atomic.Int32
+}
+
+func (p *countingNotFoundDBPool) QueryRow(context.Context, string, ...any) pgx.Row {
+	p.queryRowCalls.Add(1)
+	time.Sleep(20 * time.Millisecond)
+	return notFoundRow{}
+}
+func (p *countingNotFoundDBPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	panic("Exec should not be called for a not-found project lookup")
+}
+func (p *countingNotFoundDBPool) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("Query should not be called for a not-found project lookup")
+}
+func (p *countingNotFoundDBPool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	panic("BeginTx should not be called for a not-found project lookup")
+}
+func (p *countingNotFoundDBPool) Ping(context.Context) error { return nil }
+func (p *countingNotFoundDBPool) Close()                     {}
+func (p *countingNotFoundDBPool) Config() *pgxpool.Config    { return nil }
+
+// TestProjectsPublicHandler_GetStampedeProtection verifies concurrent
+// requests for the same uncached project ID share a single underlying fetch,
+// matching the guarantee ProjectsCache.Do already provides List/Recommended/
+// FilterOptions. All N concurrent Get() calls resolve to the DB's
+// "not found" result via the exact same singleflight path GitHub enrichment
+// would also share, so counting DB QueryRow calls proves the whole getFetch
+// closure — DB lookup and GitHub calls alike — ran exactly once.
+func TestProjectsPublicHandler_GetStampedeProtection(t *testing.T) {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	cache := NewProjectsCache(10*time.Second, stopCh)
+	pool := &countingNotFoundDBPool{}
+	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{Pool: pool}, cache)
+
+	app := fiber.New()
+	app.Get("/projects/:id", projectsPublic.Get())
+
+	projectID := uuid.New().String()
+
+	const n = 10
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest("GET", "/projects/"+projectID, nil)
+			resp, err := app.Test(req, -1)
+			if err != nil {
+				t.Errorf("app.Test: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			statuses[i] = resp.StatusCode
+		}(i)
+	}
+	wg.Wait()
+
+	if got := pool.queryRowCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 DB QueryRow call across %d concurrent requests, got %d", n, got)
+	}
+	for i, s := range statuses {
+		if s != fiber.StatusNotFound {
+			t.Errorf("request %d: status = %d, want 404", i, s)
+		}
+	}
+}
+
+// TestProjectsPublicHandler_GetInvalidateProjectEvictsDetailEntry verifies
+// InvalidateProject correctly evicts the "project:<id>" detail cache entry
+// specifically (not just as a side effect of clearing everything), per issue
+// #298's acceptance criteria.
+func TestProjectsPublicHandler_GetInvalidateProjectEvictsDetailEntry(t *testing.T) {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	cache := NewProjectsCache(10*time.Second, stopCh)
+	projectsPublic := newProjectsPublicHandler(config.Config{}, &db.DB{}, cache)
+
+	projectID := uuid.New().String()
+	cacheKey := "project:" + projectID
+	cache.Set(cacheKey, []byte(`{"id":"`+projectID+`"}`))
+
+	if _, ok := cache.Get(cacheKey, "get"); !ok {
+		t.Fatal("setup: expected detail entry to be cached before invalidation")
+	}
+
+	projectsPublic.InvalidateProject(projectID)
+
+	if _, ok := cache.Get(cacheKey, "get"); ok {
+		t.Error("expected InvalidateProject to evict the detail cache entry, but it's still cached")
 	}
 }
