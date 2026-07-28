@@ -203,8 +203,16 @@ func main() {
 		errCh <- app.Listen(cfg.HTTPAddr)
 	}()
 
-	// Give server a moment to start
-	time.Sleep(100 * time.Millisecond)
+	// The success banner is only logged once the listener is confirmed not
+	// to have already failed within the grace window (e.g. address already
+	// in use), rather than on a fixed timer race against errCh.
+	if err := awaitListenerStartup(errCh, 100*time.Millisecond); err != nil {
+		slog.Error("http server exited",
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err),
+		)
+		os.Exit(1)
+	}
 	slog.Info("=== Grainlify API Started Successfully ===",
 		"http_addr", cfg.HTTPAddr,
 		"env", cfg.Env,
@@ -295,6 +303,22 @@ func (r *gracefulShutdownRunner) Run(ctx context.Context) gracefulShutdownResult
 		r.res = runGracefulShutdown(ctx, r.deps)
 	})
 	return r.res
+}
+
+// awaitListenerStartup waits up to grace for the HTTP listener to report a
+// startup failure on errCh, so callers can avoid logging a success banner
+// after a listener that already failed (e.g. address already in use).
+//
+// It returns the listener's error if one arrives within grace, or nil once
+// grace elapses without one — at which point the listener is presumed to be
+// up and accepting connections.
+func awaitListenerStartup(errCh <-chan error, grace time.Duration) error {
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(grace):
+		return nil
+	}
 }
 
 // runGracefulShutdown preserves the API process shutdown order. The HTTP

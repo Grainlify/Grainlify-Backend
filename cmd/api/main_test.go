@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunGracefulShutdownOrdersHTTPWorkersBusBeforeDB(t *testing.T) {
@@ -191,5 +193,32 @@ func TestRunGracefulShutdownKeepsWorkerWaitTimeoutNonFatal(t *testing.T) {
 	}
 	if !dbClosed {
 		t.Fatal("database close was skipped after worker wait timeout")
+	}
+}
+
+func TestAwaitListenerStartup_ReturnsListenerErrorPromptly(t *testing.T) {
+	errCh := make(chan error, 1)
+	wantErr := fmt.Errorf("listen tcp :8080: bind: address already in use")
+	errCh <- wantErr
+
+	start := time.Now()
+	err := awaitListenerStartup(errCh, 2*time.Second)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("awaitListenerStartup() = %v, want %v", err, wantErr)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("awaitListenerStartup() took %v to return a queued error, want near-immediate return well under the grace window", elapsed)
+	}
+}
+
+func TestAwaitListenerStartup_ReturnsNilOnceGraceElapsesWithoutError(t *testing.T) {
+	errCh := make(chan error, 1)
+
+	err := awaitListenerStartup(errCh, 20*time.Millisecond)
+
+	if err != nil {
+		t.Fatalf("awaitListenerStartup() = %v, want nil once the grace window elapses without a listener error", err)
 	}
 }
