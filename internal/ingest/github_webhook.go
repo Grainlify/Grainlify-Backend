@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 )
@@ -19,19 +21,6 @@ type GitHubWebhookIngestor struct {
 func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebhookReceived) error {
 	if i == nil || i.Pool == nil {
 		return nil
-	}
-
-	if e.DeliveryID != "" {
-		tag, err := i.Pool.Exec(ctx, `
-INSERT INTO webhook_delivery_dedup (delivery_id) VALUES ($1)
-ON CONFLICT (delivery_id) DO NOTHING
-`, e.DeliveryID)
-		if err != nil {
-			slog.Warn("failed to check delivery dedup", "delivery_id", e.DeliveryID, "error", err)
-			return fmt.Errorf("check delivery dedup: %w", err)
-		} else if tag.RowsAffected() == 0 {
-			return nil
-		}
 	}
 
 	// Parse minimal envelope for mapping to project and snapshot upserts.
@@ -55,20 +44,53 @@ ON CONFLICT (delivery_id) DO NOTHING
 		}
 	}
 
-	// Auditable event record (idempotent via delivery_id primary key).
-	if e.DeliveryID != "" {
-		_, _ = i.Pool.Exec(ctx, `
+	// The dedup marker and the core auditable/snapshot writes commit
+	// together in one transaction: if the github_events insert or a
+	// snapshot upsert fails, the dedup row is rolled back along with them,
+	// so a legitimate GitHub "Redeliver" of the same delivery ID is
+	// retried instead of being silently, permanently dropped.
+	// webhook_delivery_dedup is a durable table (unlike the in-memory
+	// dedup in internal/worker/github_webhook_consumer.go), so leaving a
+	// committed dedup row after a failed write would be unrecoverable
+	// without manual intervention.
+	//
+	// Skipped entirely when there's nothing to write (no delivery ID to
+	// dedup/record, no matched project to snapshot into) -- matching events
+	// like a bare "installation_repositories" payload with no repo-level
+	// project resolved at this point (handleInstallationEvent below does
+	// its own per-repo lookups).
+	alreadyProcessed := false
+	var txErr error
+	if e.DeliveryID != "" || projectID != nil {
+		txErr = db.WithTx(ctx, i.Pool, func(tx pgx.Tx) error {
+			if e.DeliveryID != "" {
+				tag, err := tx.Exec(ctx, `
+INSERT INTO webhook_delivery_dedup (delivery_id) VALUES ($1)
+ON CONFLICT (delivery_id) DO NOTHING
+`, e.DeliveryID)
+				if err != nil {
+					return fmt.Errorf("check delivery dedup: %w", err)
+				}
+				if tag.RowsAffected() == 0 {
+					alreadyProcessed = true
+					return nil
+				}
+
+				// Auditable event record (idempotent via delivery_id primary key).
+				if _, err := tx.Exec(ctx, `
 INSERT INTO github_events (delivery_id, project_id, repo_full_name, event, action, payload)
 VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb)
 ON CONFLICT (delivery_id) DO NOTHING
-`, e.DeliveryID, projectID, repoFullName, e.Event, nullIfEmpty(action), string(e.Payload))
-	}
+`, e.DeliveryID, projectID, repoFullName, e.Event, nullIfEmpty(action), string(e.Payload)); err != nil {
+					return fmt.Errorf("insert github_events: %w", err)
+				}
+			}
 
-	// Snapshot upserts (idempotent).
-	if projectID != nil {
-		if e.Event == "issues" && env.Issue != nil {
-			issue := env.Issue
-			_, _ = i.Pool.Exec(ctx, `
+			// Snapshot upserts (idempotent).
+			if projectID != nil {
+				if e.Event == "issues" && env.Issue != nil {
+					issue := env.Issue
+					if _, err := tx.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
 ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
@@ -82,12 +104,14 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
   updated_at_github = EXCLUDED.updated_at_github,
   closed_at_github = EXCLUDED.closed_at_github,
   last_seen_at = now()
-`, *projectID, issue.ID, issue.Number, issue.State, issue.Title, issue.Body, issue.User.Login, issue.HTMLURL, issue.CreatedAt, issue.UpdatedAt, issue.ClosedAt)
-		}
+`, *projectID, issue.ID, issue.Number, issue.State, issue.Title, issue.Body, issue.User.Login, issue.HTMLURL, issue.CreatedAt, issue.UpdatedAt, issue.ClosedAt); err != nil {
+						return fmt.Errorf("upsert issue snapshot: %w", err)
+					}
+				}
 
-		if (e.Event == "pull_request" || e.Event == "pull_request_review") && env.PullRequest != nil {
-			pr := env.PullRequest
-			_, _ = i.Pool.Exec(ctx, `
+				if (e.Event == "pull_request" || e.Event == "pull_request_review") && env.PullRequest != nil {
+					pr := env.PullRequest
+					if _, err := tx.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, merged_at_github, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
@@ -103,11 +127,27 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   updated_at_github = EXCLUDED.updated_at_github,
   closed_at_github = EXCLUDED.closed_at_github,
   last_seen_at = now()
-`, *projectID, pr.ID, pr.Number, pr.State, pr.Title, pr.Body, pr.User.Login, pr.HTMLURL, pr.Merged, pr.MergedAt, pr.CreatedAt, pr.UpdatedAt, pr.ClosedAt)
-		}
+`, *projectID, pr.ID, pr.Number, pr.State, pr.Title, pr.Body, pr.User.Login, pr.HTMLURL, pr.Merged, pr.MergedAt, pr.CreatedAt, pr.UpdatedAt, pr.ClosedAt); err != nil {
+						return fmt.Errorf("upsert pull request snapshot: %w", err)
+					}
+				}
+			}
+
+			return nil
+		})
+	}
+	if txErr != nil {
+		slog.Warn("failed to persist webhook event", "delivery_id", e.DeliveryID, "event", e.Event, "error", txErr)
+		return txErr
+	}
+	if alreadyProcessed {
+		return nil
 	}
 
-	// Enqueue follow-up sync jobs (best-effort).
+	// Enqueue follow-up sync jobs (best-effort, intentionally outside the
+	// transaction: a failure here doesn't invalidate the webhook event that
+	// was already durably recorded above, and the periodic sync worker will
+	// eventually pick up the same data regardless).
 	if projectID != nil && (e.Event == "issues" || e.Event == "pull_request" || e.Event == "push") {
 		_, _ = i.Pool.Exec(ctx, `
 INSERT INTO sync_jobs (project_id, job_type, status, run_at)
@@ -245,9 +285,9 @@ WHERE github_full_name = $1
 }
 
 type ghWebhookEnvelope struct {
-	Action      string               `json:"action"`
-	Repository  *ghRepoPayload       `json:"repository"`
-	Issue       *ghIssuePayload      `json:"issue"`
+	Action      string                `json:"action"`
+	Repository  *ghRepoPayload        `json:"repository"`
+	Issue       *ghIssuePayload       `json:"issue"`
 	PullRequest *ghPullRequestPayload `json:"pull_request"`
 }
 
@@ -288,11 +328,11 @@ type ghPullRequestPayload struct {
 }
 
 type ghInstallationPayload struct {
-	Action                string                    `json:"action"`
-	Installation           ghInstallationInfo        `json:"installation"`
-	RepositoriesRemoved    []ghRepoPayload           `json:"repositories_removed,omitempty"`
-	RepositoriesAdded      []ghRepoPayload           `json:"repositories_added,omitempty"`
-	RepositorySelection    string                    `json:"repository_selection,omitempty"`
+	Action              string             `json:"action"`
+	Installation        ghInstallationInfo `json:"installation"`
+	RepositoriesRemoved []ghRepoPayload    `json:"repositories_removed,omitempty"`
+	RepositoriesAdded   []ghRepoPayload    `json:"repositories_added,omitempty"`
+	RepositorySelection string             `json:"repository_selection,omitempty"`
 }
 
 type ghInstallationInfo struct {
@@ -316,9 +356,3 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
-
-
-
-
-
-
