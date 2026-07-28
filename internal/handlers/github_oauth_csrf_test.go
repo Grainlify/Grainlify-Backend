@@ -114,6 +114,22 @@ func stateExists(t *testing.T, pool *pgxpool.Pool, state string) bool {
 	return count > 0
 }
 
+// oauthCSRFCookieName mirrors the unexported constant of the same name in
+// package handlers (github_oauth.go) — LoginStart's browser-binding cookie.
+const oauthCSRFCookieName = "oauth_csrf"
+
+// insertLoginStateWithCookie inserts a github_login oauth_states row paired
+// with the csrf_cookie value LoginStart would have stored, for tests that
+// need to simulate a legitimate (correctly cookied) browser.
+func insertLoginStateWithCookie(t *testing.T, pool *pgxpool.Pool, state string, expiresAt time.Time, csrfCookie string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO oauth_states (state, user_id, kind, expires_at, csrf_cookie) VALUES ($1, NULL, 'github_login', $2, $3)`,
+		state, expiresAt, csrfCookie,
+	)
+	require.NoError(t, err, "insertLoginStateWithCookie")
+}
+
 // ---------------------------------------------------------------------------
 // CSRF test: missing state parameter
 // ---------------------------------------------------------------------------
@@ -285,13 +301,17 @@ func TestGitHubOAuthCSRF_StateDeletedBeforeExchange(t *testing.T) {
 	github.SetTokenEndpoint(mockGitHub.URL)
 	defer github.SetTokenEndpoint(old)
 
-	// Insert a valid state row
+	// Insert a valid state row, paired with the cookie a legitimate browser
+	// would present (Issue #355 — required for a github_login state to pass
+	// far enough to reach the delete-before-exchange code path at all).
 	state := "delete-before-exchange-" + uuid.NewString()
-	insertState(t, pool, state, "github_login", nil, time.Now().UTC().Add(10*time.Minute))
+	csrfCookie := "delete-before-exchange-cookie-" + uuid.NewString()
+	insertLoginStateWithCookie(t, pool, state, time.Now().UTC().Add(10*time.Minute), csrfCookie)
 
 	app := buildApp(minCfg(), pool)
 	req := httptest.NewRequest(http.MethodGet,
 		"/auth/github/callback?code=bad_code&state="+state, nil)
+	req.AddCookie(&http.Cookie{Name: oauthCSRFCookieName, Value: csrfCookie})
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -364,13 +384,16 @@ func TestGitHubOAuthCSRF_LegitimateFlowUnaffected(t *testing.T) {
 	github.SetTokenEndpoint(mockGitHub.URL)
 	defer github.SetTokenEndpoint(old)
 
-	// Insert a valid, non-expired state
+	// Insert a valid, non-expired state, paired with the cookie a legitimate
+	// browser would present (Issue #355).
 	state := "legitimate-csrf-token-" + uuid.NewString()
-	insertState(t, pool, state, "github_login", nil, time.Now().UTC().Add(10*time.Minute))
+	csrfCookie := "legitimate-cookie-" + uuid.NewString()
+	insertLoginStateWithCookie(t, pool, state, time.Now().UTC().Add(10*time.Minute), csrfCookie)
 
 	app := buildApp(minCfg(), pool)
 	req := httptest.NewRequest(http.MethodGet,
 		"/auth/github/callback?code=legit_code&state="+state, nil)
+	req.AddCookie(&http.Cookie{Name: oauthCSRFCookieName, Value: csrfCookie})
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -391,4 +414,102 @@ func TestGitHubOAuthCSRF_LegitimateFlowUnaffected(t *testing.T) {
 		"legitimate flow must pass the state-format check")
 
 	t.Logf("flow proceeded past CSRF checks, failed at token exchange with error=%q (expected)", code)
+}
+
+// ---------------------------------------------------------------------------
+// CSRF test: login-CSRF / session fixation (Issue #355)
+// ---------------------------------------------------------------------------
+//
+// These tests cover the gap docs/security/oauth-csrf-protection.md previously
+// named under "Out of Scope: Session fixation". A state+code pair is, on its
+// own, a fully valid, single-use, unexpired credential regardless of which
+// browser presents it — none of the checks above this point (missing state,
+// mismatched state, replay, expiry) distinguish an attacker's own browser
+// from a victim's. The scenario: an attacker calls LoginStart themselves,
+// completes GitHub's consent as their own identity, and hands the resulting
+// callback URL (?code=...&state=...) to a victim. Without a browser-bound
+// cookie, the server has no way to tell that request apart from the
+// attacker's own legitimate callback — the victim's browser would end up
+// authenticated as the attacker.
+
+// TestGitHubOAuthCSRF_LoginMissingCookie asserts that a github_login callback
+// arriving with no oauth_csrf cookie at all is rejected, even though the
+// state itself is genuinely valid, unexpired, and unused.
+func TestGitHubOAuthCSRF_LoginMissingCookie(t *testing.T) {
+	pool := csrfTestPool(t)
+
+	state := "attacker-issued-state-" + uuid.NewString()
+	csrfCookie := "attacker-browser-cookie-" + uuid.NewString()
+	insertLoginStateWithCookie(t, pool, state, time.Now().UTC().Add(10*time.Minute), csrfCookie)
+
+	app := buildApp(minCfg(), pool)
+	// Simulates the victim's browser: it has the attacker-supplied code and
+	// state from a captured link, but never called LoginStart itself, so it
+	// has no oauth_csrf cookie at all.
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/github/callback?code=attacker_code&state="+state, nil)
+	resp, err := app.Test(req, -1)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode,
+		"a github_login callback with no csrf cookie must be rejected")
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	assert.Equal(t, "oauth_csrf_cookie_mismatch", oauthErrorCode(t, buf[:n]))
+}
+
+// TestGitHubOAuthCSRF_LoginMismatchedCookie asserts that a github_login
+// callback presenting a cookie that does not match the one issued alongside
+// this state is rejected — covering an attacker who has some cookie (e.g.
+// from their own, unrelated LoginStart call) but not the one bound to this
+// specific state.
+func TestGitHubOAuthCSRF_LoginMismatchedCookie(t *testing.T) {
+	pool := csrfTestPool(t)
+
+	state := "attacker-issued-state-2-" + uuid.NewString()
+	realCookie := "real-browser-cookie-" + uuid.NewString()
+	insertLoginStateWithCookie(t, pool, state, time.Now().UTC().Add(10*time.Minute), realCookie)
+
+	app := buildApp(minCfg(), pool)
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/github/callback?code=attacker_code&state="+state, nil)
+	req.AddCookie(&http.Cookie{Name: oauthCSRFCookieName, Value: "wrong-cookie-" + uuid.NewString()})
+	resp, err := app.Test(req, -1)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode,
+		"a github_login callback with a mismatched csrf cookie must be rejected")
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	assert.Equal(t, "oauth_csrf_cookie_mismatch", oauthErrorCode(t, buf[:n]))
+}
+
+// TestGitHubOAuthCSRF_LoginCookieMismatchDoesNotConsumeState asserts that a
+// cookie-mismatched attempt does NOT delete the state row. This matters
+// because a stray or malicious request presenting the right state but wrong
+// (or missing) cookie must not be able to invalidate the login attempt for
+// the legitimate browser that is still mid-flow with that state — mirroring
+// how the existing redirect_uri-not-allowed check also leaves the state
+// intact rather than burning it on a rejected-but-not-yet-exchanged attempt.
+func TestGitHubOAuthCSRF_LoginCookieMismatchDoesNotConsumeState(t *testing.T) {
+	pool := csrfTestPool(t)
+
+	state := "not-consumed-on-mismatch-" + uuid.NewString()
+	realCookie := "real-browser-cookie-" + uuid.NewString()
+	insertLoginStateWithCookie(t, pool, state, time.Now().UTC().Add(10*time.Minute), realCookie)
+
+	app := buildApp(minCfg(), pool)
+	req := httptest.NewRequest(http.MethodGet,
+		"/auth/github/callback?code=attacker_code&state="+state, nil)
+	resp, err := app.Test(req, -1)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode)
+	assert.True(t, stateExists(t, pool, state),
+		"a cookie-mismatched attempt must not consume the state — the legitimate browser must still be able to complete login with it")
 }

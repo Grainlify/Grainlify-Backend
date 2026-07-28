@@ -29,7 +29,7 @@ func TestGetLatestMigrationVersion_ReturnsHighest(t *testing.T) {
 		t.Fatalf("getLatestMigrationVersion: %v", err)
 	}
 
-	want := uint(32)
+	want := uint(33)
 	if v != want {
 		t.Fatalf("got version %d, want %d", v, want)
 	}
