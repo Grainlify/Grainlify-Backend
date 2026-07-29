@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/base32"
 	"encoding/hex"
 	"log/slog"
 	"strings"
@@ -68,6 +69,61 @@ func isValidNonce(s string) bool {
 	return isValidBase64(trimmed)
 }
 
+// crc16xmodem computes the CRC-16/XMODEM checksum used by Stellar's StrKey encoding.
+func crc16xmodem(data []byte) uint16 {
+	var crc uint16
+	for _, b := range data {
+		crc ^= uint16(b) << 8
+		for i := 0; i < 8; i++ {
+			if crc&0x8000 != 0 {
+				crc = (crc << 1) ^ 0x1021
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
+}
+
+// isValidStellarStrKey validates a Stellar StrKey-encoded address per the StrKey spec:
+// unpadded base32 (RFC 4648), a version byte identifying the address kind, and a
+// trailing CRC16/XMODEM checksum. Only account IDs ("G...", ed25519 public keys) and
+// muxed accounts ("M...") are accepted, matching the documented G/M prefix convention.
+func isValidStellarStrKey(addr string) bool {
+	if len(addr) == 0 {
+		return false
+	}
+	// StrKey uses only the unpadded base32 alphabet, uppercase.
+	for i := 0; i < len(addr); i++ {
+		c := addr[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')) {
+			return false
+		}
+	}
+	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(addr)
+	if err != nil || len(decoded) < 3 {
+		return false
+	}
+	payload := decoded[:len(decoded)-2]
+	checksum := decoded[len(decoded)-2:]
+	want := crc16xmodem(payload)
+	got := uint16(checksum[0]) | uint16(checksum[1])<<8
+	if got != want {
+		return false
+	}
+	versionByte := payload[0]
+	switch addr[0] {
+	case 'G':
+		// Account ID: ed25519 public key. Version byte 6<<3, 32-byte key, 56-char encoding.
+		return versionByte == 6<<3 && len(addr) == 56 && len(payload) == 33
+	case 'M':
+		// Muxed account: 32-byte ed25519 key + 8-byte ID. Version byte 12<<3, 69-char encoding.
+		return versionByte == 12<<3 && len(addr) == 69 && len(payload) == 41
+	default:
+		return false
+	}
+}
+
 // isValidAddress checks if a wallet address is valid and bounds its length/format per wallet type.
 func isValidAddress(wType auth.WalletType, addr string) bool {
 	trimmed := strings.TrimSpace(addr)
@@ -90,23 +146,29 @@ func isValidAddress(wType auth.WalletType, addr string) bool {
 		return isValidHex(trimmed)
 
 	case auth.WalletTypeStellarEd25519, auth.WalletTypeStellarSecp256k1:
-		// For Stellar, address can be a base32 address (starts with G, M, etc., length 56),
-		// or a public key hex. We check that it contains only alphanumeric characters
-		// after an optional 0x/0X prefix, and has length between 5 and 128 characters.
+		// For Stellar, address must be one of two documented formats:
+		//   1. A StrKey address: base32, starting with "G" (ed25519 account ID, 56 chars)
+		//      or "M" (muxed account, 69 chars), with a valid version byte and CRC16 checksum.
+		//   2. A raw public-key hex string (optional 0x/0X prefix): 64 hex chars for an
+		//      ed25519 key, or 66/130 hex chars for a compressed/uncompressed secp256k1 key.
+		if strings.HasPrefix(trimmed, "G") || strings.HasPrefix(trimmed, "M") {
+			return isValidStellarStrKey(trimmed)
+		}
 		val := trimmed
 		if strings.HasPrefix(strings.ToLower(val), "0x") {
 			val = val[2:]
 		}
-		if len(val) < 5 {
+		if !isValidHex(val) {
 			return false
 		}
-		for i := 0; i < len(val); i++ {
-			c := val[i]
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-				return false
-			}
+		switch wType {
+		case auth.WalletTypeStellarEd25519:
+			return len(val) == 64
+		case auth.WalletTypeStellarSecp256k1:
+			return len(val) == 66 || len(val) == 130
+		default:
+			return false
 		}
-		return true
 
 	default:
 		return false

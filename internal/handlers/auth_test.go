@@ -103,7 +103,7 @@ func TestNonceValidation(t *testing.T) {
 			name: "Valid Stellar address (should pass validation)",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
 			},
 			wantStatus: http.StatusOK,
 		},
@@ -172,7 +172,37 @@ func TestNonceValidation(t *testing.T) {
 			name: "Malformed Stellar address - invalid character",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2$",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX$",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid_address",
+		},
+		{
+			name: "Valid Stellar public-key hex address (should pass validation)",
+			reqBody: map[string]any{
+				"wallet_type": "stellar_ed25519",
+				"address":     strings.Repeat("ab", 32), // 64 hex chars = 32-byte ed25519 key
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "Malformed Stellar address - plausible length but no valid StrKey prefix/checksum",
+			reqBody: map[string]any{
+				"wallet_type": "stellar_ed25519",
+				// 56 chars, alphanumeric, no G/M prefix - would have passed the old
+				// "any alphanumeric 5-128 chars" check but is not a real Stellar address.
+				"address": strings.Repeat("a", 56),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid_address",
+		},
+		{
+			name: "Malformed Stellar address - valid base32 alphabet, G prefix, wrong checksum",
+			reqBody: map[string]any{
+				"wallet_type": "stellar_ed25519",
+				// Same length/alphabet/prefix as a real StrKey address, but the checksum
+				// doesn't match, so it must still be rejected.
+				"address": "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZA",
 			},
 			wantStatus: http.StatusBadRequest,
 			wantError:  "invalid_address",
@@ -291,7 +321,7 @@ func TestVerifyValidation(t *testing.T) {
 			name: "Stellar Ed25519 missing Public Key",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
 				"nonce":       "nonce-123",
 				"signature":   "0x" + strings.Repeat("a", 128),
 			},
@@ -302,7 +332,7 @@ func TestVerifyValidation(t *testing.T) {
 			name: "Stellar Ed25519 oversized Public Key",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
 				"nonce":       "nonce-123",
 				"signature":   "0x" + strings.Repeat("a", 128),
 				"public_key":  "0x" + strings.Repeat("a", 260),
@@ -314,7 +344,7 @@ func TestVerifyValidation(t *testing.T) {
 			name: "Stellar Ed25519 malformed Public Key - wrong length",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
 				"nonce":       "nonce-123",
 				"signature":   "0x" + strings.Repeat("a", 128),
 				"public_key":  "0xabcdef",
@@ -326,7 +356,7 @@ func TestVerifyValidation(t *testing.T) {
 			name: "Stellar Ed25519 malformed Public Key - not hex",
 			reqBody: map[string]any{
 				"wallet_type": "stellar_ed25519",
-				"address":     "GBXQTRFRPQLBNDNCD7SWHC26N6N5YZ23J25E34N1E2X4Q3X2E4C2C2C2",
+				"address":     "GAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7JZX",
 				"nonce":       "nonce-123",
 				"signature":   "0x" + strings.Repeat("a", 128),
 				"public_key":  "0x" + strings.Repeat("g", 64),
