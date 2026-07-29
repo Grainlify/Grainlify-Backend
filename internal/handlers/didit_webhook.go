@@ -231,18 +231,24 @@ func (h *DiditWebhookHandler) resolveDiditStatus(ctx context.Context, sessionID,
 }
 
 func (h *DiditWebhookHandler) updateUserKYCStatus(ctx context.Context, userID uuid.UUID, kycStatus string, decisionJSON []byte) error {
+	// When decisionJSON is nil/empty (e.g. Didit API was unreachable and we
+	// fell back to the webhook's signed status), preserve the existing kyc_data
+	// rather than overwriting it with an empty object.
+	var kycDataArg interface{}
 	if len(decisionJSON) == 0 {
-		decisionJSON = []byte("{}")
+		kycDataArg = nil // SQL NULL → COALESCE keeps existing kyc_data
+	} else {
+		kycDataArg = decisionJSON
 	}
 
 	_, err := h.db.Pool.Exec(ctx, `
 UPDATE users
 SET kyc_status = $1,
-    kyc_data = $2,
+    kyc_data = COALESCE($2, kyc_data),
     kyc_verified_at = CASE WHEN $1 = 'verified' THEN now() ELSE kyc_verified_at END,
     updated_at = now()
 WHERE id = $3
-`, kycStatus, decisionJSON, userID)
+`, kycStatus, kycDataArg, userID)
 	return err
 }
 

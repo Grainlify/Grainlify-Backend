@@ -15,7 +15,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 )
 
@@ -388,5 +393,200 @@ func TestDiditCallback_MissingDiditClient_Returns503(t *testing.T) {
 	// DB is checked first in GET handler, returns 503 before Didit API check
 	if resp.StatusCode != fiber.StatusServiceUnavailable {
 		t.Fatalf("want 503 (db not configured), got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleWebhook_APIFailurePreservesKycData is the regression test for the
+// bug where a Didit API failure during webhook processing overwrites an
+// existing populated kyc_data with an empty {}.
+//
+// Scenario: a user already has kyc_data = {"decision":{"first_name":"Jane"}}.
+// A webhook arrives while the Didit API is unreachable. The handler should
+// still update kyc_status from the signed webhook payload but must NOT wipe
+// kyc_data.
+func TestHandleWebhook_APIFailurePreservesKycData(t *testing.T) {
+	secret := "test-webhook-secret"
+	userID := uuid.New()
+	sessionID := "sess-api-failure-123"
+
+	// Capture the Exec call to verify the SQL and arguments.
+	var capturedSQL string
+	var capturedArgs []any
+	execFunc := func(sql string, args ...any) (pgconn.CommandTag, error) {
+		capturedSQL = sql
+		capturedArgs = args
+		return pgconn.CommandTag{}, nil
+	}
+
+	mockPool := &mockDBPool{
+		queryRowFunc: func(sql string, args ...any) pgx.Row {
+			// lookupUserByKYCSessionID returns the seeded user.
+			return &mockRow{values: []interface{}{userID}}
+		},
+		execFunc: execFunc,
+	}
+
+	h := &DiditWebhookHandler{
+		cfg: config.Config{DiditWebhookSecret: secret},
+		db:  &db.DB{Pool: mockPool},
+		didit: &fakeDiditDecisionClient{
+			err: errors.New("didit API timeout"),
+		},
+	}
+
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Post("/webhooks/didit", h.Receive())
+
+	body := []byte(`{"session_id":"` + sessionID + `","status":"Approved"}`)
+	ts := diditNowTimestamp()
+	resp := doDiditRequest(app, body, map[string]string{
+		"Content-Type": "application/json",
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign(secret, body, ts),
+	})
+	defer resp.Body.Close()
+
+	// Should succeed (200) because the webhook's signed status is usable.
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+
+	// Verify the SQL uses COALESCE for kyc_data.
+	if !strings.Contains(capturedSQL, "COALESCE($2, kyc_data)") {
+		t.Fatalf("expected SQL to use COALESCE($2, kyc_data), got:\n%s", capturedSQL)
+	}
+
+	// Verify that kyc_data argument is nil (SQL NULL) so COALESCE preserves existing data.
+	if len(capturedArgs) < 2 {
+		t.Fatalf("expected at least 2 args, got %d", len(capturedArgs))
+	}
+	if capturedArgs[1] != nil {
+		t.Fatalf("expected kyc_data arg to be nil (SQL NULL) on API failure, got %v", capturedArgs[1])
+	}
+
+	// Verify kyc_status is set to the mapped webhook status ("Approved" → "verified").
+	if len(capturedArgs) < 1 {
+		t.Fatal("expected at least 1 arg")
+	}
+	if capturedArgs[0] != "verified" {
+		t.Fatalf("expected kyc_status arg to be 'verified', got %v", capturedArgs[0])
+	}
+}
+
+// TestHandleWebhook_APISuccessWritesDecisionData verifies that when the Didit
+// API succeeds, the decision JSON is written to kyc_data (not NULL).
+func TestHandleWebhook_APISuccessWritesDecisionData(t *testing.T) {
+	secret := "test-webhook-secret"
+	userID := uuid.New()
+	sessionID := "sess-api-success-456"
+
+	var capturedArgs []any
+	execFunc := func(sql string, args ...any) (pgconn.CommandTag, error) {
+		capturedArgs = args
+		return pgconn.CommandTag{}, nil
+	}
+
+	mockPool := &mockDBPool{
+		queryRowFunc: func(sql string, args ...any) pgx.Row {
+			return &mockRow{values: []interface{}{userID}}
+		},
+		execFunc: execFunc,
+	}
+
+	h := &DiditWebhookHandler{
+		cfg: config.Config{DiditWebhookSecret: secret},
+		db:  &db.DB{Pool: mockPool},
+		didit: &fakeDiditDecisionClient{
+			decision: didit.SessionDecisionResponse{
+				Status: "Approved",
+				Decision: map[string]interface{}{
+					"first_name": "Jane",
+				},
+			},
+		},
+	}
+
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Post("/webhooks/didit", h.Receive())
+
+	body := []byte(`{"session_id":"` + sessionID + `","status":"Approved"}`)
+	ts := diditNowTimestamp()
+	resp := doDiditRequest(app, body, map[string]string{
+		"Content-Type": "application/json",
+		"X-Timestamp":  ts,
+		"X-Signature":  diditSign(secret, body, ts),
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+
+	// Verify kyc_data arg is NOT nil — it should contain the marshaled decision.
+	if len(capturedArgs) < 2 {
+		t.Fatalf("expected at least 2 args, got %d", len(capturedArgs))
+	}
+	if capturedArgs[1] == nil {
+		t.Fatal("expected kyc_data arg to be non-nil on API success, got nil")
+	}
+
+	// Verify the data contains the decision.
+	dataBytes, ok := capturedArgs[1].([]byte)
+	if !ok {
+		t.Fatalf("expected kyc_data arg to be []byte, got %T", capturedArgs[1])
+	}
+	if !strings.Contains(string(dataBytes), "first_name") {
+		t.Fatalf("expected kyc_data to contain decision data, got: %s", string(dataBytes))
+	}
+}
+
+// TestUpdateUserKYCStatus_PreservesDataOnEmptyDecision verifies the unit-level
+// behavior: empty decisionJSON → nil SQL arg → COALESCE keeps existing data.
+func TestUpdateUserKYCStatus_PreservesDataOnEmptyDecision(t *testing.T) {
+	var capturedArgs []any
+	execFunc := func(sql string, args ...any) (pgconn.CommandTag, error) {
+		capturedArgs = args
+		return pgconn.CommandTag{}, nil
+	}
+
+	h := &DiditWebhookHandler{
+		db: &db.DB{Pool: &mockDBPool{execFunc: execFunc}},
+	}
+
+	// Empty decisionJSON (simulating API failure fallback).
+	err := h.updateUserKYCStatus(context.Background(), uuid.New(), "verified", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedArgs[1] != nil {
+		t.Fatalf("expected nil kyc_data arg, got %v", capturedArgs[1])
+	}
+}
+
+// TestUpdateUserKYCStatus_WritesDataOnPopulatedDecision verifies that when
+// decisionJSON is populated, it is written directly.
+func TestUpdateUserKYCStatus_WritesDataOnPopulatedDecision(t *testing.T) {
+	var capturedArgs []any
+	execFunc := func(sql string, args ...any) (pgconn.CommandTag, error) {
+		capturedArgs = args
+		return pgconn.CommandTag{}, nil
+	}
+
+	h := &DiditWebhookHandler{
+		db: &db.DB{Pool: &mockDBPool{execFunc: execFunc}},
+	}
+
+	decision := []byte(`{"decision":{"status":"approved"}}`)
+	err := h.updateUserKYCStatus(context.Background(), uuid.New(), "verified", decision)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedArgs[1] == nil {
+		t.Fatal("expected non-nil kyc_data arg")
+	}
+	if !strings.Contains(string(capturedArgs[1].([]byte)), "approved") {
+		t.Fatalf("expected kyc_data to contain decision, got: %s", capturedArgs[1])
 	}
 }
