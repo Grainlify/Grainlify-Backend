@@ -129,10 +129,25 @@ func TestGitHubWebhookConsumerLogsCancelledInFlightMessageAfterGracePeriod(t *te
 	stop()
 	consumer.drainOnShutdown(lifecycleCtx, nil)
 
+	// Wait for handleMessage itself to fully return (not just for Ingest to
+	// unblock via ingestor.done). Ingest's done channel is closed by a defer
+	// inside Ingest, which races with handleMessage's own post-Ingest code
+	// (clearInFlight + the slog.Warn call below) — closing a channel only
+	// establishes a happens-before relationship for what happened BEFORE the
+	// close, not for the caller's code that runs after Ingest returns. The
+	// consumer's WaitGroup is only marked Done once handleMessage's goroutine
+	// (including the slog.Warn call) has completed, so waiting on it is the
+	// correct synchronization point for asserting on the emitted log.
+	handlerDone := make(chan struct{})
+	go func() {
+		consumer.wg.Wait()
+		close(handlerDone)
+	}()
+
 	select {
-	case <-ingestor.done:
+	case <-handlerDone:
 	case <-time.After(time.Second):
-		t.Fatal("ingestor did not observe cancellation after shutdown grace period")
+		t.Fatal("handleMessage did not observe cancellation after shutdown grace period")
 	}
 	if ingestor.count != 1 {
 		t.Fatalf("expected cancelled message to be attempted exactly once, got %d", ingestor.count)

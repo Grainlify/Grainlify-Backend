@@ -180,6 +180,14 @@ type ecosystemUpsertRequest struct {
 	Technologies json.RawMessage `json:"technologies"` // ["..."]
 }
 
+const (
+	maxEcosystemNameLen        = 200
+	maxEcosystemDescriptionLen = 1000
+	maxEcosystemAboutLen       = 5000
+	maxEcosystemURLLen         = 500
+	maxEcosystemJSONFieldBytes = 20 * 1024 // 20KB, applies to links/key_areas/technologies raw JSON
+)
+
 // validateEcosystemInput validates the upsert request.
 // isUpdate indicates whether this is an update (partial) request.
 func validateEcosystemInput(req *ecosystemUpsertRequest, isUpdate bool) error {
@@ -189,26 +197,48 @@ func validateEcosystemInput(req *ecosystemUpsertRequest, isUpdate bool) error {
 		return errors.New("name_required")
 	}
 	if name != "" {
+		if len(name) > maxEcosystemNameLen {
+			return errors.New("name_too_long")
+		}
 		// Ensure generated slug is not empty.
 		slug := normalizeSlug(name)
 		if slug == "" {
 			return errors.New("invalid_slug")
 		}
 	}
-	// Description length limit (example: 1000 chars).
-	if len(req.Description) > 1000 {
+	if len(strings.TrimSpace(req.Description)) > maxEcosystemDescriptionLen {
 		return errors.New("description_too_long")
 	}
+	if len(strings.TrimSpace(req.About)) > maxEcosystemAboutLen {
+		return errors.New("about_too_long")
+	}
 	// Validate URLs if provided.
-	if strings.TrimSpace(req.WebsiteURL) != "" {
-		if _, err := url.ParseRequestURI(strings.TrimSpace(req.WebsiteURL)); err != nil {
+	websiteURL := strings.TrimSpace(req.WebsiteURL)
+	if websiteURL != "" {
+		if len(websiteURL) > maxEcosystemURLLen {
+			return errors.New("website_url_too_long")
+		}
+		if _, err := url.ParseRequestURI(websiteURL); err != nil {
 			return errors.New("website_url_invalid")
 		}
 	}
-	if strings.TrimSpace(req.LogoURL) != "" {
-		if _, err := url.ParseRequestURI(strings.TrimSpace(req.LogoURL)); err != nil {
+	logoURL := strings.TrimSpace(req.LogoURL)
+	if logoURL != "" {
+		if len(logoURL) > maxEcosystemURLLen {
+			return errors.New("logo_url_too_long")
+		}
+		if _, err := url.ParseRequestURI(logoURL); err != nil {
 			return errors.New("logo_url_invalid")
 		}
+	}
+	if len(req.Links) > maxEcosystemJSONFieldBytes {
+		return errors.New("links_too_long")
+	}
+	if len(req.KeyAreas) > maxEcosystemJSONFieldBytes {
+		return errors.New("key_areas_too_long")
+	}
+	if len(req.Technologies) > maxEcosystemJSONFieldBytes {
+		return errors.New("technologies_too_long")
 	}
 	return nil
 }
@@ -284,6 +314,9 @@ func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 		var req ecosystemUpsertRequest
 		if err := c.BodyParser(&req); err != nil {
 			return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_json", "")
+		}
+		if err := validateEcosystemInput(&req, true); err != nil {
+			return httpx.RespondError(c, fiber.StatusBadRequest, httpx.Code(err.Error()), "")
 		}
 
 		name := strings.TrimSpace(req.Name)
