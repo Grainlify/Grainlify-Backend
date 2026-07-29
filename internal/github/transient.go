@@ -20,9 +20,10 @@ package github
 // setting the request header "X-Retry-Non-Idempotent: true".
 
 import (
-	cryptorand "crypto/rand"
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -130,8 +131,18 @@ func (t *TransientRetryTransport) RoundTrip(req *http.Request) (*http.Response, 
 	)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Clone so each attempt gets its own request (safe for nil bodies on GET).
+		// Clone so each attempt gets its own request, re-reading the body from
+		// GetBody so retried requests (including non-idempotent opt-ins) send
+		// the original payload instead of an already-drained reader.
 		clone := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, bodyErr := req.GetBody()
+			if bodyErr != nil {
+				return nil, fmt.Errorf("transient retry: rewind request body: %w", bodyErr)
+			}
+			clone.Body = body
+		}
+
 		resp, err = base.RoundTrip(clone)
 
 		transientNet := err != nil && isTransientNetworkError(err)
@@ -175,9 +186,9 @@ func (t *TransientRetryTransport) RoundTrip(req *http.Request) (*http.Response, 
 func isTransientStatus(code int) bool {
 	switch code {
 	case http.StatusInternalServerError, // 500
-		http.StatusBadGateway,          // 502
-		http.StatusServiceUnavailable,  // 503
-		http.StatusGatewayTimeout:      // 504
+		http.StatusBadGateway,         // 502
+		http.StatusServiceUnavailable, // 503
+		http.StatusGatewayTimeout:     // 504
 		return true
 	}
 	return false
