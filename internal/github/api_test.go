@@ -63,6 +63,76 @@ func doRequest(tr http.RoundTripper, method, url string) (*http.Response, error)
 }
 
 // ---------------------------------------------------------------------------
+// NewClient timeout tests (Issue #357)
+// ---------------------------------------------------------------------------
+
+// TestNewClient_RateLimitWaitLongerThanOldTimeoutIsHonored simulates a
+// primary rate-limit response whose X-RateLimit-Reset is further away than
+// the old hardcoded 10-second client Timeout. Before the fix, http.Client's
+// Timeout derived a context deadline that both composed transports select on
+// while sleeping, so this request would have failed with a context-deadline
+// error at ~10s instead of waiting for the reset and succeeding. It must now
+// succeed, proving the client-level Timeout no longer truncates
+// RateLimitTransport's own retry budget.
+func TestNewClient_RateLimitWaitLongerThanOldTimeoutIsHonored(t *testing.T) {
+	const (
+		rateLimitWaitSeconds = 14 // > the old 10s client Timeout
+		// X-RateLimit-Reset is a Unix second timestamp, so computing it via
+		// time.Now().Add(...).Unix() truncates whatever fraction of the
+		// current second has already elapsed — the actual wait can be up to
+		// ~1s shorter than the nominal value. minElapsed leaves headroom for
+		// that truncation (and scheduling jitter) while still asserting the
+		// wait clearly exceeded the old 10s timeout.
+		minElapsed = 11 * time.Second
+	)
+
+	resetAt := time.Now().Add(rateLimitWaitSeconds * time.Second).Unix()
+	srv := httptest.NewServer(serveSequence([]http.HandlerFunc{
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetAt))
+			w.WriteHeader(http.StatusForbidden)
+		},
+		write200,
+	}))
+	defer srv.Close()
+
+	client := NewClient()
+
+	start := time.Now()
+	resp, err := client.HTTP.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("expected the rate-limit wait to be honored and succeed, got error: %v", err)
+	}
+	defer resp.Body.Close()
+	elapsed := time.Since(start)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after the rate-limit reset elapsed, got %d", resp.StatusCode)
+	}
+	if elapsed < minElapsed {
+		t.Fatalf("expected the request to wait past the old 10s timeout for the rate-limit reset, only took %v — did the client time out early instead of waiting?", elapsed)
+	}
+}
+
+// TestNewClient_FastRequestUnaffected is a sanity check that the raised
+// Timeout doesn't change behavior for ordinary, non-rate-limited requests.
+func TestNewClient_FastRequestUnaffected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(write200))
+	defer srv.Close()
+
+	client := NewClient()
+	resp, err := client.HTTP.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error on a normal request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // isTransientStatus unit tests
 // ---------------------------------------------------------------------------
 

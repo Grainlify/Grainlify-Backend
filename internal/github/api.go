@@ -13,6 +13,25 @@ type Client struct {
 	UserAgent string
 }
 
+// clientTimeout bounds the *entire* round trip performed by http.Client,
+// including every retry the composed transports perform internally — Go
+// derives the context deadline used by both transports' retry-sleep selects
+// from this same Timeout. It must therefore cover their realistic combined
+// worst case, not just a single attempt:
+//
+//   - RateLimitTransport: up to DefaultMaxRetries (3) waits, each capped at
+//     DefaultMaxWait (60s) ⇒ up to 180s honoring a real X-RateLimit-Reset.
+//   - TransientRetryTransport: a 429/403 response isn't in its own retry set
+//     (only 5xx/network errors are), so it does not multiply that 180s —
+//     it makes one pass-through call to RateLimitTransport per its own
+//     attempt, and its 30s MaxElapsed budget self-limits further attempts
+//     once a single inner call has already run that long.
+//
+// 210s covers the 180s worst case with headroom for actual request latency
+// and TransientRetryTransport's own smaller-scale retries, while still
+// failing a genuinely hung connection well short of "forever".
+const clientTimeout = 210 * time.Second
+
 // NewClient returns a GitHub API client with two layers of automatic retry:
 //
 //  1. RateLimitTransport — retries 403/429 rate-limit responses, honoring the
@@ -29,12 +48,19 @@ type Client struct {
 //	http.DefaultTransport
 //	  └─ RateLimitTransport           (inner — rate-limit signals)
 //	       └─ TransientRetryTransport (outer — 5xx / network errors)
+//
+// See clientTimeout for why the client-level Timeout is 210s rather than a
+// short fixed value: a short timeout would silently truncate the retry
+// budgets above before they can do what their own doc comments describe.
+// Callers with their own, tighter time budget should derive a shorter
+// context.Context and pass it through (every method in this package accepts
+// one) rather than relying on the client-level Timeout for that.
 func NewClient() *Client {
 	rateLimitTransport := NewRateLimitTransport(nil)
 	transientTransport := NewTransientRetryTransport(rateLimitTransport)
 	return &Client{
 		HTTP: &http.Client{
-			Timeout:   10 * time.Second,
+			Timeout:   clientTimeout,
 			Transport: transientTransport,
 		},
 		UserAgent: "grainlify-backend",
