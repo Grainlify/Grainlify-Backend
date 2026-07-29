@@ -883,34 +883,53 @@ ORDER BY p.github_full_name ASC
 		}
 		defer rows.Close()
 
+		// Scan every row first so the GitHub repo-metadata fetch below can run
+		// once, concurrently, across all rows instead of once per row
+		// sequentially (issue #290).
+		type ledRow struct {
+			id            uuid.UUID
+			fullName      string
+			status        string
+			ecosystemName *string
+			language      *string
+		}
+		var ledRows []ledRow
+		for rows.Next() {
+			var r ledRow
+			if err := rows.Scan(&r.id, &r.fullName, &r.status, &r.ecosystemName, &r.language); err != nil {
+				continue
+			}
+			ledRows = append(ledRows, r)
+		}
+
 		var accessToken string
 		if linkedAccount, errLA := github.GetLinkedAccount(c.Context(), h.db.Pool, *targetUserID, h.cfg.TokenEncKeyB64); errLA == nil {
 			accessToken = linkedAccount.AccessToken
 		}
+
+		fullNames := make([]string, len(ledRows))
+		for i, r := range ledRows {
+			fullNames[i] = r.fullName
+		}
 		gh := github.NewClient()
+		repoResults := fetchReposConcurrently(c.Context(), gh, accessToken, fullNames)
+
 		var projects []fiber.Map
-		for rows.Next() {
-			var id uuid.UUID
-			var fullName, status string
-			var ecosystemName, language *string
-			if err := rows.Scan(&id, &fullName, &status, &ecosystemName, &language); err != nil {
-				continue
-			}
+		for _, r := range ledRows {
 			var ownerAvatarURL *string
-			repo, repoErr := gh.GetRepo(c.Context(), accessToken, fullName)
-			if repoErr == nil && !repo.Private && repo.Owner.AvatarURL != "" {
-				url := repo.Owner.AvatarURL
+			if res := repoResults[r.fullName]; res.err == nil && !res.repo.Private && res.repo.Owner.AvatarURL != "" {
+				url := res.repo.Owner.AvatarURL
 				if strings.Contains(url, "avatars.githubusercontent.com") && !strings.Contains(url, "?") {
 					url = url + "?s=128"
 				}
 				ownerAvatarURL = &url
 			}
 			projects = append(projects, fiber.Map{
-				"id":               id.String(),
-				"github_full_name": fullName,
-				"status":           status,
-				"ecosystem_name":   ecosystemName,
-				"language":         language,
+				"id":               r.id.String(),
+				"github_full_name": r.fullName,
+				"status":           r.status,
+				"ecosystem_name":   r.ecosystemName,
+				"language":         r.language,
 				"owner_avatar_url": ownerAvatarURL,
 			})
 		}
