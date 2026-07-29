@@ -697,3 +697,142 @@ func TestJobFinalState_RowFailureErrorTriggersRetryOrDeadLetter(t *testing.T) {
 		t.Fatalf("status = %q, want dead", deadState.status)
 	}
 }
+
+// panickingTx is a pgx.Tx whose QueryRow always panics, simulating an
+// unexpected data shape in the sync pipeline.
+type panickingTx struct{}
+
+func (panickingTx) Begin(ctx context.Context) (pgx.Tx, error)                       { return nil, nil }
+func (panickingTx) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+func (panickingTx) CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
+	return 0, nil
+}
+func (panickingTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults       { return nil }
+func (panickingTx) LargeObjects() pgx.LargeObjects                                       { return pgx.LargeObjects{} }
+func (panickingTx) Prepare(ctx context.Context, name, sql string) (*pgconn.StatementDescription, error) {
+	return nil, nil
+}
+func (panickingTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (panickingTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, nil
+}
+func (panickingTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	panic("deliberate panic: unexpected data shape in sync pipeline")
+}
+func (panickingTx) Commit(ctx context.Context) error   { return nil }
+func (panickingTx) Rollback(ctx context.Context) error { return nil }
+func (panickingTx) Conn() *pgx.Conn                    { return nil }
+
+// panickingBeginTxPool wraps mockWorkerDBPool but returns a panickingTx
+// from BeginTx so that processOne panics during the first db.WithTx call.
+type panickingBeginTxPool struct {
+	mockWorkerDBPool
+}
+
+func (p *panickingBeginTxPool) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return panickingTx{}, nil
+}
+
+// TestRunSurvivesPanicInProcessOne proves that a panic inside processOne
+// is recovered by safeProcessOne and the Run ticker loop continues rather
+// than crashing the goroutine (and, in production, the worker process).
+func TestRunSurvivesPanicInProcessOne(t *testing.T) {
+	handler := &testLogHandler{}
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(origLogger)
+
+	w := &Worker{
+		pool:    &panickingBeginTxPool{},
+		limiter: rate.NewLimiter(rate.Inf, 0),
+		gh:      &github.Client{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Run in a goroutine. If the panic escapes, the test binary crashes.
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Run(ctx)
+	}()
+
+	// Wait for Run to return (context timeout).
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not exit within timeout")
+	}
+
+	// Verify the panic was logged.
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+
+	var panicLogged bool
+	for _, r := range handler.records {
+		if r.Level == slog.LevelError && r.Message == "sync worker panic recovered" {
+			panicLogged = true
+			attrs := getRecordAttrMap(r)
+			if attrs["panic"] != "deliberate panic: unexpected data shape in sync pipeline" {
+				t.Errorf("unexpected panic value: %v", attrs["panic"])
+			}
+			break
+		}
+	}
+	if !panicLogged {
+		t.Error("expected 'sync worker panic recovered' log entry, but none was found")
+	}
+}
+
+// TestRunSurvivesMultiplePanics proves the loop keeps ticking after
+// multiple consecutive panics.
+func TestRunSurvivesMultiplePanics(t *testing.T) {
+	handler := &testLogHandler{}
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(origLogger)
+
+	w := &Worker{
+		pool:    &panickingBeginTxPool{},
+		limiter: rate.NewLimiter(rate.Inf, 0),
+		gh:      &github.Client{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Run(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not exit within timeout")
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+
+	var panicCount int
+	for _, r := range handler.records {
+		if r.Level == slog.LevelError && r.Message == "sync worker panic recovered" {
+			panicCount++
+		}
+	}
+	// With a 5s timeout and 1s ticker, we expect multiple ticks (≥3 panics).
+	if panicCount < 2 {
+		t.Errorf("expected at least 2 panic recoveries, got %d", panicCount)
+	}
+}
