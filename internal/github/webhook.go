@@ -9,6 +9,11 @@ import (
 	"net/url"
 )
 
+// Note: this file only covers creating a GitHub webhook via the API.
+// Verifying an inbound webhook's X-Hub-Signature-256 HMAC is handled by
+// verifyGitHubSignature in internal/handlers/github_webhooks.go (tested in
+// internal/handlers/github_webhooks_test.go), not here.
+
 type CreateWebhookRequest struct {
 	URL    string
 	Secret string

@@ -166,6 +166,14 @@ func TestVerifyGitHubSignature_EmptyHeader(t *testing.T) {
 	}
 }
 
+func TestVerifyGitHubSignature_InvalidHex(t *testing.T) {
+	body := []byte(`{}`)
+	// Correct prefix, but the value after it isn't valid hex.
+	if verifyGitHubSignature("mysecret", body, "sha256=not-valid-hex") {
+		t.Fatal("expected non-hex signature value to fail")
+	}
+}
+
 // assertConstantTimeCompare verifies that verifyGitHubSignature still returns
 // false even when the decoded signatures are equal length, exercising the
 // hmac.Equal comparison path rather than only malformed-input rejection.
