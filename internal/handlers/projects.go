@@ -21,9 +21,9 @@ import (
 )
 
 type ProjectsHandler struct {
-	cfg                 config.Config
-	db                  *db.DB
-	onProjectChanged    func(projectID string) // callback to invalidate cache on project CUD operations
+	cfg              config.Config
+	db               *db.DB
+	onProjectChanged func(projectID string) // callback to invalidate cache on project CUD operations
 }
 
 func NewProjectsHandler(cfg config.Config, d *db.DB) *ProjectsHandler {
@@ -194,6 +194,31 @@ ORDER BY p.created_at DESC
 		}
 		defer rows.Close()
 
+		// Scan every row first so the GitHub repo-metadata fetch below can run
+		// once, concurrently, across all rows instead of once per row
+		// sequentially (issue #290).
+		type mineRow struct {
+			id                                uuid.UUID
+			fullName, status                  string
+			repoID                            *int64
+			verifiedAt, webhookCreatedAt      *time.Time
+			verErr, webhookURL                *string
+			webhookID                         *int64
+			createdAt, updatedAt              time.Time
+			ecosystemName, language, category *string
+			tagsJSON                          []byte
+			description                       *string
+			needsMetadata                     bool
+		}
+		var mineRows []mineRow
+		for rows.Next() {
+			var r mineRow
+			if err := rows.Scan(&r.id, &r.fullName, &r.status, &r.repoID, &r.verifiedAt, &r.verErr, &r.webhookID, &r.webhookURL, &r.webhookCreatedAt, &r.createdAt, &r.updatedAt, &r.ecosystemName, &r.language, &r.tagsJSON, &r.category, &r.description, &r.needsMetadata); err != nil {
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+			}
+			mineRows = append(mineRows, r)
+		}
+
 		// Get user's GitHub access token for fetching repo data
 		linkedAccount, err := github.GetLinkedAccount(c.Context(), h.db.Pool, userID, h.cfg.TokenEncKeyB64)
 		var accessToken string
@@ -202,37 +227,26 @@ ORDER BY p.created_at DESC
 		}
 
 		gh := github.NewClient()
-		var out []fiber.Map
-		for rows.Next() {
-			var id uuid.UUID
-			var fullName, status string
-			var repoID *int64
-			var verifiedAt *time.Time
-			var verErr *string
-			var webhookID *int64
-			var webhookURL *string
-			var webhookCreatedAt *time.Time
-			var createdAt, updatedAt time.Time
-			var ecosystemName *string
-			var language *string
-			var tagsJSON []byte
-			var category *string
-			var description *string
-			var needsMetadata bool
-
-			if err := rows.Scan(&id, &fullName, &status, &repoID, &verifiedAt, &verErr, &webhookID, &webhookURL, &webhookCreatedAt, &createdAt, &updatedAt, &ecosystemName, &language, &tagsJSON, &category, &description, &needsMetadata); err != nil {
-				return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+		var repoResults map[string]repoFetchResult
+		if accessToken != "" {
+			fullNames := make([]string, len(mineRows))
+			for i, r := range mineRows {
+				fullNames[i] = r.fullName
 			}
+			repoResults = fetchReposConcurrently(c.Context(), gh, accessToken, fullNames)
+		}
 
+		var out []fiber.Map
+		for _, r := range mineRows {
 			// Fetch repo data from GitHub to check if it's private and get owner avatar
 			var ownerAvatarURL *string
 			var isPrivate bool
 			if accessToken != "" {
-				repo, err := gh.GetRepo(c.Context(), accessToken, fullName)
-				if err == nil {
-					isPrivate = repo.Private
+				res := repoResults[r.fullName]
+				if res.err == nil {
+					isPrivate = res.repo.Private
 					if !isPrivate {
-						ownerAvatarURL = &repo.Owner.AvatarURL
+						ownerAvatarURL = &res.repo.Owner.AvatarURL
 					}
 				} else {
 					// If we can't fetch (404/403), assume it's private
@@ -247,34 +261,34 @@ ORDER BY p.created_at DESC
 UPDATE projects
 SET deleted_at = now()
 WHERE id = $1
-`, id)
+`, r.id)
 				continue
 			}
 
 			// Parse tags JSONB
 			var tags []string
-			if len(tagsJSON) > 0 {
-				_ = json.Unmarshal(tagsJSON, &tags)
+			if len(r.tagsJSON) > 0 {
+				_ = json.Unmarshal(r.tagsJSON, &tags)
 			}
 
 			projectMap := fiber.Map{
-				"id":                 id.String(),
-				"github_full_name":   fullName,
-				"status":             status,
-				"github_repo_id":     repoID,
-				"verified_at":        verifiedAt,
-				"verification_error": verErr,
-				"webhook_id":         webhookID,
-				"webhook_url":        webhookURL,
-				"webhook_created_at": webhookCreatedAt,
-				"created_at":         createdAt,
-				"updated_at":         updatedAt,
-				"ecosystem_name":     ecosystemName,
-				"language":           language,
+				"id":                 r.id.String(),
+				"github_full_name":   r.fullName,
+				"status":             r.status,
+				"github_repo_id":     r.repoID,
+				"verified_at":        r.verifiedAt,
+				"verification_error": r.verErr,
+				"webhook_id":         r.webhookID,
+				"webhook_url":        r.webhookURL,
+				"webhook_created_at": r.webhookCreatedAt,
+				"created_at":         r.createdAt,
+				"updated_at":         r.updatedAt,
+				"ecosystem_name":     r.ecosystemName,
+				"language":           r.language,
 				"tags":               tags,
-				"category":           category,
-				"description":        description,
-				"needs_metadata":     needsMetadata,
+				"category":           r.category,
+				"description":        r.description,
+				"needs_metadata":     r.needsMetadata,
 			}
 
 			// Add owner avatar if available
