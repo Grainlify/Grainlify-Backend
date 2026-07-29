@@ -33,9 +33,14 @@ func NewSyncHandler(d *db.DB) *SyncHandler {
 //    - We check the idempotency_keys table for a cached response scoped to the user.
 //    - Cached successful responses are valid for 24 hours.
 // 2. If no "Idempotency-Key" header is provided:
-//    - We fall back to a natural key generated from: "sync:<project_id>:manual:<time_window_slot>".
-//    - The time window slot changes every 5 minutes (300 seconds) to prevent spamming.
-//    - The natural key is scoped to the user in idempotency_keys and cached for 5 minutes.
+//    - We fall back to a stable natural key: "sync:<project_id>:manual".
+//    - A sliding-window dedup check queries idempotency_keys for any key matching
+//      this prefix (LIKE 'sync:<project_id>:manual%') created within the last
+//      5 minutes. If found, the cached response is returned immediately.
+//    - This prevents spamming even when consecutive requests straddle a 5-minute
+//      wall-clock boundary (the previous fixed-bucket approach failed in that case).
+//    - The natural key is scoped to the user in idempotency_keys and cached for
+//      24 hours (same as client-provided keys).
 // 3. Concurrency Protection:
 //    - We insert the idempotency key BEFORE executing the underlying sync jobs.
 //    - The insert uses ON CONFLICT (user_id, idempotency_key) DO NOTHING.
@@ -76,16 +81,42 @@ func (h *SyncHandler) EnqueueFullSync() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusForbidden, "forbidden", "")
 		}
 
-		// Determine strategy: client-provided key vs. natural key (5-minute window)
+		// Determine strategy: client-provided key vs. natural key (sliding window)
 		isNaturalKey := false
 		if idempotencyKey == "" {
 			isNaturalKey = true
-			// natural key time slot: 5-minute interval
-			timeWindow := time.Now().Unix() / 300
-			idempotencyKey = fmt.Sprintf("sync:%s:manual:%d", projectID, timeWindow)
+			// Stable natural key: no time bucket so dedup is purely sliding-window.
+			idempotencyKey = fmt.Sprintf("sync:%s:manual", projectID)
 		}
 
-		// Check for existing cached response
+		if isNaturalKey {
+			// Sliding-window dedup: reject if any manual sync idempotency key
+			// for this user+project was created within the last 5 minutes.
+			// This covers the boundary-straddling case that fixed buckets miss.
+			var recentKey string
+			err = h.db.Pool.QueryRow(c.Context(), `
+SELECT idempotency_key
+FROM idempotency_keys
+WHERE user_id = $1 AND idempotency_key LIKE $2 AND created_at > now() - interval '5 minutes'
+LIMIT 1
+`, userID, fmt.Sprintf("sync:%s:manual%%", projectID)).Scan(&recentKey)
+
+			if err == nil {
+				slog.Info("sync handler sliding-window dedup hit",
+					"user_id", userID.String(),
+					"project_id", projectID.String(),
+				)
+				return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"queued": true})
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("sync handler sliding-window dedup query failed",
+					"user_id", userID.String(),
+					"error", err,
+				)
+				// Fall through – non-critical, let the request proceed.
+			}
+		}
+
+		// Check for existing cached response (handles client-provided key retries)
 		var cachedStatus int
 		var cachedBody string
 		err = h.db.Pool.QueryRow(c.Context(), `
@@ -112,13 +143,8 @@ LIMIT 1
 			)
 		}
 
-		// Determine expiration and success response representation
-		var expiresAt time.Time
-		if isNaturalKey {
-			expiresAt = time.Now().Add(5 * time.Minute)
-		} else {
-			expiresAt = time.Now().Add(24 * time.Hour)
-		}
+		// Determine expiration: 24 hours for all key types
+		expiresAt := time.Now().Add(24 * time.Hour)
 
 		successResponse := fiber.Map{"queued": true}
 		successResponseJSON, _ := json.Marshal(successResponse)
