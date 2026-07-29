@@ -136,6 +136,27 @@ func TestValidate_PartialSorobanConfigFails(t *testing.T) {
 	}
 }
 
+func TestValidate_PartialSorobanConfigErrorOrderIsDeterministic(t *testing.T) {
+	// Regression test for #347: the "missing" list must always be in the
+	// same order, not the random order Go map iteration would produce.
+	const want = "missing: SOROBAN_SOURCE_SECRET, ESCROW_CONTRACT_ID, " +
+		"PROGRAM_ESCROW_CONTRACT_ID, TOKEN_CONTRACT_ID"
+
+	for i := 0; i < 10; i++ {
+		cfg := prodBase()
+		cfg.SorobanRPCURL = "https://soroban-testnet.stellar.org"
+		// SorobanSourceSecret, EscrowContractID, ProgramEscrowContractID,
+		// TokenContractID left empty so they land in "missing".
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected error for incomplete Soroban config")
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("run %d: error message did not contain expected ordered missing list.\ngot:  %s\nwant substring: %s", i, err.Error(), want)
+		}
+	}
+}
+
 func TestValidate_FullSorobanConfigPasses(t *testing.T) {
 	cfg := prodBase()
 	cfg.SorobanRPCURL = "https://soroban-testnet.stellar.org"

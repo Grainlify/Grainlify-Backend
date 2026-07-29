@@ -404,20 +404,22 @@ func (c Config) Validate() error {
 		}
 
 		// --- Soroban group: all-or-nothing ---
-		sorobanFields := map[string]string{
-			"SOROBAN_RPC_URL":            c.SorobanRPCURL,
-			"SOROBAN_SOURCE_SECRET":      c.SorobanSourceSecret,
-			"ESCROW_CONTRACT_ID":         c.EscrowContractID,
-			"PROGRAM_ESCROW_CONTRACT_ID": c.ProgramEscrowContractID,
-			"TOKEN_CONTRACT_ID":          c.TokenContractID,
+		// Ordered slice (not a map) so "missing" below is built in a
+		// fixed, deterministic order instead of random map iteration order.
+		sorobanFields := []struct{ Key, Val string }{
+			{"SOROBAN_RPC_URL", c.SorobanRPCURL},
+			{"SOROBAN_SOURCE_SECRET", c.SorobanSourceSecret},
+			{"ESCROW_CONTRACT_ID", c.EscrowContractID},
+			{"PROGRAM_ESCROW_CONTRACT_ID", c.ProgramEscrowContractID},
+			{"TOKEN_CONTRACT_ID", c.TokenContractID},
 		}
 		anySet := false
 		var missing []string
-		for key, val := range sorobanFields {
-			if strings.TrimSpace(val) != "" {
+		for _, field := range sorobanFields {
+			if strings.TrimSpace(field.Val) != "" {
 				anySet = true
 			} else {
-				missing = append(missing, key)
+				missing = append(missing, field.Key)
 			}
 		}
 		if anySet && len(missing) > 0 {
