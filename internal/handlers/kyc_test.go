@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
@@ -319,6 +321,68 @@ func TestKYCStatusTransientInvalidErrorDoesNotExpireSession(t *testing.T) {
 
 	if execCalled {
 		t.Errorf("expected DB exec (expiry update) NOT to be called on transient error containing 'invalid'")
+	}
+}
+
+func TestKYCStartNoStoredSessionURLOmitsURLField(t *testing.T) {
+	// Mock Didit server: session still exists (terminal status, no session_url extra field)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status": "approved"}`))
+	}))
+	defer server.Close()
+
+	existingSessionID := "11111111-1111-1111-1111-111111111111"
+
+	mockPool := &mockDBPool{
+		queryRowFunc: func(sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "kyc_data") {
+				// No session_url stored - simulate an empty kyc_data payload
+				kycData := []byte(`{}`)
+				return &mockRow{values: []interface{}{kycData}}
+			}
+			status := "pending"
+			sessionID := existingSessionID
+			return &mockRow{values: []interface{}{&sessionID, &status}}
+		},
+	}
+
+	cfg := config.Config{
+		DiditAPIKey:     "mock-api-key",
+		DiditWorkflowID: "mock-workflow-id",
+	}
+	h := NewKYCHandler(cfg, &db.DB{Pool: mockPool})
+	h.didit.BaseURL = server.URL
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return c.Next()
+	})
+	app.Post("/kyc/start", h.Start())
+
+	req := httptest.NewRequest("POST", "/kyc/start", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if url, ok := body["url"]; ok {
+		t.Errorf("expected response to omit 'url' field, got %v", url)
+	}
+	if body["session_id"] != existingSessionID {
+		t.Errorf("expected session_id %q, got %v", existingSessionID, body["session_id"])
 	}
 }
 
