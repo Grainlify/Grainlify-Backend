@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,6 +25,14 @@ type ProjectsHandler struct {
 	cfg              config.Config
 	db               *db.DB
 	onProjectChanged func(projectID string) // callback to invalidate cache on project CUD operations
+
+	// verifyInFlight tracks project IDs currently being processed by
+	// verifyAndWebhook, keyed by uuid.UUID. It's a fast-path guard against
+	// the common rapid-resubmit case (Issue #359) — the actual correctness
+	// guarantee against duplicate webhook creation is the SELECT ... FOR
+	// UPDATE re-check inside verifyAndWebhook, which holds regardless of
+	// how many goroutines/instances race past this map.
+	verifyInFlight sync.Map
 }
 
 func NewProjectsHandler(cfg config.Config, d *db.DB) *ProjectsHandler {
@@ -522,6 +531,16 @@ WHERE id = $1
 			return httpx.RespondError(c, fiber.StatusForbidden, "forbidden", "")
 		}
 
+		// Fast-path guard: if a verify is already running for this project,
+		// don't spawn a second goroutine for a rapid double-click/retry.
+		// This does not by itself prevent duplicate webhook creation (see
+		// the SELECT ... FOR UPDATE re-check in verifyAndWebhook for the
+		// actual correctness guarantee) — it just avoids the wasted work
+		// and GitHub API calls in the common case.
+		if _, alreadyRunning := h.verifyInFlight.LoadOrStore(projectID, struct{}{}); alreadyRunning {
+			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"queued": true, "already_in_progress": true})
+		}
+
 		_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE projects
 SET status = 'pending_verification', verification_error = NULL, updated_at = now()
@@ -536,6 +555,8 @@ WHERE id = $1
 }
 
 func (h *ProjectsHandler) verifyAndWebhook(ctx context.Context, projectID uuid.UUID, ownerUserID uuid.UUID, fullName string, existingWebhookID *int64) {
+	defer h.verifyInFlight.Delete(projectID)
+
 	// Keep this best-effort and resilient; failures should be recorded on the project.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -590,18 +611,51 @@ WHERE id = $1
 
 	webhookURL := strings.TrimRight(h.cfg.PublicBaseURL, "/") + "/webhooks/github"
 
-	wh, err := gh.CreateWebhook(ctx, linked.AccessToken, fullName, github.CreateWebhookRequest{
-		URL:    webhookURL,
-		Secret: h.cfg.GitHubWebhookSecret,
-		Events: []string{"issues", "pull_request", "pull_request_review", "push"},
-		Active: true,
-	})
-	if err != nil {
-		h.recordProjectError(ctx, projectID, fmt.Sprintf("webhook_create_failed: %v", err))
-		return
-	}
+	// existingWebhookID reflects whatever Verify() observed when it enqueued
+	// this goroutine, which can be stale if a second concurrent verify
+	// request for the same project raced this one (Issue #359) — both would
+	// otherwise see webhook_id = NULL and each create a separate GitHub
+	// webhook. Re-check under a row lock, and hold that lock across the
+	// CreateWebhook call and the subsequent write, so a second transaction
+	// racing this one blocks until this one commits and then sees its
+	// result instead of also creating a webhook.
+	txErr := db.WithTx(ctx, h.db.Pool, func(tx pgx.Tx) error {
+		var lockedWebhookID *int64
+		if err := tx.QueryRow(ctx, `
+SELECT webhook_id FROM projects WHERE id = $1 FOR UPDATE
+`, projectID).Scan(&lockedWebhookID); err != nil {
+			return fmt.Errorf("lock project row: %w", err)
+		}
 
-	_, _ = h.db.Pool.Exec(ctx, `
+		if lockedWebhookID != nil && *lockedWebhookID != 0 {
+			// Another concurrent verify already created (or is finishing)
+			// the webhook between our initial read and now — mark verified
+			// without creating a second one.
+			_, err := tx.Exec(ctx, `
+UPDATE projects
+SET github_repo_id = $2,
+    status = 'verified',
+    verified_at = now(),
+    verification_error = NULL,
+    stars_count = $3,
+    forks_count = $4,
+    updated_at = now()
+WHERE id = $1
+`, projectID, repo.ID, repo.StargazersCount, repo.ForksCount)
+			return err
+		}
+
+		wh, err := gh.CreateWebhook(ctx, linked.AccessToken, fullName, github.CreateWebhookRequest{
+			URL:    webhookURL,
+			Secret: h.cfg.GitHubWebhookSecret,
+			Events: []string{"issues", "pull_request", "pull_request_review", "push"},
+			Active: true,
+		})
+		if err != nil {
+			return fmt.Errorf("webhook_create_failed: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
 UPDATE projects
 SET github_repo_id = $2,
     status = 'verified',
@@ -615,6 +669,13 @@ SET github_repo_id = $2,
     updated_at = now()
 WHERE id = $1
 `, projectID, repo.ID, wh.ID, webhookURL, repo.StargazersCount, repo.ForksCount)
+		return err
+	})
+	if txErr != nil {
+		h.recordProjectError(ctx, projectID, txErr.Error())
+		return
+	}
+
 	// Invalidate cache since project is now verified and visible
 	if h.onProjectChanged != nil {
 		h.onProjectChanged(projectID.String())
