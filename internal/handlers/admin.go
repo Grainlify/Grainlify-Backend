@@ -76,6 +76,9 @@ LIMIT $1 OFFSET $2
 				"updated_at":     updatedAt,
 			})
 		}
+		if err := rows.Err(); err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "users_list_failed", "")
+		}
 
 		var total int
 		if err := h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
