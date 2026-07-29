@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -656,6 +657,18 @@ func decodeStateWithRedirect(encodedState string) (string, string, error) {
 	if err != nil {
 		// If decoding fails, treat entire state as CSRF token (backward compatible)
 		// This handles states that are not base64-encoded
+		return encodedState, "", nil
+	}
+
+	// A plain (non-base64) state can still consist entirely of URL-safe
+	// base64 alphabet characters (e.g. "attacker-issued-state-<uuid>" is
+	// all letters/digits/hyphens), so DecodeString above can "succeed"
+	// without the input ever having been base64 in the first place. The
+	// resulting bytes are then arbitrary binary data that may not be valid
+	// UTF-8 — using it as-is would corrupt the CSRF token (and break the
+	// Postgres text-column lookup below). Guard against that before trusting
+	// the decoded bytes at all.
+	if !utf8.ValidString(string(decoded)) {
 		return encodedState, "", nil
 	}
 
