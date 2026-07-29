@@ -393,17 +393,31 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 			ecosystemID = &defaultEcosystemID
 		}
 
-		// Only insert public repos; private repos are never added
+		// Only insert public repos; private repos are never added.
+		//
+		// The preceding SELECT (above) already found no existing row for
+		// this github_full_name, so ON CONFLICT here only fires in the rare
+		// window where a concurrent request inserted it first. The WHERE
+		// clause makes the DO UPDATE a no-op unless that concurrent insert
+		// happened to be owned by this same user — it must never silently
+		// reassign a project a different user's install just created.
 		err = h.db.Pool.QueryRow(ctx, `
 INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, status, github_app_installation_id, needs_metadata)
 VALUES ($1, $2, $3, $4, $5, 'pending_verification', $6, true)
 ON CONFLICT (github_full_name) DO UPDATE SET
-  owner_user_id = EXCLUDED.owner_user_id,
   github_app_installation_id = EXCLUDED.github_app_installation_id,
   deleted_at = NULL,
   updated_at = now()
+WHERE projects.owner_user_id = EXCLUDED.owner_user_id
 RETURNING id
 `, userID, repo.FullName, ecosystemID, repo.Language, tagsJSON, installationID).Scan(&projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("skipping repo already owned by a different user",
+				"repo", repo.FullName,
+				"installation_id", installationID,
+			)
+			continue
+		}
 		if err != nil {
 			slog.Error("failed to create project",
 				"error", err,
