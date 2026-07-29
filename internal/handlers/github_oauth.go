@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -21,6 +22,11 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
+
+// oauthCSRFCookieName is the HttpOnly cookie LoginStart sets to bind an
+// issued state to the browser that requested it. See LoginStart and
+// CallbackUnified for details.
+const oauthCSRFCookieName = "oauth_csrf"
 
 // isAllowedRedirectURI validates that a redirect URI is from an allowed origin.
 // This prevents open redirect vulnerabilities by only allowing:
@@ -167,15 +173,34 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 		csrfToken := randomState(32)
 		expiresAt := time.Now().UTC().Add(10 * time.Minute)
 
+		// Second, independent random value bound to this browser via an
+		// HttpOnly cookie (not the state/code, which travel through the
+		// URL and can be captured and replayed by an attacker from a
+		// different browser). CallbackUnified requires this cookie to
+		// match before accepting a github_login callback, closing the
+		// login-CSRF gap described in
+		// docs/security/oauth-csrf-protection.md's "Session fixation"
+		// out-of-scope note.
+		csrfCookie := randomState(32)
+
 		// Store CSRF token in database for validation (OAuth 2.0 security requirement)
 		_, err := h.db.Pool.Exec(c.Context(), `
-INSERT INTO oauth_states (state, user_id, kind, expires_at, redirect_uri)
-VALUES ($1, NULL, 'github_login', $2, $3)
-`, csrfToken, expiresAt, redirectURI)
+INSERT INTO oauth_states (state, user_id, kind, expires_at, redirect_uri, csrf_cookie)
+VALUES ($1, NULL, 'github_login', $2, $3, $4)
+`, csrfToken, expiresAt, redirectURI, csrfCookie)
 		if err != nil {
 			slog.Error("OAuth login start - failed to store state", "error", err)
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_create_failed", "")
 		}
+
+		c.Cookie(&fiber.Cookie{
+			Name:     oauthCSRFCookieName,
+			Value:    csrfCookie,
+			Expires:  expiresAt,
+			HTTPOnly: true,
+			Secure:   true,
+			SameSite: fiber.CookieSameSiteLaxMode,
+		})
 
 		// Encode redirect_uri in state parameter (OAuth 2.0 spec recommendation)
 		// Format: base64(csrf_token|redirect_uri)
@@ -241,12 +266,13 @@ func (h *GitHubOAuthHandler) CallbackUnified() fiber.Handler {
 		var storedKind string
 		var stateUserID *uuid.UUID
 		var storedRedirectURI *string
+		var storedCSRFCookie *string
 		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT kind, user_id, redirect_uri
+SELECT kind, user_id, redirect_uri, csrf_cookie
 FROM oauth_states
 WHERE state = $1
   AND expires_at > now()
-`, csrfToken).Scan(&storedKind, &stateUserID, &storedRedirectURI)
+`, csrfToken).Scan(&storedKind, &stateUserID, &storedRedirectURI, &storedCSRFCookie)
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.Warn("OAuth callback - state not found or expired",
 				"csrf_token", csrfToken,
@@ -261,6 +287,26 @@ WHERE state = $1
 				"encoded_state", encodedState,
 			)
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "state_lookup_failed", "")
+		}
+
+		// Require the browser completing this callback to be the same one
+		// LoginStart issued the state to (Issue #355). Without this, an
+		// attacker can complete their own GitHub consent, capture the
+		// resulting callback URL (a valid, unexpired, not-yet-used state +
+		// code), and hand it to a victim: every check above would pass
+		// because the state genuinely is valid — it just wasn't issued to
+		// this browser. github_link is unaffected: its state is already
+		// bound to an authenticated session's user_id at LinkStart time,
+		// and it doesn't set this cookie.
+		if storedKind == "github_login" {
+			presentedCookie := c.Cookies(oauthCSRFCookieName)
+			if presentedCookie == "" || storedCSRFCookie == nil ||
+				secureCompare(presentedCookie, *storedCSRFCookie) != 1 {
+				slog.Warn("OAuth callback - csrf cookie missing or mismatched",
+					"csrf_token", csrfToken,
+				)
+				return httpx.RespondError(c, fiber.StatusBadRequest, "oauth_csrf_cookie_mismatch", "")
+			}
 		}
 
 		// Use redirect_uri from state parameter (OAuth 2.0 spec), fallback to database if not in state
@@ -611,6 +657,18 @@ func decodeStateWithRedirect(encodedState string) (string, string, error) {
 	if err != nil {
 		// If decoding fails, treat entire state as CSRF token (backward compatible)
 		// This handles states that are not base64-encoded
+		return encodedState, "", nil
+	}
+
+	// A plain (non-base64) state can still consist entirely of URL-safe
+	// base64 alphabet characters (e.g. "attacker-issued-state-<uuid>" is
+	// all letters/digits/hyphens), so DecodeString above can "succeed"
+	// without the input ever having been base64 in the first place. The
+	// resulting bytes are then arbitrary binary data that may not be valid
+	// UTF-8 — using it as-is would corrupt the CSRF token (and break the
+	// Postgres text-column lookup below). Guard against that before trusting
+	// the decoded bytes at all.
+	if !utf8.ValidString(string(decoded)) {
 		return encodedState, "", nil
 	}
 
