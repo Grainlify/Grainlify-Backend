@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,10 +147,25 @@ func (w *Worker) Run(ctx context.Context) error {
 			if w.LivenessTracker != nil {
 				w.LivenessTracker.Tick()
 			}
-			if err := w.processOne(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				slog.Error("sync worker error", "error", err)
-			}
+			w.safeProcessOne(ctx)
 		}
+	}
+}
+
+// safeProcessOne wraps processOne with a deferred recover so that a panic
+// inside the sync pipeline (or any of its downstream calls) is logged and
+// does not crash the worker process. The ticker loop continues running.
+func (w *Worker) safeProcessOne(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("sync worker panic recovered",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	if err := w.processOne(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		slog.Error("sync worker error", "error", err)
 	}
 }
 
