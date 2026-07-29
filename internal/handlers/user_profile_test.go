@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -479,4 +480,127 @@ func TestProfile_RankPositionOrdering(t *testing.T) {
 	assert.Less(t, posMid, posLow, "mid contributor (3) should rank above low (1)")
 	assert.Equal(t, posTop+1, posMid, "mid should be exactly one position behind top")
 	assert.Equal(t, posMid+1, posLow, "low should be exactly one position behind mid")
+}
+
+// Regression tests for Issue #406: ContributionCalendar() and
+// ContributionActivity() used to declare a fresh, block-scoped `err` via
+// `:=` inside the user_id-param and own-profile branches (shadowing the
+// outer `err`), so a genuine github_accounts lookup failure was silently
+// discarded and rendered identically to "no linked GitHub account" — a
+// 200 with an empty calendar/activity list instead of a 500. These tests
+// use a mockDBPool (from projects_test.go, same package) that returns an
+// injected non-ErrNoRows error from QueryRow to prove the fix surfaces it.
+
+func newGithubLookupErrorPool(lookupErr error) *mockDBPool {
+	return &mockDBPool{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return mockRow{err: lookupErr}
+		},
+	}
+}
+
+func TestContributionCalendar_GithubLookupDBErrorReturns500_UserIDParam(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the github_accounts lookup must surface as a 500, not an empty-but-200 calendar")
+}
+
+func TestContributionCalendar_GithubLookupDBErrorReturns500_OwnProfile(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the own-profile github_accounts lookup must surface as a 500, not an empty-but-200 calendar")
+}
+
+func TestContributionCalendar_GithubAccountNotFoundStillReturnsEmptyCalendar(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(pgx.ErrNoRows)})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, fiber.StatusOK, resp.StatusCode,
+		"a genuinely absent github account (ErrNoRows) must still degrade gracefully, unchanged from before the fix")
+
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, float64(0), body["total"])
+}
+
+func TestContributionActivity_GithubLookupDBErrorReturns500_UserIDParam(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the github_accounts lookup must surface as a 500, not an empty-but-200 activity list")
+}
+
+func TestContributionActivity_GithubLookupDBErrorReturns500_OwnProfile(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the own-profile github_accounts lookup must surface as a 500, not an empty-but-200 activity list")
+}
+
+func TestContributionActivity_GithubAccountNotFoundStillReturnsEmptyActivity(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(pgx.ErrNoRows)})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, fiber.StatusOK, resp.StatusCode,
+		"a genuinely absent github account (ErrNoRows) must still degrade gracefully, unchanged from before the fix")
+
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, float64(0), body["total"])
 }
