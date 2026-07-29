@@ -93,18 +93,26 @@ WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
 
 		var projectID uuid.UUID
 		var status string
+		// The DO UPDATE only fires when the existing row's owner already
+		// matches the caller (idempotent re-submit). For a github_full_name
+		// already owned by someone else, the WHERE condition is false, so
+		// Postgres leaves that row completely untouched and RETURNING
+		// yields no row — surfaced below as a 409, not a silent takeover.
 		err = h.db.Pool.QueryRow(c.Context(), `
 INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, category, status)
 VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification')
 ON CONFLICT (github_full_name) DO UPDATE SET
-  owner_user_id = EXCLUDED.owner_user_id,
   ecosystem_id = EXCLUDED.ecosystem_id,
   language = EXCLUDED.language,
   tags = EXCLUDED.tags,
   category = EXCLUDED.category,
   updated_at = now()
+WHERE projects.owner_user_id = EXCLUDED.owner_user_id
 RETURNING id, status
 `, userID, fullName, ecosystemID, req.Language, tagsJSON, req.Category).Scan(&projectID, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.RespondError(c, fiber.StatusConflict, "project_already_registered", "This repository is already registered under a different account.")
+		}
 		if err != nil {
 			return httpx.RespondError(c, fiber.StatusInternalServerError, "project_create_failed", "")
 		}

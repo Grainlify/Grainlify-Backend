@@ -480,6 +480,13 @@ func TestSyncInstallationRepositories_ExistingPublicRepo_UpdatedNotDuplicated(t 
 	fullName := "acme/existing-public-repo-" + suffix
 	projectID := seedGitHubAppProject(t, pool, fullName)
 
+	var originalOwnerID string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT owner_user_id FROM projects WHERE id = $1`, projectID,
+	).Scan(&originalOwnerID); err != nil {
+		t.Fatalf("select original owner: %v", err)
+	}
+
 	// Simulate a previously-deleted/unverified project to prove the sync
 	// restores and (re-)verifies it rather than skipping or duplicating.
 	if _, err := pool.Exec(context.Background(),
@@ -493,6 +500,9 @@ func TestSyncInstallationRepositories_ExistingPublicRepo_UpdatedNotDuplicated(t 
 	})
 
 	h := newTestGitHubAppHandler(pool, testAppConfig(t))
+	// Issue #317: the installing user here is deliberately a different,
+	// never-related user than originalOwnerID — this must not reassign
+	// ownership even though it does (re-)verify the project.
 	h.syncInstallationRepositories(context.Background(), uuid.New(), "999")
 
 	var count int
@@ -505,11 +515,11 @@ func TestSyncInstallationRepositories_ExistingPublicRepo_UpdatedNotDuplicated(t 
 		t.Fatalf("project count for %q = %d, want exactly 1 (updated in place, not duplicated)", fullName, count)
 	}
 
-	var status string
+	var status, ownerAfter string
 	var deletedAt *time.Time
 	if err := pool.QueryRow(context.Background(),
-		`SELECT status, deleted_at FROM projects WHERE id = $1`, projectID,
-	).Scan(&status, &deletedAt); err != nil {
+		`SELECT status, deleted_at, owner_user_id FROM projects WHERE id = $1`, projectID,
+	).Scan(&status, &deletedAt, &ownerAfter); err != nil {
 		t.Fatalf("select project: %v", err)
 	}
 	if status != "verified" {
@@ -517,6 +527,9 @@ func TestSyncInstallationRepositories_ExistingPublicRepo_UpdatedNotDuplicated(t 
 	}
 	if deletedAt != nil {
 		t.Error("expected deleted_at to be cleared on re-verification")
+	}
+	if ownerAfter != originalOwnerID {
+		t.Errorf("owner_user_id = %q, want unchanged %q — a different installing user must never take over an existing project", ownerAfter, originalOwnerID)
 	}
 
 	var syncJobCount int
@@ -540,4 +553,60 @@ func seedOwnerUser(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, id) })
 	return id
+}
+
+// TestSyncInstallationRepositories_ConflictInsertGuardsAgainstDifferentOwner
+// exercises the exact ON CONFLICT query used in syncInstallationRepositories'
+// insert path directly at the SQL level (Issue #317). The preceding SELECT in
+// syncInstallationRepositories already handles the common "project already
+// exists" case without touching owner_user_id (see the test above); this one
+// only fires in the narrow window where a row is inserted concurrently
+// between that SELECT and this INSERT. Exercising the query directly here is
+// deterministic, unlike trying to force an actual goroutine race through the
+// full HTTP-mocked flow.
+func TestSyncInstallationRepositories_ConflictInsertGuardsAgainstDifferentOwner(t *testing.T) {
+	pool := openGitHubAppTestPool(t)
+	owner := seedOwnerUser(t, pool)
+	installer := seedOwnerUser(t, pool)
+	fullName := "acme/conflict-insert-" + uuid.NewString()
+
+	var projectID string
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO projects (owner_user_id, github_full_name, status, needs_metadata) VALUES ($1, $2, 'verified', false) RETURNING id`,
+		owner, fullName,
+	).Scan(&projectID); err != nil {
+		t.Fatalf("seed existing project: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM projects WHERE id = $1`, projectID) })
+
+	// Same INSERT ... ON CONFLICT ... WHERE query as syncInstallationRepositories,
+	// run as `installer` (not `owner`) against the row seeded above.
+	var scannedID string
+	err := pool.QueryRow(context.Background(), `
+INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, status, github_app_installation_id, needs_metadata)
+VALUES ($1, $2, $3, $4, $5, 'pending_verification', $6, true)
+ON CONFLICT (github_full_name) DO UPDATE SET
+  github_app_installation_id = EXCLUDED.github_app_installation_id,
+  deleted_at = NULL,
+  updated_at = now()
+WHERE projects.owner_user_id = EXCLUDED.owner_user_id
+RETURNING id
+`, installer, fullName, nil, nil, []byte("[]"), "999").Scan(&scannedID)
+
+	if err == nil {
+		t.Fatal("expected pgx.ErrNoRows (no update applied) when the conflicting row is owned by a different user, got a row back instead")
+	}
+
+	var ownerAfter, installationIDAfter string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT owner_user_id, COALESCE(github_app_installation_id, '') FROM projects WHERE id = $1`, projectID,
+	).Scan(&ownerAfter, &installationIDAfter); err != nil {
+		t.Fatalf("select project: %v", err)
+	}
+	if ownerAfter != owner.String() {
+		t.Errorf("owner_user_id = %q, want unchanged %q", ownerAfter, owner)
+	}
+	if installationIDAfter != "" {
+		t.Errorf("github_app_installation_id = %q, want untouched (empty) — the conflicting row must be left completely alone", installationIDAfter)
+	}
 }
