@@ -270,6 +270,7 @@ type mockSyncPool struct {
 	ownerUserID       uuid.UUID
 	idempotencyCheck  func(key string) (int, string, error)
 	insertIdempotency func(key string) (int64, error)
+	slidingWindowCheck func(userID uuid.UUID, likePattern string) (string, error)
 	syncJobsInserted  int
 	mu                sync.Mutex
 }
@@ -317,6 +318,29 @@ func (p *mockSyncPool) QueryRow(ctx context.Context, sql string, args ...any) pg
 			},
 		}
 	}
+	if strings.Contains(sql, "LIKE") && strings.Contains(sql, "interval") {
+		// Sliding-window dedup query
+		userID := args[0].(uuid.UUID)
+		likePattern := args[1].(string)
+		if p.slidingWindowCheck != nil {
+			key, err := p.slidingWindowCheck(userID, likePattern)
+			if err != nil {
+				return mockSyncRow{scanFunc: func(dest ...any) error { return err }}
+			}
+			return mockSyncRow{
+				scanFunc: func(dest ...any) error {
+					if len(dest) > 0 {
+						if ptr, ok := dest[0].(*string); ok {
+							*ptr = key
+							return nil
+						}
+					}
+					return fmt.Errorf("invalid destination type")
+				},
+			}
+		}
+		return mockSyncRow{} // no match (ErrNoRows)
+	}
 	if strings.Contains(sql, "FROM idempotency_keys") {
 		key := args[1].(string)
 		status, body, err := p.idempotencyCheck(key)
@@ -347,6 +371,90 @@ func (p *mockSyncPool) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pg
 func (p *mockSyncPool) Ping(ctx context.Context) error { return nil }
 func (p *mockSyncPool) Close()                     {}
 func (p *mockSyncPool) Config() *pgxpool.Config    { return nil }
+
+// mockSyncPoolError returns a DB error on all QueryRow calls.
+type mockSyncPoolError struct{}
+
+func (p *mockSyncPoolError) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (p *mockSyncPoolError) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, nil
+}
+func (p *mockSyncPoolError) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return mockSyncRow{scanFunc: func(dest ...any) error { return fmt.Errorf("db error") }}
+}
+func (p *mockSyncPoolError) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+func (p *mockSyncPoolError) Ping(ctx context.Context) error { return nil }
+func (p *mockSyncPoolError) Close()                         {}
+func (p *mockSyncPoolError) Config() *pgxpool.Config        { return nil }
+
+// mockSyncPoolExecFail delegates to an inner pool but fails Exec on SQL containing failSQL.
+type mockSyncPoolExecFail struct {
+	delegate *mockSyncPool
+	failSQL  string
+}
+
+func (p *mockSyncPoolExecFail) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(sql, p.failSQL) {
+		return pgconn.CommandTag{}, fmt.Errorf("simulated exec failure")
+	}
+	p.delegate.mu.Lock()
+	defer p.delegate.mu.Unlock()
+
+	if strings.Contains(sql, "INSERT INTO idempotency_keys") {
+		key := arguments[1].(string)
+		rows, err := p.delegate.insertIdempotency(key)
+		if err != nil {
+			return pgconn.CommandTag{}, err
+		}
+		return pgconn.NewCommandTag(fmt.Sprintf("INSERT %d", rows)), nil
+	}
+	if strings.Contains(sql, "INSERT INTO sync_jobs") {
+		p.delegate.syncJobsInserted += 2
+		return pgconn.NewCommandTag("INSERT 2"), nil
+	}
+	if strings.Contains(sql, "DELETE FROM idempotency_keys") {
+		return pgconn.NewCommandTag("DELETE 1"), nil
+	}
+	return pgconn.CommandTag{}, nil
+}
+func (p *mockSyncPoolExecFail) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return p.delegate.Query(ctx, sql, args...)
+}
+func (p *mockSyncPoolExecFail) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return p.delegate.QueryRow(ctx, sql, args...)
+}
+func (p *mockSyncPoolExecFail) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+func (p *mockSyncPoolExecFail) Ping(ctx context.Context) error { return nil }
+func (p *mockSyncPoolExecFail) Close()                         {}
+func (p *mockSyncPoolExecFail) Config() *pgxpool.Config        { return nil }
+
+// mockSyncPoolNotFound returns pgx.ErrNoRows for project lookups.
+type mockSyncPoolNotFound struct{}
+
+func (p *mockSyncPoolNotFound) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (p *mockSyncPoolNotFound) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, nil
+}
+func (p *mockSyncPoolNotFound) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "SELECT owner_user_id FROM projects") {
+		return mockSyncRow{scanFunc: func(dest ...any) error { return pgx.ErrNoRows }}
+	}
+	return mockSyncRow{}
+}
+func (p *mockSyncPoolNotFound) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error) {
+	return nil, nil
+}
+func (p *mockSyncPoolNotFound) Ping(ctx context.Context) error { return nil }
+func (p *mockSyncPoolNotFound) Close()                         {}
+func (p *mockSyncPoolNotFound) Config() *pgxpool.Config        { return nil }
 
 func TestSyncIdempotency_Mock(t *testing.T) {
 	userID := uuid.New()
@@ -413,8 +521,6 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 	})
 
 	t.Run("concurrent requests - only one inserts sync jobs", func(t *testing.T) {
-		// We simulate the race condition using mockSyncPool state.
-		// One request will win the insert (rows affected = 1) and the other will conflict (rows affected = 0).
 		var keysSeen []string
 		var mu sync.Mutex
 
@@ -477,7 +583,7 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 	})
 
 	t.Run("natural key deduplication inside window", func(t *testing.T) {
-		var keysSeen []string
+		var keysInserted []string
 		var mu sync.Mutex
 
 		pool := &mockSyncPool{
@@ -485,7 +591,7 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 			idempotencyCheck: func(key string) (int, string, error) {
 				mu.Lock()
 				defer mu.Unlock()
-				for _, k := range keysSeen {
+				for _, k := range keysInserted {
 					if k == key {
 						return fiber.StatusAccepted, `{"queued":true}`, nil
 					}
@@ -495,13 +601,18 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 			insertIdempotency: func(key string) (int64, error) {
 				mu.Lock()
 				defer mu.Unlock()
-				for _, k := range keysSeen {
-					if k == key {
-						return 0, nil
+				keysInserted = append(keysInserted, key)
+				return 1, nil
+			},
+			slidingWindowCheck: func(uid uuid.UUID, likePattern string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, k := range keysInserted {
+					if strings.HasPrefix(k, strings.TrimSuffix(likePattern, "%")) {
+						return k, nil
 					}
 				}
-				keysSeen = append(keysSeen, key)
-				return 1, nil
+				return "", pgx.ErrNoRows
 			},
 		}
 
@@ -518,7 +629,7 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 
 		assert.Equal(t, 2, pool.syncJobsInserted)
 
-		// Request 2 (within window): should check cache or conflict and NOT insert again
+		// Request 2 (within sliding window): sliding window check returns cached key
 		req2 := httptest.NewRequest("POST", url, nil)
 		req2.Header.Set("Authorization", "Bearer "+token)
 		resp2, err := app.Test(req2)
@@ -526,6 +637,379 @@ func TestSyncIdempotency_Mock(t *testing.T) {
 		assert.Equal(t, fiber.StatusAccepted, resp2.StatusCode)
 		resp2.Body.Close()
 
+		assert.Equal(t, 2, pool.syncJobsInserted)
+	})
+
+	t.Run("natural key deduplication across time bucket boundary", func(t *testing.T) {
+		var keysInserted []string
+		var mu sync.Mutex
+
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, k := range keysInserted {
+					if k == key {
+						return fiber.StatusAccepted, `{"queued":true}`, nil
+					}
+				}
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, k := range keysInserted {
+					if k == key {
+						return 0, nil // conflict – deduped
+					}
+				}
+				keysInserted = append(keysInserted, key)
+				return 1, nil
+			},
+			slidingWindowCheck: func(uid uuid.UUID, likePattern string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, k := range keysInserted {
+					if strings.HasPrefix(k, strings.TrimSuffix(likePattern, "%")) {
+						return k, nil
+					}
+				}
+				return "", pgx.ErrNoRows
+			},
+		}
+
+		app := setupMockApp(pool)
+		url := "/projects/" + projectID.String() + "/sync"
+
+		// Request 1: no prior key → inserts
+		req1 := httptest.NewRequest("POST", url, nil)
+		req1.Header.Set("Authorization", "Bearer "+token)
+		resp1, err := app.Test(req1)
+		require.NoError(t, err)
+		assert.Equal(t, fiber.StatusAccepted, resp1.StatusCode)
+		resp1.Body.Close()
+		assert.Equal(t, 2, pool.syncJobsInserted)
+
+		// Request 2: key was inserted <5 min ago → sliding window dedup
+		req2 := httptest.NewRequest("POST", url, nil)
+		req2.Header.Set("Authorization", "Bearer "+token)
+		resp2, err := app.Test(req2)
+		require.NoError(t, err)
+		assert.Equal(t, fiber.StatusAccepted, resp2.StatusCode)
+		resp2.Body.Close()
+
+		// No additional sync_jobs should have been inserted
+		assert.Equal(t, 2, pool.syncJobsInserted)
+	})
+
+	t.Run("natural key allowed after sliding window expires", func(t *testing.T) {
+		var keysInserted []string
+		var mu sync.Mutex
+
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				keysInserted = append(keysInserted, key)
+				return 1, nil
+			},
+			slidingWindowCheck: func(uid uuid.UUID, likePattern string) (string, error) {
+				return "", pgx.ErrNoRows
+			},
+		}
+
+		app := setupMockApp(pool)
+		url := "/projects/" + projectID.String() + "/sync"
+
+		// Request 1
+		req1 := httptest.NewRequest("POST", url, nil)
+		req1.Header.Set("Authorization", "Bearer "+token)
+		resp1, err := app.Test(req1)
+		require.NoError(t, err)
+		assert.Equal(t, fiber.StatusAccepted, resp1.StatusCode)
+		resp1.Body.Close()
+		assert.Equal(t, 2, pool.syncJobsInserted)
+
+		// Request 2: window expired → new sync jobs enqueued
+		req2 := httptest.NewRequest("POST", url, nil)
+		req2.Header.Set("Authorization", "Bearer "+token)
+		resp2, err := app.Test(req2)
+		require.NoError(t, err)
+		assert.Equal(t, fiber.StatusAccepted, resp2.StatusCode)
+		resp2.Body.Close()
+		assert.Equal(t, 4, pool.syncJobsInserted) // 2 + 2
+	})
+
+	t.Run("db not configured returns 503", func(t *testing.T) {
+		app := fiber.New(fiber.Config{DisableStartupMessage: true})
+		h := handlers.NewSyncHandler(&db.DB{})
+		app.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h.EnqueueFullSync())
+
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusServiceUnavailable, resp.StatusCode)
+		var body map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		require.NoError(t, err)
+		assert.Equal(t, "db_not_configured", body["error"])
+	})
+
+	t.Run("idempotency key too long returns 400", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID:       userID,
+			idempotencyCheck:  func(key string) (int, string, error) { return 0, "", pgx.ErrNoRows },
+			insertIdempotency: func(key string) (int64, error) { return 1, nil },
+		}
+		app := setupMockApp(pool)
+
+		longKey := strings.Repeat("a", 256)
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Idempotency-Key", longKey)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode)
+		var body map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		require.NoError(t, err)
+		assert.Equal(t, "idempotency_key_too_long", body["error"])
+	})
+
+	t.Run("invalid project id returns 400", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID:       userID,
+			idempotencyCheck:  func(key string) (int, string, error) { return 0, "", pgx.ErrNoRows },
+			insertIdempotency: func(key string) (int64, error) { return 1, nil },
+		}
+		app := setupMockApp(pool)
+
+		req := httptest.NewRequest("POST", "/projects/not-a-uuid/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode)
+		var body map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		require.NoError(t, err)
+		assert.Equal(t, "invalid_project_id", body["error"])
+	})
+
+	t.Run("project not found returns 404", func(t *testing.T) {
+		missingProjectID := uuid.New()
+		pool := &mockSyncPoolNotFound{}
+		app := fiber.New(fiber.Config{DisableStartupMessage: true})
+		h := handlers.NewSyncHandler(&db.DB{Pool: pool})
+		app.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h.EnqueueFullSync())
+
+		req := httptest.NewRequest("POST", "/projects/"+missingProjectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusNotFound, resp.StatusCode)
+		var body map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		require.NoError(t, err)
+		assert.Equal(t, "project_not_found", body["error"])
+	})
+
+	t.Run("forbidden for non-owner non-admin", func(t *testing.T) {
+		otherUser := uuid.New()
+		otherToken, err := auth.IssueJWT(jwtSecret, otherUser, "contributor", "evm", "0x456", time.Hour)
+		require.NoError(t, err)
+
+		pool := &mockSyncPool{
+			ownerUserID:       userID, // owner is different from otherUser
+			idempotencyCheck:  func(key string) (int, string, error) { return 0, "", pgx.ErrNoRows },
+			insertIdempotency: func(key string) (int64, error) { return 1, nil },
+		}
+		app := setupMockApp(pool)
+
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+otherToken)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusForbidden, resp.StatusCode)
+		var body map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		require.NoError(t, err)
+		assert.Equal(t, "forbidden", body["error"])
+	})
+
+	t.Run("project lookup failure returns 500", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 1, nil
+			},
+		}
+		// Override QueryRow to simulate a DB error on project lookup
+		app := fiber.New(fiber.Config{DisableStartupMessage: true})
+		h := handlers.NewSyncHandler(&db.DB{Pool: pool})
+		app.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h.EnqueueFullSync())
+
+		// Use a valid project ID but make the pool return an error for project lookup
+		// We test this by using a pool where QueryRow returns an error for project lookups
+		errPool := &mockSyncPoolError{}
+		h2 := handlers.NewSyncHandler(&db.DB{Pool: errPool})
+		app2 := fiber.New(fiber.Config{DisableStartupMessage: true})
+		app2.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h2.EnqueueFullSync())
+
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app2.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
+	})
+
+	t.Run("sync jobs insert failure returns 500 and deletes key", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 1, nil
+			},
+		}
+		// Override Exec to fail on sync_jobs insert
+		errPool := &mockSyncPoolExecFail{
+			delegate: pool,
+			failSQL:  "INSERT INTO sync_jobs",
+		}
+		app := fiber.New(fiber.Config{DisableStartupMessage: true})
+		h := handlers.NewSyncHandler(&db.DB{Pool: errPool})
+		app.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h.EnqueueFullSync())
+
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
+	})
+
+	t.Run("idempotency insert failure falls through to direct sync_jobs insert", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 0, fmt.Errorf("insert failed")
+			},
+		}
+		errPool := &mockSyncPoolExecFail{
+			delegate: pool,
+			failSQL:  "INSERT INTO idempotency_keys",
+		}
+		app := fiber.New(fiber.Config{DisableStartupMessage: true})
+		h := handlers.NewSyncHandler(&db.DB{Pool: errPool})
+		app.Post("/projects/:id/sync", auth.RequireAuth(jwtSecret), h.EnqueueFullSync())
+
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusAccepted, resp.StatusCode)
+	})
+
+	t.Run("sliding window dedup query failure falls through", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return 0, "", pgx.ErrNoRows
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 1, nil
+			},
+			slidingWindowCheck: func(uid uuid.UUID, likePattern string) (string, error) {
+				return "", fmt.Errorf("db error")
+			},
+		}
+
+		app := setupMockApp(pool)
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		// Should fall through and succeed despite sliding window error
+		assert.Equal(t, fiber.StatusAccepted, resp.StatusCode)
+		assert.Equal(t, 2, pool.syncJobsInserted)
+	})
+
+	t.Run("cached response with invalid JSON falls through to insert", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return fiber.StatusAccepted, `not-valid-json`, nil
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 1, nil
+			},
+		}
+
+		app := setupMockApp(pool)
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Idempotency-Key", "test-key-invalid-cache")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		// Invalid JSON in cache falls through; the insert will succeed as a new key
+		assert.Equal(t, fiber.StatusAccepted, resp.StatusCode)
+		assert.Equal(t, 2, pool.syncJobsInserted)
+	})
+
+	t.Run("idempotency key lookup failure falls through", func(t *testing.T) {
+		pool := &mockSyncPool{
+			ownerUserID: userID,
+			idempotencyCheck: func(key string) (int, string, error) {
+				return 0, "", fmt.Errorf("db error")
+			},
+			insertIdempotency: func(key string) (int64, error) {
+				return 1, nil
+			},
+		}
+
+		app := setupMockApp(pool)
+		req := httptest.NewRequest("POST", "/projects/"+projectID.String()+"/sync", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Idempotency-Key", "test-key-lookup-error")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, fiber.StatusAccepted, resp.StatusCode)
 		assert.Equal(t, 2, pool.syncJobsInserted)
 	})
 }
