@@ -480,3 +480,46 @@ func TestProfile_RankPositionOrdering(t *testing.T) {
 	assert.Equal(t, posTop+1, posMid, "mid should be exactly one position behind top")
 	assert.Equal(t, posMid+1, posLow, "low should be exactly one position behind mid")
 }
+
+// TestProfile_NoContributionsReturnsUnrankedTier locks in issue #349: a user
+// with zero verified-project contributions has no row in the rankPosition
+// query's ranked_users CTE, so rankPosition comes back nil. Profile()'s
+// fallback branch must report "unranked" (matching PublicProfile()'s
+// handling of the identical case), not "bronze".
+func TestProfile_NoContributionsReturnsUnrankedTier(t *testing.T) {
+	pool := openTestPool(t)
+
+	unranked := rankFixtureUser{
+		userID:     uuid.New(),
+		login:      "rank-fixture-none-" + uuid.New().String()[:8],
+		issueCount: 0,
+		prCount:    0,
+	}
+	seedRankFixture(t, pool, []rankFixtureUser{unranked})
+
+	cfg := config.Config{JWTSecret: "test-jwt-secret-for-unranked-profile-fixture"}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: pool})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), h.Profile())
+
+	token, err := auth.IssueJWT(cfg.JWTSecret, unranked.userID, "contributor", "evm", "0x123", time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Rank struct {
+			Position *int   `json:"position"`
+			Tier     string `json:"tier"`
+		} `json:"rank"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+	assert.Nil(t, body.Rank.Position, "user with no contributions should have a nil rank position")
+	assert.Equal(t, "unranked", body.Rank.Tier, "user with no contributions should be reported as unranked, not bronze")
+}
