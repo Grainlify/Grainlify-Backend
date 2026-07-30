@@ -16,14 +16,14 @@ import (
 
 type Config struct {
 	// Env is the deployment environment (APP_ENV, default "dev").
-	Env      string
+	Env string
 	// HTTPAddr is the HTTP listen address (HTTP_ADDR, or :PORT if HTTP_ADDR is empty, default ":8080").
 	HTTPAddr string
 	// Log is the log level (LOG_LEVEL, default "info").
-	Log      string
+	Log string
 
 	// DBURL is the PostgreSQL connection string (DB_URL, required in non-dev environments).
-	DBURL       string
+	DBURL string
 	// AutoMigrate enables automatic database migration at startup (AUTO_MIGRATE, default false).
 	AutoMigrate bool
 
@@ -63,23 +63,23 @@ type Config struct {
 	JetStreamMaxAge time.Duration
 
 	// GitHubOAuthClientID is the GitHub OAuth app client ID (GITHUB_OAUTH_CLIENT_ID, optional).
-	GitHubOAuthClientID           string
+	GitHubOAuthClientID string
 	// GitHubOAuthClientSecret is the GitHub OAuth app client secret (GITHUB_OAUTH_CLIENT_SECRET, optional).
-	GitHubOAuthClientSecret       string
+	GitHubOAuthClientSecret string
 	// GitHubOAuthRedirectURL is the full OAuth callback URL (GITHUB_OAUTH_REDIRECT_URL, optional).
-	GitHubOAuthRedirectURL        string // Full callback URL (e.g., http://localhost:8080/auth/github/login/callback)
+	GitHubOAuthRedirectURL string // Full callback URL (e.g., http://localhost:8080/auth/github/login/callback)
 	// GitHubOAuthSuccessRedirectURL is the URL to redirect to after successful OAuth (GITHUB_OAUTH_SUCCESS_REDIRECT_URL, optional).
 	GitHubOAuthSuccessRedirectURL string
 	// GitHubLoginRedirectURL is the alternative callback URL (GITHUB_LOGIN_REDIRECT_URL, deprecated, use GitHubOAuthRedirectURL, optional).
-	GitHubLoginRedirectURL        string // Alternative callback URL (deprecated, use GitHubOAuthRedirectURL)
+	GitHubLoginRedirectURL string // Alternative callback URL (deprecated, use GitHubOAuthRedirectURL)
 	// GitHubLoginSuccessRedirectURL is the URL to redirect to after successful login (GITHUB_LOGIN_SUCCESS_REDIRECT_URL, optional).
 	GitHubLoginSuccessRedirectURL string
 
 	// GitHub App configuration (for organization installations)
 	// GitHubAppID is the GitHub App ID (GITHUB_APP_ID, numeric, optional).
-	GitHubAppID         string // GitHub App ID (numeric)
+	GitHubAppID string // GitHub App ID (numeric)
 	// GitHubAppSlug is the GitHub App slug (GITHUB_APP_SLUG, e.g., "grainlify", optional).
-	GitHubAppSlug       string // GitHub App slug (e.g., "grainlify")
+	GitHubAppSlug string // GitHub App slug (e.g., "grainlify")
 	// GitHubAppPrivateKey is the GitHub App private key (GITHUB_APP_PRIVATE_KEY, PEM format, base64 encoded, optional).
 	GitHubAppPrivateKey string // GitHub App private key (PEM format, base64 encoded)
 
@@ -109,27 +109,27 @@ type Config struct {
 
 	// Didit KYC verification
 	// DiditAPIKey is the Didit API key (DIDIT_API_KEY, optional).
-	DiditAPIKey        string
+	DiditAPIKey string
 	// DiditWorkflowID is the Didit workflow ID (DIDIT_WORKFLOW_ID, optional).
-	DiditWorkflowID    string
+	DiditWorkflowID string
 	// DiditWebhookSecret is the Didit webhook secret (DIDIT_WEBHOOK_SECRET, optional).
 	DiditWebhookSecret string
 
 	// Soroban configuration
 	// SorobanRPCURL is the Soroban RPC URL (SOROBAN_RPC_URL, optional as a group with other Soroban fields).
-	SorobanRPCURL            string
+	SorobanRPCURL string
 	// SorobanNetworkPassphrase is the Soroban network passphrase (SOROBAN_NETWORK_PASSPHRASE, optional).
 	SorobanNetworkPassphrase string
 	// SorobanNetwork is "testnet" or "mainnet" (SOROBAN_NETWORK, default "testnet").
-	SorobanNetwork           string // "testnet" or "mainnet"
+	SorobanNetwork string // "testnet" or "mainnet"
 	// SorobanSourceSecret is the Soroban source secret (SOROBAN_SOURCE_SECRET, optional as a group).
-	SorobanSourceSecret      string
+	SorobanSourceSecret string
 	// EscrowContractID is the escrow contract ID (ESCROW_CONTRACT_ID, optional as a group).
-	EscrowContractID         string
+	EscrowContractID string
 	// ProgramEscrowContractID is the program escrow contract ID (PROGRAM_ESCROW_CONTRACT_ID, optional as a group).
-	ProgramEscrowContractID  string
+	ProgramEscrowContractID string
 	// TokenContractID is the token contract ID (TOKEN_CONTRACT_ID, optional as a group).
-	TokenContractID          string
+	TokenContractID string
 
 	// SyncJobsMaxAttempts is the maximum number of attempts before a sync job is dead-lettered (SYNC_JOBS_MAX_ATTEMPTS, default 5).
 	SyncJobsMaxAttempts int
@@ -239,6 +239,8 @@ func Load() Config {
 	addErr(errMsg)
 	rateLimitPublicPerMin, errMsg := getEnvIntValidated("RATE_LIMIT_PUBLIC_PER_MIN", 300, true)
 	addErr(errMsg)
+	repoMetadataCacheTTL, errMsg := getEnvDurationAllowZeroValidated("GITHUB_REPO_CACHE_TTL", 60*time.Second)
+	addErr(errMsg)
 
 	return Config{
 		Env:      env,
@@ -310,13 +312,13 @@ func Load() Config {
 		WorkerLivenessAddr:           getEnv("WORKER_LIVENESS_ADDR", ":9091"),
 		WorkerLivenessStaleThreshold: workerLivenessStaleThreshold,
 
-		MaxBodyBytes:          maxBodyBytes,
-		WebhookMaxBodyBytes:   webhookMaxBodyBytes,
-		RateLimitAuthPerMin:   rateLimitAuthPerMin,
-		RateLimitPublicPerMin: rateLimitPublicPerMin,
-		TrustedProxies:        parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
-		MetricsToken:          strings.TrimSpace(getEnv("METRICS_TOKEN", "")),
-		GitHubRepoMetadataCacheTTL: getEnvDuration("GITHUB_REPO_CACHE_TTL", 60*time.Second),
+		MaxBodyBytes:               maxBodyBytes,
+		WebhookMaxBodyBytes:        webhookMaxBodyBytes,
+		RateLimitAuthPerMin:        rateLimitAuthPerMin,
+		RateLimitPublicPerMin:      rateLimitPublicPerMin,
+		TrustedProxies:             parseTrustedProxies(getEnv("TRUSTED_PROXIES", "127.0.0.1,::1")),
+		MetricsToken:               strings.TrimSpace(getEnv("METRICS_TOKEN", "")),
+		GitHubRepoMetadataCacheTTL: repoMetadataCacheTTL,
 
 		configErrs: configErrs,
 	}
@@ -404,20 +406,22 @@ func (c Config) Validate() error {
 		}
 
 		// --- Soroban group: all-or-nothing ---
-		sorobanFields := map[string]string{
-			"SOROBAN_RPC_URL":            c.SorobanRPCURL,
-			"SOROBAN_SOURCE_SECRET":      c.SorobanSourceSecret,
-			"ESCROW_CONTRACT_ID":         c.EscrowContractID,
-			"PROGRAM_ESCROW_CONTRACT_ID": c.ProgramEscrowContractID,
-			"TOKEN_CONTRACT_ID":          c.TokenContractID,
+		// Ordered slice (not a map) so "missing" below is built in a
+		// fixed, deterministic order instead of random map iteration order.
+		sorobanFields := []struct{ Key, Val string }{
+			{"SOROBAN_RPC_URL", c.SorobanRPCURL},
+			{"SOROBAN_SOURCE_SECRET", c.SorobanSourceSecret},
+			{"ESCROW_CONTRACT_ID", c.EscrowContractID},
+			{"PROGRAM_ESCROW_CONTRACT_ID", c.ProgramEscrowContractID},
+			{"TOKEN_CONTRACT_ID", c.TokenContractID},
 		}
 		anySet := false
 		var missing []string
-		for key, val := range sorobanFields {
-			if strings.TrimSpace(val) != "" {
+		for _, field := range sorobanFields {
+			if strings.TrimSpace(field.Val) != "" {
 				anySet = true
 			} else {
-				missing = append(missing, key)
+				missing = append(missing, field.Key)
 			}
 		}
 		if anySet && len(missing) > 0 {
@@ -483,6 +487,24 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// getEnvDurationAllowZeroValidated parses a duration where zero is a documented
+// disable sentinel. Negative or malformed values still fall back and surface a
+// validation error, matching the other validated configuration helpers.
+func getEnvDurationAllowZeroValidated(key string, fallback time.Duration) (time.Duration, string) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback, fmt.Sprintf("%s %q is not a valid duration: %v", key, raw, err)
+	}
+	if d < 0 {
+		return fallback, fmt.Sprintf("%s must be zero or greater, got %q", key, raw)
+	}
+	return d, ""
 }
 
 // getEnvDurationValidated parses key as a duration. An unset/empty value

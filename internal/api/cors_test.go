@@ -9,18 +9,18 @@ import (
 
 func prodConfig() config.Config {
 	return config.Config{
-		Env:             "production",
-		CORSOrigins:     "https://grainlify.0xo.in,https://api.grainlify.0xo.in",
-		FrontendBaseURL: "https://grainlify.0xo.in",
+		Env:              "production",
+		CORSOrigins:      "https://grainlify.0xo.in,https://api.grainlify.0xo.in",
+		FrontendBaseURL:  "https://grainlify.0xo.in",
 		CORSAllowPreview: false,
 	}
 }
 
 func devConfig() config.Config {
 	return config.Config{
-		Env:             "dev",
-		CORSOrigins:     "http://localhost:5173",
-		FrontendBaseURL: "http://localhost:5173",
+		Env:              "dev",
+		CORSOrigins:      "http://localhost:5173",
+		FrontendBaseURL:  "http://localhost:5173",
 		CORSAllowPreview: false,
 	}
 }
@@ -125,6 +125,11 @@ func TestBuildCORSOriginPolicy_ParsesCommaSeparatedOrigins(t *testing.T) {
 func TestIsLocalhostOrigin(t *testing.T) {
 	assert.True(t, isLocalhostOrigin("http://localhost:5173"))
 	assert.True(t, isLocalhostOrigin("https://127.0.0.1:8080"))
+	assert.True(t, isLocalhostOrigin("http://localhost"))
+	assert.True(t, isLocalhostOrigin("https://localhost"))
+	assert.True(t, isLocalhostOrigin("http://127.0.0.1"))
+	assert.True(t, isLocalhostOrigin("https://127.0.0.1"))
 	assert.False(t, isLocalhostOrigin("https://localhost.evil.com:5173"))
+	assert.False(t, isLocalhostOrigin("http://localhost.evil.com"))
 	assert.False(t, isLocalhostOrigin("https://example.com"))
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,7 +27,7 @@ import (
 func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 	// Test that negative offsets return HTTP 400 (this was missing before the fix)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	// Create a minimal handler that just tests pagination parsing
 	// We can't easily test the full handler without database setup
 	app.Get("/test", func(c *fiber.Ctx) error {
@@ -36,7 +37,7 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 			// ParsePagination already wrote the response
 			return nil
 		}
-		
+
 		// Should not reach here with negative offset
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
@@ -50,7 +51,7 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 400, resp.StatusCode)
-	
+
 	// Verify error response
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
@@ -61,13 +62,13 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 	// Test that limit=0 becomes 50 (default)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -80,11 +81,11 @@ func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is reset to default (50)
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -93,13 +94,13 @@ func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 	// Test that negative limits become 50 (default)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -112,11 +113,11 @@ func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is reset to default (50)
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -125,13 +126,13 @@ func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 	// Test that limits > 100 are capped at 100
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -144,11 +145,11 @@ func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is capped at 100
 	assert.Equal(t, float64(100), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -157,13 +158,13 @@ func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 	// Test that valid limits remain unchanged
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -176,11 +177,11 @@ func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit remains as specified
 	assert.Equal(t, float64(25), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -189,13 +190,13 @@ func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 	// Test that valid offsets remain unchanged
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -208,11 +209,11 @@ func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify both values remain as specified
 	assert.Equal(t, float64(30), body["limit"])
 	assert.Equal(t, float64(15), body["offset"])
@@ -221,13 +222,13 @@ func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 func TestContributionActivity_DefaultBehavior(t *testing.T) {
 	// Test default behavior when no parameters are provided
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -240,11 +241,11 @@ func TestContributionActivity_DefaultBehavior(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify default values: limit=50, offset=0
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -254,13 +255,13 @@ func TestContributionActivity_EmptyLoginResponseStructure(t *testing.T) {
 	// Test that the empty login response structure is preserved
 	// This simulates the case where githubLogin is empty in ContributionActivity
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		// Simulate empty login case - should return same structure as before
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"activities": []fiber.Map{},
@@ -274,17 +275,17 @@ func TestContributionActivity_EmptyLoginResponseStructure(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify the response structure matches expected format
 	assert.NotNil(t, body["activities"])
 	assert.Equal(t, float64(0), body["total"])
 	assert.Equal(t, float64(25), body["limit"])
 	assert.Equal(t, float64(5), body["offset"])
-	
+
 	// Verify activities is an empty array
 	activities, ok := body["activities"].([]interface{})
 	assert.True(t, ok)
@@ -336,7 +337,7 @@ func TestContributionActivity_BoundaryValues(t *testing.T) {
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -356,13 +357,14 @@ func TestContributionActivity_BoundaryValues(t *testing.T) {
 				var body map[string]interface{}
 				err = json.NewDecoder(resp.Body).Decode(&body)
 				require.NoError(t, err)
-				
+
 				assert.Equal(t, tc.expectedLimit, body["limit"])
 				assert.Equal(t, tc.expectedOffset, body["offset"])
 			}
 		})
 	}
 }
+
 // rankFixtureUser is one seeded contributor for TestProfile_RankPositionOrdering.
 type rankFixtureUser struct {
 	userID     uuid.UUID
@@ -567,11 +569,177 @@ func TestProfile_ExcludesSoftDeletedProjectContributions(t *testing.T) {
 
 		var body struct {
 			Activities []map[string]interface{} `json:"activities"`
-			Total      int                       `json:"total"`
+			Total      int                      `json:"total"`
 		}
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 		assert.Equal(t, 1, body.Total, "only the active project's contribution should count toward the total")
 		require.Len(t, body.Activities, 1)
 		assert.NotContains(t, body.Activities[0]["project_id"], deletedProjectID.String())
 	})
+}
+
+// TestProfile_NoContributionsReturnsUnrankedTier locks in issue #349: a user
+// with zero verified-project contributions has no row in the rankPosition
+// query's ranked_users CTE, so rankPosition comes back nil. Profile()'s
+// fallback branch must report "unranked" (matching PublicProfile()'s
+// handling of the identical case), not "bronze".
+func TestProfile_NoContributionsReturnsUnrankedTier(t *testing.T) {
+	pool := openTestPool(t)
+
+	unranked := rankFixtureUser{
+		userID:     uuid.New(),
+		login:      "rank-fixture-none-" + uuid.New().String()[:8],
+		issueCount: 0,
+		prCount:    0,
+	}
+	seedRankFixture(t, pool, []rankFixtureUser{unranked})
+
+	cfg := config.Config{JWTSecret: "test-jwt-secret-for-unranked-profile-fixture"}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: pool})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), h.Profile())
+
+	token, err := auth.IssueJWT(cfg.JWTSecret, unranked.userID, "contributor", "evm", "0x123", time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Rank struct {
+			Position *int   `json:"position"`
+			Tier     string `json:"tier"`
+		} `json:"rank"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+	assert.Nil(t, body.Rank.Position, "user with no contributions should have a nil rank position")
+	assert.Equal(t, "unranked", body.Rank.Tier, "user with no contributions should be reported as unranked, not bronze")
+}
+
+// Regression tests for Issue #406: ContributionCalendar() and
+// ContributionActivity() used to declare a fresh, block-scoped `err` via
+// `:=` inside the user_id-param and own-profile branches (shadowing the
+// outer `err`), so a genuine github_accounts lookup failure was silently
+// discarded and rendered identically to "no linked GitHub account" — a
+// 200 with an empty calendar/activity list instead of a 500. These tests
+// use a mockDBPool (from projects_test.go, same package) that returns an
+// injected non-ErrNoRows error from QueryRow to prove the fix surfaces it.
+
+func newGithubLookupErrorPool(lookupErr error) *mockDBPool {
+	return &mockDBPool{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return mockRow{err: lookupErr}
+		},
+	}
+}
+
+func TestContributionCalendar_GithubLookupDBErrorReturns500_UserIDParam(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the github_accounts lookup must surface as a 500, not an empty-but-200 calendar")
+}
+
+func TestContributionCalendar_GithubLookupDBErrorReturns500_OwnProfile(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the own-profile github_accounts lookup must surface as a 500, not an empty-but-200 calendar")
+}
+
+func TestContributionCalendar_GithubAccountNotFoundStillReturnsEmptyCalendar(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(pgx.ErrNoRows)})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/calendar", h.ContributionCalendar())
+
+	req := httptest.NewRequest(http.MethodGet, "/calendar?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, fiber.StatusOK, resp.StatusCode,
+		"a genuinely absent github account (ErrNoRows) must still degrade gracefully, unchanged from before the fix")
+
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, float64(0), body["total"])
+}
+
+func TestContributionActivity_GithubLookupDBErrorReturns500_UserIDParam(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the github_accounts lookup must surface as a 500, not an empty-but-200 activity list")
+}
+
+func TestContributionActivity_GithubLookupDBErrorReturns500_OwnProfile(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(fmt.Errorf("connection reset by peer"))})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uuid.New().String())
+		return c.Next()
+	})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode,
+		"a genuine DB error on the own-profile github_accounts lookup must surface as a 500, not an empty-but-200 activity list")
+}
+
+func TestContributionActivity_GithubAccountNotFoundStillReturnsEmptyActivity(t *testing.T) {
+	cfg := config.Config{}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: newGithubLookupErrorPool(pgx.ErrNoRows)})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/activity", h.ContributionActivity())
+
+	req := httptest.NewRequest(http.MethodGet, "/activity?user_id="+uuid.New().String(), nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, fiber.StatusOK, resp.StatusCode,
+		"a genuinely absent github account (ErrNoRows) must still degrade gracefully, unchanged from before the fix")
+
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, float64(0), body["total"])
 }

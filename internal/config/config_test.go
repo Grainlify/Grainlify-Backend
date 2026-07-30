@@ -136,6 +136,27 @@ func TestValidate_PartialSorobanConfigFails(t *testing.T) {
 	}
 }
 
+func TestValidate_PartialSorobanConfigErrorOrderIsDeterministic(t *testing.T) {
+	// Regression test for #347: the "missing" list must always be in the
+	// same order, not the random order Go map iteration would produce.
+	const want = "missing: SOROBAN_SOURCE_SECRET, ESCROW_CONTRACT_ID, " +
+		"PROGRAM_ESCROW_CONTRACT_ID, TOKEN_CONTRACT_ID"
+
+	for i := 0; i < 10; i++ {
+		cfg := prodBase()
+		cfg.SorobanRPCURL = "https://soroban-testnet.stellar.org"
+		// SorobanSourceSecret, EscrowContractID, ProgramEscrowContractID,
+		// TokenContractID left empty so they land in "missing".
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected error for incomplete Soroban config")
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("run %d: error message did not contain expected ordered missing list.\ngot:  %s\nwant substring: %s", i, err.Error(), want)
+		}
+	}
+}
+
 func TestValidate_FullSorobanConfigPasses(t *testing.T) {
 	cfg := prodBase()
 	cfg.SorobanRPCURL = "https://soroban-testnet.stellar.org"
@@ -280,6 +301,49 @@ func TestLoad_ShutdownTimeoutFromEnv(t *testing.T) {
 	cfg := Load()
 	if cfg.ShutdownTimeout != 45*time.Second {
 		t.Fatalf("expected shutdown timeout 45s, got %s", cfg.ShutdownTimeout)
+	}
+}
+
+func TestLoad_RepoMetadataCacheTTLZeroDisablesCaching(t *testing.T) {
+	t.Setenv("GITHUB_REPO_CACHE_TTL", "0")
+
+	cfg := Load()
+	if cfg.GitHubRepoMetadataCacheTTL != 0 {
+		t.Fatalf("expected explicit zero TTL to be honored, got %s", cfg.GitHubRepoMetadataCacheTTL)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit zero TTL should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_RepoMetadataCacheTTLDefaultsAndRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		want       time.Duration
+		wantErrKey bool
+	}{
+		{name: "unset", raw: "", want: 60 * time.Second},
+		{name: "valid", raw: "15s", want: 15 * time.Second},
+		{name: "malformed", raw: "not-a-duration", want: 60 * time.Second, wantErrKey: true},
+		{name: "negative", raw: "-1s", want: 60 * time.Second, wantErrKey: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_REPO_CACHE_TTL", tt.raw)
+			cfg := Load()
+			if cfg.GitHubRepoMetadataCacheTTL != tt.want {
+				t.Fatalf("expected TTL %s, got %s", tt.want, cfg.GitHubRepoMetadataCacheTTL)
+			}
+			err := cfg.Validate()
+			if tt.wantErrKey && (err == nil || !strings.Contains(err.Error(), "GITHUB_REPO_CACHE_TTL")) {
+				t.Fatalf("expected validation error mentioning GITHUB_REPO_CACHE_TTL, got: %v", err)
+			}
+			if !tt.wantErrKey && err != nil {
+				t.Fatalf("expected valid configuration, got: %v", err)
+			}
+		})
 	}
 }
 
