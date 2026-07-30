@@ -27,7 +27,7 @@ import (
 func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 	// Test that negative offsets return HTTP 400 (this was missing before the fix)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	// Create a minimal handler that just tests pagination parsing
 	// We can't easily test the full handler without database setup
 	app.Get("/test", func(c *fiber.Ctx) error {
@@ -37,7 +37,7 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 			// ParsePagination already wrote the response
 			return nil
 		}
-		
+
 		// Should not reach here with negative offset
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
@@ -51,7 +51,7 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 400, resp.StatusCode)
-	
+
 	// Verify error response
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
@@ -62,13 +62,13 @@ func TestContributionActivity_NegativeOffsetReturns400(t *testing.T) {
 func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 	// Test that limit=0 becomes 50 (default)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -81,11 +81,11 @@ func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is reset to default (50)
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -94,13 +94,13 @@ func TestContributionActivity_ZeroLimitBecomes50(t *testing.T) {
 func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 	// Test that negative limits become 50 (default)
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -113,11 +113,11 @@ func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is reset to default (50)
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -126,13 +126,13 @@ func TestContributionActivity_NegativeLimitBecomes50(t *testing.T) {
 func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 	// Test that limits > 100 are capped at 100
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -145,11 +145,11 @@ func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit is capped at 100
 	assert.Equal(t, float64(100), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -158,13 +158,13 @@ func TestContributionActivity_LimitAbove100Becomes100(t *testing.T) {
 func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 	// Test that valid limits remain unchanged
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -177,11 +177,11 @@ func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify limit remains as specified
 	assert.Equal(t, float64(25), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -190,13 +190,13 @@ func TestContributionActivity_ValidLimitUnchanged(t *testing.T) {
 func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 	// Test that valid offsets remain unchanged
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -209,11 +209,11 @@ func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify both values remain as specified
 	assert.Equal(t, float64(30), body["limit"])
 	assert.Equal(t, float64(15), body["offset"])
@@ -222,13 +222,13 @@ func TestContributionActivity_ValidOffsetUnchanged(t *testing.T) {
 func TestContributionActivity_DefaultBehavior(t *testing.T) {
 	// Test default behavior when no parameters are provided
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -241,11 +241,11 @@ func TestContributionActivity_DefaultBehavior(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify default values: limit=50, offset=0
 	assert.Equal(t, float64(50), body["limit"])
 	assert.Equal(t, float64(0), body["offset"])
@@ -255,13 +255,13 @@ func TestContributionActivity_EmptyLoginResponseStructure(t *testing.T) {
 	// Test that the empty login response structure is preserved
 	// This simulates the case where githubLogin is empty in ContributionActivity
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	
+
 	app.Get("/test", func(c *fiber.Ctx) error {
 		p, err := handlers.ParsePagination(c, 50, 100)
 		if err != nil {
 			return nil
 		}
-		
+
 		// Simulate empty login case - should return same structure as before
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"activities": []fiber.Map{},
@@ -275,17 +275,17 @@ func TestContributionActivity_EmptyLoginResponseStructure(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, 200, resp.StatusCode)
-	
+
 	var body map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
-	
+
 	// Verify the response structure matches expected format
 	assert.NotNil(t, body["activities"])
 	assert.Equal(t, float64(0), body["total"])
 	assert.Equal(t, float64(25), body["limit"])
 	assert.Equal(t, float64(5), body["offset"])
-	
+
 	// Verify activities is an empty array
 	activities, ok := body["activities"].([]interface{})
 	assert.True(t, ok)
@@ -337,7 +337,7 @@ func TestContributionActivity_BoundaryValues(t *testing.T) {
 		if err != nil {
 			return nil
 		}
-		
+
 		return c.JSON(fiber.Map{
 			"activities": []fiber.Map{},
 			"total":      0,
@@ -357,13 +357,14 @@ func TestContributionActivity_BoundaryValues(t *testing.T) {
 				var body map[string]interface{}
 				err = json.NewDecoder(resp.Body).Decode(&body)
 				require.NoError(t, err)
-				
+
 				assert.Equal(t, tc.expectedLimit, body["limit"])
 				assert.Equal(t, tc.expectedOffset, body["offset"])
 			}
 		})
 	}
 }
+
 // rankFixtureUser is one seeded contributor for TestProfile_RankPositionOrdering.
 type rankFixtureUser struct {
 	userID     uuid.UUID
@@ -482,7 +483,6 @@ func TestProfile_RankPositionOrdering(t *testing.T) {
 	assert.Equal(t, posMid+1, posLow, "low should be exactly one position behind mid")
 }
 
-<<<<<<< HEAD
 // TestProfile_NoContributionsReturnsUnrankedTier locks in issue #349: a user
 // with zero verified-project contributions has no row in the rankPosition
 // query's ranked_users CTE, so rankPosition comes back nil. Profile()'s
