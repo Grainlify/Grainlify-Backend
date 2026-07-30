@@ -3,6 +3,7 @@ package handlers
 import (
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -392,7 +394,8 @@ func (h *UserProfileHandler) ContributionCalendar() fiber.Handler {
 
 		if userIDParam != "" {
 			// Fetch by user_id
-			parsedUserID, err := uuid.Parse(userIDParam)
+			var parsedUserID uuid.UUID
+			parsedUserID, err = uuid.Parse(userIDParam)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
@@ -407,7 +410,8 @@ WHERE user_id = $1
 		} else {
 			// Get user ID from JWT (own profile)
 			sub, _ := c.Locals(auth.LocalUserID).(string)
-			userID, err := uuid.Parse(sub)
+			var userID uuid.UUID
+			userID, err = uuid.Parse(sub)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
@@ -416,6 +420,11 @@ SELECT login
 FROM github_accounts
 WHERE user_id = $1
 `, userID).Scan(&githubLogin)
+		}
+
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("failed to look up github account for contribution calendar", "error", err)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
 		}
 
 		if githubLogin == nil || *githubLogin == "" {
@@ -539,7 +548,8 @@ func (h *UserProfileHandler) ContributionActivity() fiber.Handler {
 
 		if userIDParam != "" {
 			// Fetch by user_id
-			parsedUserID, err := uuid.Parse(userIDParam)
+			var parsedUserID uuid.UUID
+			parsedUserID, err = uuid.Parse(userIDParam)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
@@ -554,7 +564,8 @@ WHERE user_id = $1
 		} else {
 			// Get user ID from JWT (own profile)
 			sub, _ := c.Locals(auth.LocalUserID).(string)
-			userID, err := uuid.Parse(sub)
+			var userID uuid.UUID
+			userID, err = uuid.Parse(sub)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
@@ -563,6 +574,11 @@ SELECT login
 FROM github_accounts
 WHERE user_id = $1
 `, userID).Scan(&githubLogin)
+		}
+
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("failed to look up github account for contribution activity", "error", err)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
 		}
 
 		if githubLogin == nil || *githubLogin == "" {
