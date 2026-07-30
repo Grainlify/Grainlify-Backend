@@ -451,116 +451,32 @@ WHERE id = $1
 			"role": role,
 		}
 
-		// Try to get GitHub access token and fetch full profile
-		linkedAccount, err := github.GetLinkedAccount(c.Context(), h.db.Pool, userID, h.cfg.TokenEncKeyB64)
-		if err == nil {
-			// Fetch full GitHub user profile
-			gh := github.NewClient()
-			ghUser, err := gh.GetUser(c.Context(), linkedAccount.AccessToken)
-			if err == nil {
-				githubMap := fiber.Map{
-					"login": ghUser.Login,
-				}
-				// Use database avatar_url if set, otherwise use GitHub avatar
-				if avatarURL != nil && *avatarURL != "" {
-					githubMap["avatar_url"] = *avatarURL
-				} else {
-					githubMap["avatar_url"] = ghUser.AvatarURL
-				}
-				// Add optional fields if available
-				if ghUser.Name != "" {
-					githubMap["name"] = ghUser.Name
-				}
-				// Try to get email from GitHub emails endpoint (more reliable)
-				email, err := gh.GetPrimaryEmail(c.Context(), linkedAccount.AccessToken)
-				if err == nil && email != "" {
-					githubMap["email"] = email
-				} else if ghUser.Email != "" {
-					// Fallback to email from /user endpoint
-					githubMap["email"] = ghUser.Email
-				}
-				// Use database location if set, otherwise use GitHub location
-				if location != nil && *location != "" {
-					githubMap["location"] = *location
-				} else if ghUser.Location != "" {
-					githubMap["location"] = ghUser.Location
-				}
-				// Use database bio if set, otherwise use GitHub bio
-				if bio != nil && *bio != "" {
-					githubMap["bio"] = *bio
-				} else if ghUser.Bio != "" {
-					githubMap["bio"] = ghUser.Bio
-				}
-				// Use database website if set, otherwise use GitHub blog
-				if website != nil && *website != "" {
-					githubMap["website"] = *website
-				} else if ghUser.Blog != "" {
-					githubMap["website"] = ghUser.Blog
-				}
-				response["github"] = githubMap
-			} else {
-				// Fallback to database values if GitHub API fails
-				var githubLogin *string
-				var githubAvatarURL *string
-				_ = h.db.Pool.QueryRow(c.Context(), `
+		// /me is a hot path, so read the linked profile from Postgres rather than
+		// spending one or two GitHub API calls on every authenticated request.
+		var githubLogin *string
+		var githubAvatarURL *string
+		_ = h.db.Pool.QueryRow(c.Context(), `
 SELECT login, avatar_url
 FROM github_accounts
 WHERE user_id = $1
 `, userID).Scan(&githubLogin, &githubAvatarURL)
-				if githubLogin != nil {
-					githubMap := fiber.Map{
-						"login": *githubLogin,
-					}
-					// Use database avatar_url if set, otherwise use GitHub account avatar
-					if avatarURL != nil && *avatarURL != "" {
-						githubMap["avatar_url"] = *avatarURL
-					} else if githubAvatarURL != nil && *githubAvatarURL != "" {
-						githubMap["avatar_url"] = *githubAvatarURL
-					}
-					// Add profile fields from database
-					if location != nil && *location != "" {
-						githubMap["location"] = *location
-					}
-					if bio != nil && *bio != "" {
-						githubMap["bio"] = *bio
-					}
-					if website != nil && *website != "" {
-						githubMap["website"] = *website
-					}
-					response["github"] = githubMap
-				}
+		if githubLogin != nil {
+			githubMap := fiber.Map{"login": *githubLogin}
+			if avatarURL != nil && *avatarURL != "" {
+				githubMap["avatar_url"] = *avatarURL
+			} else if githubAvatarURL != nil && *githubAvatarURL != "" {
+				githubMap["avatar_url"] = *githubAvatarURL
 			}
-		} else {
-			// No GitHub account linked, try to get from database anyway
-			var githubLogin *string
-			var githubAvatarURL *string
-			_ = h.db.Pool.QueryRow(c.Context(), `
-SELECT login, avatar_url
-FROM github_accounts
-WHERE user_id = $1
-`, userID).Scan(&githubLogin, &githubAvatarURL)
-			if githubLogin != nil {
-				githubMap := fiber.Map{
-					"login": *githubLogin,
-				}
-				// Use database avatar_url if set, otherwise use GitHub account avatar
-				if avatarURL != nil && *avatarURL != "" {
-					githubMap["avatar_url"] = *avatarURL
-				} else if githubAvatarURL != nil && *githubAvatarURL != "" {
-					githubMap["avatar_url"] = *githubAvatarURL
-				}
-				// Add profile fields from database
-				if location != nil && *location != "" {
-					githubMap["location"] = *location
-				}
-				if bio != nil && *bio != "" {
-					githubMap["bio"] = *bio
-				}
-				if website != nil && *website != "" {
-					githubMap["website"] = *website
-				}
-				response["github"] = githubMap
+			if location != nil && *location != "" {
+				githubMap["location"] = *location
 			}
+			if bio != nil && *bio != "" {
+				githubMap["bio"] = *bio
+			}
+			if website != nil && *website != "" {
+				githubMap["website"] = *website
+			}
+			response["github"] = githubMap
 		}
 
 		// Add user profile fields to response (for first_name, last_name, social links)
