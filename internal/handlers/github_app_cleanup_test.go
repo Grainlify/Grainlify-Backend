@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +40,10 @@ type fakeRows struct {
 	pos     int
 	scanErr error
 	closed  bool
+	// errAfter, if set, is what Err() returns once iteration reaches the end
+	// of ids — simulating a connection drop mid-stream (Next() returns false
+	// as if iteration completed normally, but Err() reveals the failure).
+	errAfter error
 }
 
 func newFakeRows(ids []string) *fakeRows { return &fakeRows{ids: ids} }
@@ -61,7 +68,7 @@ func (r *fakeRows) Scan(dest ...any) error {
 }
 
 func (r *fakeRows) Close()                              { r.closed = true }
-func (r *fakeRows) Err() error                          { return nil }
+func (r *fakeRows) Err() error                          { return r.errAfter }
 func (r *fakeRows) CommandTag() pgconn.CommandTag       { return pgconn.CommandTag{} }
 func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 func (r *fakeRows) Values() ([]any, error)              { return nil, nil }
@@ -304,6 +311,37 @@ func TestCheckInstallations_QueryError(t *testing.T) {
 
 	if pool.execCalled {
 		t.Fatal("Exec must not be called when the query itself fails")
+	}
+}
+
+// TestCheckInstallations_RowsErrAfterPartialIteration verifies that a
+// mid-stream row error (Next() returns false as if iteration finished
+// normally, but Err() reveals a connection drop) is logged distinctly from
+// "no installations found," and that the partial/empty list is not silently
+// treated as complete (no Exec is attempted for it).
+func TestCheckInstallations_RowsErrAfterPartialIteration(t *testing.T) {
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	previous := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	pool := &fakePool{
+		queryRows: &fakeRows{
+			ids:      []string{"inst-1"},
+			errAfter: errors.New("connection reset by peer"),
+		},
+	}
+	h := makeHandler(pool)
+
+	h.checkInstallations(context.Background())
+
+	output := buf.String()
+	if !strings.Contains(output, "failed to fully enumerate installations for cleanup") {
+		t.Fatalf("expected a distinct row-streaming-error log line, got: %s", output)
+	}
+	if pool.execCalled {
+		t.Fatal("Exec must not be attempted when installation enumeration failed mid-stream")
 	}
 }
 
