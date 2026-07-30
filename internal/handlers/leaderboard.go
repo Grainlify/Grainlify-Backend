@@ -209,6 +209,10 @@ LIMIT $1 OFFSET $2
 			})
 			rank++
 		}
+		if err := rows.Err(); err != nil {
+			slog.Error("failed while reading leaderboard rows", "error", err)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "leaderboard_fetch_failed", "")
+		}
 
 		// Get total count for pagination
 		var total int
