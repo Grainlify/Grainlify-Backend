@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -134,155 +135,136 @@ func (h *KYCHandler) Start() fiber.Handler {
 			return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 		}
 
-		// Check if user already has an active KYC session
-		var existingSessionID *string
-		var existingStatus *string
-		err = h.db.Pool.QueryRow(c.Context(), `
+		var conflictResponse fiber.Map
+		var sessionIDOut string
+		var sessionURLOut string
+
+		txErr := h.db.WithTx(c.Context(), func(tx pgx.Tx) error {
+			// Lock the user's row for the duration of this transaction so a
+			// second concurrent request blocks here until we commit, then
+			// sees the session we just created (and correctly hits the
+			// "already exists" branch below instead of racing past it).
+			var existingSessionID *string
+			var existingStatus *string
+			err := tx.QueryRow(c.Context(), `
 SELECT kyc_session_id, kyc_status
 FROM users
 WHERE id = $1
+FOR UPDATE
 `, userID).Scan(&existingSessionID, &existingStatus)
-		if err != nil {
-			return httpx.RespondError(c, fiber.StatusInternalServerError, "user_lookup_failed", "")
-		}
+			if err != nil {
+				return fmt.Errorf("user_lookup_failed: %w", err)
+			}
 
-		// Only allow new session if:
-		// 1. No session exists (status is NULL)
-		// 2. Previous session was manually deleted in Didit dashboard and marked as 'expired'
-		// Do NOT allow new session if status is: not_started, pending, in_review, verified, or rejected
-		// Note: "not_started" means session exists but user hasn't clicked the link yet - still active
-		if existingSessionID != nil && existingStatus != nil {
-			// Get stored KYC data to find session URL
-			var kycDataBytes []byte
-			_ = h.db.Pool.QueryRow(c.Context(), `
+			if existingSessionID != nil && existingStatus != nil {
+				var kycDataBytes []byte
+				_ = tx.QueryRow(c.Context(), `
 SELECT kyc_data
 FROM users
 WHERE id = $1
 `, userID).Scan(&kycDataBytes)
 
-			var sessionURL string
-			if len(kycDataBytes) > 0 {
-				var kycDataMap map[string]interface{}
-				if err := json.Unmarshal(kycDataBytes, &kycDataMap); err == nil {
-					if url, ok := kycDataMap["session_url"].(string); ok && url != "" {
-						sessionURL = url
+				var sessionURL string
+				if len(kycDataBytes) > 0 {
+					var kycDataMap map[string]interface{}
+					if err := json.Unmarshal(kycDataBytes, &kycDataMap); err == nil {
+						if url, ok := kycDataMap["session_url"].(string); ok && url != "" {
+							sessionURL = url
+						}
 					}
 				}
-			}
 
-			// If no URL in stored data, construct it from session_id
-			if sessionURL == "" && *existingSessionID != "" {
-				// Construct URL: https://verify.didit.me/session/{short_id}
-				// The session_id is UUID, but Didit uses a short ID in the URL
-				// We'll try to get it from Didit API or construct a placeholder
-				sessionURL = fmt.Sprintf("https://verify.didit.me/session/%s", *existingSessionID)
-			}
+				if sessionURL == "" && *existingSessionID != "" {
+					sessionURL = fmt.Sprintf("https://verify.didit.me/session/%s", *existingSessionID)
+				}
 
-			// Check if the existing session still exists in Didit
-			// If it doesn't exist (404), it means admin deleted it - mark as expired and allow new session
-			if h.didit != nil {
-				decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
-				if err != nil {
-					// Check if error indicates session not found/deleted in Didit
-					if errors.Is(err, didit.ErrSessionNotFound) {
-						// Session was deleted in Didit dashboard - mark as expired and allow new session
-						_, _ = h.db.Pool.Exec(c.Context(), `
+				if h.didit != nil {
+					decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
+					if err != nil {
+						if errors.Is(err, didit.ErrSessionNotFound) {
+							_, err := tx.Exec(c.Context(), `
 UPDATE users
 SET kyc_status = 'expired',
     kyc_session_id = NULL,
     updated_at = now()
 WHERE id = $1
 `, userID)
-						slog.Info("session deleted in didit dashboard, marked as expired", "session_id", *existingSessionID, "user_id", userID)
-						// Continue to create new session
+							if err != nil {
+								return fmt.Errorf("mark_expired_failed: %w", err)
+							}
+							slog.Info("session deleted in didit dashboard, marked as expired", "session_id", *existingSessionID, "user_id", userID)
+							// Fall through: continue this same transaction to create a new session below.
+						} else {
+							conflictResponse = fiber.Map{
+								"error":      "kyc_session_exists",
+								"message":    fmt.Sprintf("You already have a KYC verification session (status: %s). Please complete it or contact admin to delete it.", *existingStatus),
+								"session_id": *existingSessionID,
+								"status":     *existingStatus,
+							}
+							if sessionURL != "" {
+								conflictResponse["url"] = sessionURL
+							}
+							return nil
+						}
 					} else {
-						// Session exists in Didit - don't allow new session, but return URL if we have it
-						response := fiber.Map{
+						if decision.ExtraFields != nil {
+							if url, ok := decision.ExtraFields["session_url"].(string); ok && url != "" {
+								sessionURL = url
+							}
+						}
+						conflictResponse = fiber.Map{
+							"error":      "kyc_session_exists",
+							"message":    fmt.Sprintf("You already have an active KYC verification session (status: %s). Please complete it or contact admin to delete it.", *existingStatus),
+							"session_id": *existingSessionID,
+							"status":     *existingStatus,
+						}
+						if sessionURL != "" {
+							conflictResponse["url"] = sessionURL
+						}
+						return nil
+					}
+				} else {
+					if *existingStatus != "expired" {
+						conflictResponse = fiber.Map{
 							"error":      "kyc_session_exists",
 							"message":    fmt.Sprintf("You already have a KYC verification session (status: %s). Please complete it or contact admin to delete it.", *existingStatus),
 							"session_id": *existingSessionID,
 							"status":     *existingStatus,
 						}
 						if sessionURL != "" {
-							response["url"] = sessionURL
+							conflictResponse["url"] = sessionURL
 						}
-						return c.Status(fiber.StatusConflict).JSON(response)
+						return nil
 					}
-				} else {
-					// Session exists in Didit - extract session_url from response if available
-					if decision.ExtraFields != nil {
-						if url, ok := decision.ExtraFields["session_url"].(string); ok && url != "" {
-							sessionURL = url
-						}
-					}
-					// Don't allow new session
-					response := fiber.Map{
-						"error":      "kyc_session_exists",
-						"message":    fmt.Sprintf("You already have an active KYC verification session (status: %s). Please complete it or contact admin to delete it.", *existingStatus),
-						"session_id": *existingSessionID,
-						"status":     *existingStatus,
-					}
-					if sessionURL != "" {
-						response["url"] = sessionURL
-					}
-					return c.Status(fiber.StatusConflict).JSON(response)
-				}
-			} else {
-				// No Didit client - check status directly
-				// Only allow new session if status is expired (session was deleted)
-				if *existingStatus != "expired" {
-					response := fiber.Map{
-						"error":      "kyc_session_exists",
-						"message":    fmt.Sprintf("You already have a KYC verification session (status: %s). Please complete it or contact admin to delete it.", *existingStatus),
-						"session_id": *existingSessionID,
-						"status":     *existingStatus,
-					}
-					if sessionURL != "" {
-						response["url"] = sessionURL
-					}
-					return c.Status(fiber.StatusConflict).JSON(response)
 				}
 			}
-		}
 
-		// Build callback URL if public base URL is configured
-		// Must be a full URL with protocol (https://)
-		var callbackURL string
-		if h.cfg.PublicBaseURL != "" {
-			baseURL := strings.TrimRight(h.cfg.PublicBaseURL, "/")
-			// Ensure it has a protocol
-			if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-				baseURL = "https://" + baseURL
+			var callbackURL string
+			if h.cfg.PublicBaseURL != "" {
+				baseURL := strings.TrimRight(h.cfg.PublicBaseURL, "/")
+				if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+					baseURL = "https://" + baseURL
+				}
+				callbackURL = fmt.Sprintf("%s/webhooks/didit", baseURL)
 			}
-			callbackURL = fmt.Sprintf("%s/webhooks/didit", baseURL)
-		}
 
-		// Create Didit session
-		slog.Info("creating didit session", "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID, "callback", callbackURL)
-		sessionResp, err := h.didit.CreateSession(c.Context(), didit.CreateSessionRequest{
-			WorkflowID: h.cfg.DiditWorkflowID,
-			VendorData: userID.String(),
-			Callback:   callbackURL,
-		})
-		if err != nil {
-			slog.Error("didit create session failed", "error", logger.RedactError(err), "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error":   "kyc_session_create_failed",
-				"message": err.Error(),
+			slog.Info("creating didit session", "user_id", userID, "workflow_id", h.cfg.DiditWorkflowID, "callback", callbackURL)
+			sessionResp, err := h.didit.CreateSession(c.Context(), didit.CreateSessionRequest{
+				WorkflowID: h.cfg.DiditWorkflowID,
+				VendorData: userID.String(),
+				Callback:   callbackURL,
 			})
-		}
-		slog.Info("didit session created", "session_id", sessionResp.SessionID, "url", sessionResp.URL, "user_id", userID)
+			if err != nil {
+				return fmt.Errorf("kyc_session_create_failed: %w", err)
+			}
+			slog.Info("didit session created", "session_id", sessionResp.SessionID, "url", sessionResp.URL, "user_id", userID)
 
-		// Store session ID and URL in database (replaces any existing session)
-		// Store the URL in kyc_data so we can retrieve it later
-		// Initial status should be 'not_started' since user hasn't clicked the link yet
-		// The Status() endpoint will update it to 'pending' when user actually starts verification
-		sessionDataJSON, _ := json.Marshal(map[string]interface{}{
-			"session_url": sessionResp.URL,
-		})
+			sessionDataJSON, _ := json.Marshal(map[string]interface{}{
+				"session_url": sessionResp.URL,
+			})
 
-		slog.Info("storing kyc session in database", "user_id", userID, "session_id", sessionResp.SessionID, "status", "not_started")
-		result, err := h.db.Pool.Exec(c.Context(), `
+			slog.Info("storing kyc session in database", "user_id", userID, "session_id", sessionResp.SessionID, "status", "not_started")
+			_, err = tx.Exec(c.Context(), `
 UPDATE users
 SET kyc_session_id = $1,
     kyc_status = 'not_started',
@@ -290,25 +272,48 @@ SET kyc_session_id = $1,
     updated_at = now()
 WHERE id = $3
 `, sessionResp.SessionID, sessionDataJSON, userID)
-		if err != nil {
-			slog.Error("failed to store kyc session in database",
-				"error", logger.RedactError(err),
-				"user_id", userID,
-				"session_id", sessionResp.SessionID,
-				"kyc_data_size", len(sessionDataJSON),
-				"error_type", fmt.Sprintf("%T", err))
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error":   "kyc_session_store_failed",
-				"message": err.Error(),
-			})
+			if err != nil {
+				return fmt.Errorf("kyc_session_store_failed: %w", err)
+			}
+
+			sessionIDOut = sessionResp.SessionID
+			sessionURLOut = sessionResp.URL
+			return nil
+		})
+
+		if txErr != nil {
+			msg := txErr.Error()
+			slog.Error("kyc start transaction failed", "error", logger.RedactError(txErr), "user_id", userID)
+			switch {
+			case strings.HasPrefix(msg, "user_lookup_failed"):
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "user_lookup_failed", "")
+			case strings.HasPrefix(msg, "kyc_session_create_failed"):
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":   "kyc_session_create_failed",
+					"message": msg,
+				})
+			case strings.HasPrefix(msg, "kyc_session_store_failed"):
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":   "kyc_session_store_failed",
+					"message": msg,
+				})
+			default:
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":   "kyc_start_failed",
+					"message": msg,
+				})
+			}
 		}
 
-		rowsAffected := result.RowsAffected()
-		slog.Info("stored new kyc session", "user_id", userID, "session_id", sessionResp.SessionID, "rows_affected", rowsAffected)
+		if conflictResponse != nil {
+			return c.Status(fiber.StatusConflict).JSON(conflictResponse)
+		}
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"session_id": sessionResp.SessionID,
-			"url":        sessionResp.URL,
+		slog.Info("stored new kyc session", "user_id", userID, "session_id", sessionIDOut)
+
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{ 			"session_id": sessionIDOut, 			"url":        sessionURLOut, 		}) 	} }{
+			"session_id": sessionIDOut,
+			"url":        sessionURLOut,
 		})
 	}
 }
