@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrInstallationNotFound is the sentinel error returned by GetInstallationToken when
@@ -50,6 +52,29 @@ func (c realClock) Now() time.Time {
 	return time.Now()
 }
 
+// tokenRefreshAheadWindow is how far before a cached installation token's
+// expiry we proactively fetch a fresh one.  GitHub tokens last ~1 hour;
+// refreshing 5 minutes early gives callers a comfortable buffer against
+// clock-skew and in-flight request latency without hammering the API.
+//
+// Example: a token that expires at T=60m is treated as stale at T=55m
+// and will be transparently replaced on the next call to GetInstallationToken.
+const tokenRefreshAheadWindow = 5 * time.Minute
+
+// cachedToken holds a GitHub installation access token together with its
+// expiry so the cache can decide when to refresh.
+type cachedToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+// isValid reports whether the token is still usable: it must not be empty
+// and its expiry must be more than tokenRefreshAheadWindow away from now.
+// Using the clock from the parent client keeps behaviour deterministic in tests.
+func (ct cachedToken) isValid(now time.Time) bool {
+	return ct.token != "" && now.Before(ct.expiresAt.Add(-tokenRefreshAheadWindow))
+}
+
 // GitHubAppClient handles GitHub App API calls
 type GitHubAppClient struct {
 	AppID      string
@@ -58,6 +83,15 @@ type GitHubAppClient struct {
 	UserAgent  string
 	BaseURL    string
 	Clock      Clock
+
+	// tokenCacheMu guards tokenCache.
+	tokenCacheMu sync.Mutex
+	// tokenCache maps installation ID → the most recently fetched token.
+	tokenCache map[string]cachedToken
+	// tokenFlight deduplicates concurrent token-exchange requests for the
+	// same installation ID, preventing a thundering-herd of GitHub API calls
+	// when many goroutines notice an expired token at the same time.
+	tokenFlight singleflight.Group
 }
 
 // NewGitHubAppClient creates a new GitHub App client
@@ -84,6 +118,7 @@ func NewGitHubAppClient(appID string, privateKeyPEM string) (*GitHubAppClient, e
 		UserAgent:  "grainlify-backend",
 		BaseURL:    "https://api.github.com",
 		Clock:      realClock{},
+		tokenCache: make(map[string]cachedToken),
 	}, nil
 }
 
@@ -120,17 +155,77 @@ type InstallationTokenResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// GetInstallationToken gets an installation access token for a specific installation
+// GetInstallationToken returns a valid installation access token for the given
+// installation ID.  Tokens are cached in memory and reused until they are
+// within tokenRefreshAheadWindow of expiry (default: 5 minutes), at which
+// point a new token is fetched from the GitHub API.
+//
+// Concurrent callers that all find the cached token stale are coalesced via
+// a singleflight.Group so that only one token-exchange request is sent to
+// GitHub, regardless of how many goroutines are waiting.  All waiters receive
+// the same fresh token.
+//
+// If the token-exchange call fails, the error is returned directly; no stale
+// token is silently reused, because an expired token would cause downstream
+// GitHub API calls to fail with 401s.
 func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installationID string) (string, error) {
+	// Fast path: return the cached token if it is still valid.
+	c.tokenCacheMu.Lock()
+	if c.tokenCache == nil {
+		c.tokenCache = make(map[string]cachedToken)
+	}
+	if ct, ok := c.tokenCache[installationID]; ok && ct.isValid(c.Clock.Now()) {
+		c.tokenCacheMu.Unlock()
+		return ct.token, nil
+	}
+	c.tokenCacheMu.Unlock()
+
+	// Slow path: fetch a new token.  Use singleflight so that N concurrent
+	// callers that all found the cache stale send exactly one HTTP request.
+	type result struct {
+		token     string
+		expiresAt time.Time
+	}
+	v, err, _ := c.tokenFlight.Do(installationID, func() (interface{}, error) {
+		// Re-check the cache inside the singleflight callback: a previous
+		// waiter may have already populated it while we were waiting.
+		c.tokenCacheMu.Lock()
+		if ct, ok := c.tokenCache[installationID]; ok && ct.isValid(c.Clock.Now()) {
+			c.tokenCacheMu.Unlock()
+			return result{token: ct.token, expiresAt: ct.expiresAt}, nil
+		}
+		c.tokenCacheMu.Unlock()
+
+		token, expiresAt, err := c.fetchInstallationToken(ctx, installationID)
+		if err != nil {
+			return nil, err
+		}
+
+		c.tokenCacheMu.Lock()
+		c.tokenCache[installationID] = cachedToken{token: token, expiresAt: expiresAt}
+		c.tokenCacheMu.Unlock()
+
+		return result{token: token, expiresAt: expiresAt}, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(result).token, nil
+}
+
+// fetchInstallationToken performs the actual GitHub API call to exchange a
+// signed App JWT for a short-lived installation access token.  It returns
+// the token string and its expiry time so the caller can populate the cache.
+func (c *GitHubAppClient) fetchInstallationToken(ctx context.Context, installationID string) (string, time.Time, error) {
 	jwtToken, err := c.GenerateJWT()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate JWT: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", c.BaseURL, installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
@@ -141,7 +236,7 @@ func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installation
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer resp.Body.Close()
 
@@ -149,20 +244,20 @@ func (c *GitHubAppClient) GetInstallationToken(ctx context.Context, installation
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
 		if resp.StatusCode == http.StatusNotFound {
-			return "", &InstallationNotFoundError{
+			return "", time.Time{}, &InstallationNotFoundError{
 				InstallationID: installationID,
 				StatusCode:     resp.StatusCode,
 			}
 		}
-		return "", fmt.Errorf("failed to get installation token: status %d, error: %v", resp.StatusCode, errBody)
+		return "", time.Time{}, fmt.Errorf("failed to get installation token: status %d, error: %v", resp.StatusCode, errBody)
 	}
 
 	var tokenResp InstallationTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 
-	return tokenResp.Token, nil
+	return tokenResp.Token, tokenResp.ExpiresAt, nil
 }
 
 // InstallationRepository represents a repository in a GitHub App installation
