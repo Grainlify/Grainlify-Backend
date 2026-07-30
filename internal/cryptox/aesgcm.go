@@ -32,11 +32,28 @@ func newAESGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// EncryptAESGCM returns nonce||ciphertext (ciphertext includes GCM tag).
+// EncryptAESGCM encrypts plaintext using AES-256-GCM and returns nonce||ciphertext,
+// where ciphertext includes the 16-byte GCM authentication tag appended by cipher.AEAD.Seal.
+//
+// A fresh 96-bit (12-byte) nonce is drawn from crypto/rand for every call.
+// AES-GCM is an authenticated cipher: the returned blob is both confidential and
+// integrity-protected.
+//
+// ⚠ NONCE-REUSE HAZARD: AES-GCM catastrophically loses both confidentiality and
+// authenticity if the same (key, nonce) pair is ever used for two different messages.
+// Never call this function with a synthetic or counter-derived nonce unless you can
+// guarantee global uniqueness across restarts and replicas. The internal variant
+// encryptAESGCM accepts a custom io.Reader solely for deterministic testing; production
+// callers MUST use the public EncryptAESGCM which sources nonces from crypto/rand.Reader.
 func EncryptAESGCM(key []byte, plaintext []byte) ([]byte, error) {
 	return encryptAESGCM(key, plaintext, rand.Reader)
 }
 
+// encryptAESGCM is the internal implementation of EncryptAESGCM. The random parameter
+// is exposed only to allow deterministic known-answer tests; all production callers
+// must use EncryptAESGCM (which passes crypto/rand.Reader). Passing a non-CSPRNG
+// source violates the nonce-uniqueness invariant required by AES-GCM — see the hazard
+// note on EncryptAESGCM.
 func encryptAESGCM(key []byte, plaintext []byte, random io.Reader) ([]byte, error) {
 	gcm, err := newAESGCM(key)
 	if err != nil {
