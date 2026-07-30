@@ -283,6 +283,49 @@ func TestLoad_ShutdownTimeoutFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_RepoMetadataCacheTTLZeroDisablesCaching(t *testing.T) {
+	t.Setenv("GITHUB_REPO_CACHE_TTL", "0")
+
+	cfg := Load()
+	if cfg.GitHubRepoMetadataCacheTTL != 0 {
+		t.Fatalf("expected explicit zero TTL to be honored, got %s", cfg.GitHubRepoMetadataCacheTTL)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit zero TTL should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_RepoMetadataCacheTTLDefaultsAndRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		want       time.Duration
+		wantErrKey bool
+	}{
+		{name: "unset", raw: "", want: 60 * time.Second},
+		{name: "valid", raw: "15s", want: 15 * time.Second},
+		{name: "malformed", raw: "not-a-duration", want: 60 * time.Second, wantErrKey: true},
+		{name: "negative", raw: "-1s", want: 60 * time.Second, wantErrKey: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_REPO_CACHE_TTL", tt.raw)
+			cfg := Load()
+			if cfg.GitHubRepoMetadataCacheTTL != tt.want {
+				t.Fatalf("expected TTL %s, got %s", tt.want, cfg.GitHubRepoMetadataCacheTTL)
+			}
+			err := cfg.Validate()
+			if tt.wantErrKey && (err == nil || !strings.Contains(err.Error(), "GITHUB_REPO_CACHE_TTL")) {
+				t.Fatalf("expected validation error mentioning GITHUB_REPO_CACHE_TTL, got: %v", err)
+			}
+			if !tt.wantErrKey && err != nil {
+				t.Fatalf("expected valid configuration, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestLoad_JetStreamAckWaitDefault verifies that leaving JS_ACK_WAIT unset is a
 // no-op: it falls back to natsbus.DefaultAckWait and never fails Validate().
 func TestLoad_JetStreamAckWaitDefault(t *testing.T) {
