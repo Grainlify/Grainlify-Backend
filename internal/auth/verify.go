@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/stellar/go/strkey"
 )
 
 type WalletType string
@@ -48,7 +49,15 @@ func NormalizeAddress(t WalletType, addr string) (string, error) {
 		}
 		return a, nil
 	case WalletTypeStellarEd25519, WalletTypeStellarSecp256k1:
-		// For now we treat `address` as an opaque identifier (often public key hex or account-hash).
+		// A StrKey address ("G..." account ID or "M..." muxed account, see
+		// internal/handlers/auth.go's isValidAddress) is case-sensitive and
+		// includes a checksum — lowercasing it produces a different, invalid
+		// string that can never match a derived StrKey address in
+		// VerifySignature's address/public-key binding check (Issue #316).
+		// Only the raw-hex-public-key address form is safe to lowercase.
+		if strings.HasPrefix(a, "G") || strings.HasPrefix(a, "M") {
+			return a, nil
+		}
 		return strings.ToLower(a), nil
 	default:
 		return "", fmt.Errorf("unsupported wallet_type")
@@ -65,11 +74,48 @@ func VerifySignature(t WalletType, address string, message string, signatureHex 
 	case WalletTypeEVM:
 		return verifyEVM(address, message, signatureHex)
 	case WalletTypeStellarEd25519:
-		return verifyStellarEd25519(message, signatureHex, publicKeyHex)
+		return verifyStellarEd25519(address, message, signatureHex, publicKeyHex)
 	case WalletTypeStellarSecp256k1:
-		return verifyStellarSecp256k1(message, signatureHex, publicKeyHex)
+		return verifyStellarSecp256k1(address, message, signatureHex, publicKeyHex)
 	default:
 		return fmt.Errorf("unsupported wallet_type")
+	}
+}
+
+// stellarAddressMatchesPublicKey reports whether address cryptographically
+// corresponds to pubKeyBytes, per the two documented Stellar address formats
+// this system accepts (see isValidAddress in internal/handlers/auth.go):
+//   - a StrKey account ("G...") or muxed account ("M...") address, whose
+//     underlying ed25519 public key must equal pubKeyBytes exactly
+//   - a raw hex-encoded public key (optional 0x/0X prefix), compared
+//     case-insensitively since hex has no case-sensitive encoding meaning
+//
+// Without this check, `address` is just a caller-supplied label with no
+// cryptographic relationship to the key that actually signed the message —
+// the vulnerability this function exists to close (Issue #316).
+func stellarAddressMatchesPublicKey(address string, pubKeyBytes []byte) bool {
+	trimmed := strings.TrimSpace(address)
+	switch {
+	case strings.HasPrefix(trimmed, "G"):
+		derived, err := strkey.Encode(strkey.VersionByteAccountID, pubKeyBytes)
+		if err != nil {
+			return false
+		}
+		// StrKey is case-sensitive and checksummed; compare exactly.
+		return derived == trimmed
+	case strings.HasPrefix(trimmed, "M"):
+		// A muxed account encodes an underlying ed25519 key plus a separate
+		// numeric ID; only the key portion can be checked against a raw
+		// public key, so extract and compare that.
+		muxed, err := strkey.DecodeMuxedAccount(trimmed)
+		if err != nil {
+			return false
+		}
+		ed := muxed.Ed25519()
+		return len(pubKeyBytes) == len(ed) && string(ed[:]) == string(pubKeyBytes)
+	default:
+		hexAddr := strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X")
+		return strings.EqualFold(hexAddr, hex.EncodeToString(pubKeyBytes))
 	}
 }
 
@@ -99,10 +145,13 @@ func verifyEVM(expectedAddr string, message string, signatureHex string) error {
 	return nil
 }
 
-func verifyStellarEd25519(message string, signatureHex string, publicKeyHex string) error {
+func verifyStellarEd25519(address string, message string, signatureHex string, publicKeyHex string) error {
 	pubKeyBytes, err := decodeHex(publicKeyHex)
 	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid public_key")
+	}
+	if !stellarAddressMatchesPublicKey(address, pubKeyBytes) {
+		return fmt.Errorf("address does not match public_key")
 	}
 	sigBytes, err := decodeHex(signatureHex)
 	if err != nil || len(sigBytes) != ed25519.SignatureSize {
@@ -114,7 +163,7 @@ func verifyStellarEd25519(message string, signatureHex string, publicKeyHex stri
 	return nil
 }
 
-func verifyStellarSecp256k1(message string, signatureHex string, publicKeyHex string) error {
+func verifyStellarSecp256k1(address string, message string, signatureHex string, publicKeyHex string) error {
 	pubKeyBytes, err := decodeHex(publicKeyHex)
 	if err != nil {
 		return fmt.Errorf("invalid public_key")
@@ -122,6 +171,9 @@ func verifyStellarSecp256k1(message string, signatureHex string, publicKeyHex st
 	pubKey, err := secp256k1ParsePubKey(pubKeyBytes)
 	if err != nil {
 		return fmt.Errorf("invalid public_key")
+	}
+	if !stellarAddressMatchesPublicKey(address, pubKeyBytes) {
+		return fmt.Errorf("address does not match public_key")
 	}
 
 	sigBytes, err := decodeHex(signatureHex)
