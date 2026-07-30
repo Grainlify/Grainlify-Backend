@@ -283,7 +283,7 @@ WHERE login = $1
 			rankTierColor = GetRankTierColor(rankTier)
 		} else {
 			// User has no contributions or not ranked
-			rankTier = RankBronze
+			rankTier = RankTierUnranked
 			rankTierName = GetRankTierDisplayName(rankTier)
 			rankTierColor = GetRankTierColor(rankTier)
 		}
