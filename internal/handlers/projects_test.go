@@ -3,10 +3,12 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/url"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
@@ -43,6 +46,7 @@ type mockRows struct {
 	rows   [][]any
 	index  int
 	closed bool
+	err    error
 }
 
 func (r *mockRows) Close() {
@@ -50,7 +54,7 @@ func (r *mockRows) Close() {
 }
 
 func (r *mockRows) Err() error {
-	return nil
+	return r.err
 }
 
 func (r *mockRows) CommandTag() pgconn.CommandTag {
@@ -150,8 +154,8 @@ func (m *mockDBPool) BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.
 }
 
 func (m *mockDBPool) Ping(ctx context.Context) error { return nil }
-func (m *mockDBPool) Close()                     {}
-func (m *mockDBPool) Config() *pgxpool.Config    { return nil }
+func (m *mockDBPool) Close()                         {}
+func (m *mockDBPool) Config() *pgxpool.Config        { return nil }
 
 func assignValue(dest any, src any) error {
 	destVal := reflect.ValueOf(dest)
@@ -222,6 +226,39 @@ func newMockProjectsApp(pool db.DBPool) *fiber.App {
 	h := handlers.NewProjectsPublicHandler(config.Config{}, &db.DB{Pool: pool})
 	app.Get("/projects", h.List())
 	return app
+}
+
+func TestProjectsListsReturnMidStreamErrors(t *testing.T) {
+	userID := uuid.New().String()
+
+	for _, tt := range []struct {
+		name    string
+		path    string
+		handler func(*handlers.ProjectsHandler) fiber.Handler
+		code    string
+	}{
+		{name: "mine", path: "/projects/mine", handler: (*handlers.ProjectsHandler).Mine, code: "projects_list_failed"},
+		{name: "pending setup", path: "/projects/pending-setup", handler: (*handlers.ProjectsHandler).PendingSetup, code: "pending_setup_failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := &mockDBPool{queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+				return &mockRows{err: errors.New("row stream failed")}, nil
+			}}
+			h := handlers.NewProjectsHandler(config.Config{}, &db.DB{Pool: pool})
+			app := fiber.New(fiber.Config{DisableStartupMessage: true})
+			app.Get(tt.path, func(c *fiber.Ctx) error {
+				c.Locals(auth.LocalUserID, userID)
+				return tt.handler(h)(c)
+			})
+
+			res, err := app.Test(httptest.NewRequest(http.MethodGet, tt.path, nil))
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusInternalServerError, res.StatusCode)
+			body, readErr := io.ReadAll(res.Body)
+			require.NoError(t, readErr)
+			assert.Contains(t, string(body), tt.code)
+		})
+	}
 }
 
 func TestProjectsPagination_EdgeCases(t *testing.T) {

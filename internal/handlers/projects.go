@@ -235,6 +235,9 @@ ORDER BY p.created_at DESC
 			}
 			mineRows = append(mineRows, r)
 		}
+		if err := rows.Err(); err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "projects_list_failed", "")
+		}
 
 		// Get user's GitHub access token for fetching repo data
 		linkedAccount, err := github.GetLinkedAccount(c.Context(), h.db.Pool, userID, h.cfg.TokenEncKeyB64)
@@ -397,6 +400,9 @@ ORDER BY p.created_at ASC
 				"tags":             tags,
 				"category":         category,
 			})
+		}
+		if err := rows.Err(); err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "pending_setup_failed", "")
 		}
 
 		if out == nil {
