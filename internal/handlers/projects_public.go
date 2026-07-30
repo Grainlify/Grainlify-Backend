@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -990,13 +991,7 @@ ORDER BY tag
 	for tag := range tagMap {
 		tags = append(tags, tag)
 	}
-	for i := 0; i < len(tags)-1; i++ {
-		for j := i + 1; j < len(tags); j++ {
-			if tags[i] > tags[j] {
-				tags[i], tags[j] = tags[j], tags[i]
-			}
-		}
-	}
+	sort.Strings(tags)
 
 	return json.Marshal(fiber.Map{
 		"languages":  languages,
