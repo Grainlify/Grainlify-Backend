@@ -194,3 +194,61 @@ func TestLeaderboardCountQueryAccuracy(t *testing.T) {
 	assert.Equal(t, 5, body4.Total, "total should be consistent across requests")
 	assert.Equal(t, 1, len(body4.Leaderboard))
 }
+
+// TestLeaderboardExcludesSoftDeletedProjectContributions locks in issue #338:
+// a verified-but-soft-deleted project's contributions must not feed the
+// public leaderboard or its total count, matching every other public
+// visibility query in this codebase (stats_public.go, ecosystems_public.go,
+// projects_public.go), none of which surface soft-deleted projects. Soft
+// deletion never resets status (see Mine()'s private-repo handling), so
+// leaderboardBaseQuery/leaderboardCountQuery must filter on deleted_at
+// explicitly rather than relying on status alone.
+func TestLeaderboardExcludesSoftDeletedProjectContributions(t *testing.T) {
+	pool := openTestPool(t)
+	resetLeaderboardTables(t, pool)
+	ctx := t.Context()
+	suffix := uuid.NewString()
+
+	var ownerID, activeProjectID, deletedProjectID uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `INSERT INTO users (display_name) VALUES ($1) RETURNING id`, "leaderboard soft-delete owner "+suffix).Scan(&ownerID))
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO projects (owner_user_id, github_full_name, status)
+		VALUES ($1, $2, 'verified')
+		RETURNING id`, ownerID, "grainlify/leaderboard-active-"+suffix).Scan(&activeProjectID))
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO projects (owner_user_id, github_full_name, status)
+		VALUES ($1, $2, 'verified')
+		RETURNING id`, ownerID, "grainlify/leaderboard-deleted-"+suffix).Scan(&deletedProjectID))
+
+	// Soft-delete without resetting status, mirroring Mine()'s private-repo
+	// handling elsewhere in this codebase.
+	_, err := pool.Exec(ctx, `UPDATE projects SET deleted_at = now() WHERE id = $1`, deletedProjectID)
+	require.NoError(t, err)
+
+	insertIssue := func(projectID uuid.UUID, login string, n int64) {
+		require.NoError(t, pool.QueryRow(ctx, `
+			INSERT INTO github_issues (project_id, github_issue_id, number, state, title, author_login, url, created_at_github, updated_at_github)
+			VALUES ($1, $2, $3, 'open', $4, $5, $6, now(), now())
+			RETURNING id`, projectID, n, int(n%1_000_000), fmt.Sprintf("Issue %d", n), login, fmt.Sprintf("https://example.test/%d", n)).Scan(new(uuid.UUID)))
+	}
+
+	base := time.Now().UnixNano() % 1_000_000_000
+	insertIssue(activeProjectID, "active-contributor-"+suffix, base+1)
+	insertIssue(deletedProjectID, "deleted-project-contributor-"+suffix, base+2)
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `TRUNCATE github_issues, github_pull_requests, projects, ecosystems, github_accounts, wallets, users CASCADE`)
+	})
+
+	app := newLeaderboardApp(pool)
+	status, body := getLeaderboard(t, app, "/leaderboard?limit=50&offset=0")
+	assert.Equal(t, fiber.StatusOK, status)
+	assert.Equal(t, 1, body.Total, "only the active project's contributor should count toward the total")
+
+	var logins []string
+	for _, entry := range body.Leaderboard {
+		logins = append(logins, entry.Username)
+	}
+	assert.Contains(t, logins, "active-contributor-"+suffix)
+	assert.NotContains(t, logins, "deleted-project-contributor-"+suffix)
+}

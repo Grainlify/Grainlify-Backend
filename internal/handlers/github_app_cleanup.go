@@ -76,6 +76,11 @@ WHERE github_app_installation_id IS NOT NULL
 		installationIDs = append(installationIDs, installationID)
 	}
 
+	if err := rows.Err(); err != nil {
+		slog.Error("failed to fully enumerate installations for cleanup", "error", err)
+		return
+	}
+
 	if len(installationIDs) == 0 {
 		return
 	}
