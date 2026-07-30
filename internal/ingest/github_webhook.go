@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,12 +38,18 @@ func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebho
 	}
 
 	var projectID *string
-	if repoFullName != "" {
-		var pid string
-		if err := i.Pool.QueryRow(ctx, `SELECT id FROM projects WHERE github_full_name = $1`, repoFullName).Scan(&pid); err == nil {
-			projectID = &pid
-		}
+if repoFullName != "" {
+	var pid string
+	err := i.Pool.QueryRow(ctx, `SELECT id FROM projects WHERE github_full_name = $1`, repoFullName).Scan(&pid)
+	switch {
+	case err == nil:
+		projectID = &pid
+	case errors.Is(err, pgx.ErrNoRows):
+		// No project registered for this repo — expected, keep projectID nil.
+	default:
+		return fmt.Errorf("ingest: project lookup for %q: %w", repoFullName, err)
 	}
+}
 
 	// The dedup marker and the core auditable/snapshot writes commit
 	// together in one transaction: if the github_events insert or a
