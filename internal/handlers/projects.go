@@ -407,11 +407,11 @@ ORDER BY p.created_at ASC
 }
 
 type updateMetadataRequest struct {
-	Description   *string  `json:"description,omitempty"`
-	EcosystemName *string  `json:"ecosystem_name,omitempty"`
-	Language      *string  `json:"language,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	Category      *string  `json:"category,omitempty"`
+	Description   *string   `json:"description,omitempty"`
+	EcosystemName *string   `json:"ecosystem_name,omitempty"`
+	Language      *string   `json:"language,omitempty"`
+	Tags          *[]string `json:"tags,omitempty"`
+	Category      *string   `json:"category,omitempty"`
 }
 
 // UpdateMetadata updates project metadata and sets needs_metadata = false.
@@ -464,9 +464,9 @@ SELECT id FROM ecosystems WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND status =
 			ecosystemID = &ecoID
 		}
 
-		var tagsJSON []byte = []byte("[]")
-		if len(req.Tags) > 0 {
-			tagsJSON, _ = json.Marshal(req.Tags)
+		var tagsJSON []byte
+		if req.Tags != nil {
+			tagsJSON, _ = json.Marshal(*req.Tags)
 		}
 
 		// Build dynamic update: set needs_metadata = false and provided fields
