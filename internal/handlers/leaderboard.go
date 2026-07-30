@@ -32,6 +32,7 @@ WITH all_contributors AS (
   WHERE i.author_login IS NOT NULL 
     AND i.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
   
   UNION
   
@@ -41,6 +42,7 @@ WITH all_contributors AS (
   WHERE pr.author_login IS NOT NULL 
     AND pr.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
 ),
 issue_counts AS (
   SELECT
@@ -51,6 +53,7 @@ issue_counts AS (
   WHERE i.author_login IS NOT NULL
     AND i.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
   GROUP BY LOWER(i.author_login)
 ),
 pr_counts AS (
@@ -62,6 +65,7 @@ pr_counts AS (
   WHERE pr.author_login IS NOT NULL
     AND pr.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
   GROUP BY LOWER(pr.author_login)
 ),
 contributor_data AS (
@@ -77,12 +81,12 @@ contributor_data AS (
           SELECT DISTINCT p.ecosystem_id
           FROM github_issues i
           INNER JOIN projects p ON i.project_id = p.id
-          WHERE LOWER(i.author_login) = LOWER(ac.login) AND p.status = 'verified'
+          WHERE LOWER(i.author_login) = LOWER(ac.login) AND p.status = 'verified' AND p.deleted_at IS NULL
           UNION
           SELECT DISTINCT p.ecosystem_id
           FROM github_pull_requests pr
           INNER JOIN projects p ON pr.project_id = p.id
-          WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified'
+          WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified' AND p.deleted_at IS NULL
         ) contrib_ecosystems
         INNER JOIN ecosystems e ON contrib_ecosystems.ecosystem_id = e.id
         WHERE e.status = 'active'
@@ -110,6 +114,7 @@ WITH all_contributors AS (
   WHERE i.author_login IS NOT NULL 
     AND i.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
   UNION
   SELECT DISTINCT pr.author_login as login
   FROM github_pull_requests pr
@@ -117,19 +122,20 @@ WITH all_contributors AS (
   WHERE pr.author_login IS NOT NULL 
     AND pr.author_login != ''
     AND p.status = 'verified'
+    AND p.deleted_at IS NULL
 ),
 issue_counts AS (
   SELECT LOWER(i.author_login) AS login_lower, COUNT(*) AS cnt
   FROM github_issues i
   INNER JOIN projects p ON i.project_id = p.id
-  WHERE i.author_login IS NOT NULL AND i.author_login != '' AND p.status = 'verified'
+  WHERE i.author_login IS NOT NULL AND i.author_login != '' AND p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY LOWER(i.author_login)
 ),
 pr_counts AS (
   SELECT LOWER(pr.author_login) AS login_lower, COUNT(*) AS cnt
   FROM github_pull_requests pr
   INNER JOIN projects p ON pr.project_id = p.id
-  WHERE pr.author_login IS NOT NULL AND pr.author_login != '' AND p.status = 'verified'
+  WHERE pr.author_login IS NOT NULL AND pr.author_login != '' AND p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY LOWER(pr.author_login)
 )
 SELECT COUNT(*)
