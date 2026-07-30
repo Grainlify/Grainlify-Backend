@@ -20,7 +20,6 @@ var sensitiveKeySubstrings = []string{
 	"private_key",
 	"privatekey",
 	"signature",
-	"sig",
 	"authorization",
 	"cookie",
 	"jwt",

@@ -21,7 +21,6 @@ func TestRedactMapAllSensitiveKeywords(t *testing.T) {
 		"private_key",
 		"privatekey",
 		"signature",
-		"sig",
 		"authorization",
 		"cookie",
 		"jwt",
@@ -237,6 +236,48 @@ func TestRedactMapRedactsSensitiveKeysInsideSliceValues(t *testing.T) {
 	assertPathEquals(t, redacted, []interface{}{"accounts", 0, "username"}, "alice")
 	assertPathEquals(t, redacted, []interface{}{"accounts", 1, "username"}, "bob")
 	assertPathEquals(t, redacted, []interface{}{"sessions", 0, "expiresIn"}, 3600)
+}
+
+func TestRedactMapDoesNotFalsePositiveOnAssignOrDesignWords(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]interface{}{
+		"assignee":      "octocat",
+		"assigned_at":   "2026-01-01T00:00:00Z",
+		"designer":      "jane",
+		"design_review": "approved",
+		"signal":        "green",
+		"signing_off":   "yes",
+	}
+
+	redacted := RedactMap(payload)
+
+	if !reflect.DeepEqual(redacted, payload) {
+		t.Fatalf("assign/design-like keys were altered: got %#v, want %#v", redacted, payload)
+	}
+}
+
+func TestRedactMapStillRedactsSignatureRelatedKeys(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]interface{}{
+		"signature":             "0xdeadbeef",
+		"digital_signature":     "0xabc123",
+		"transaction_signature": "0xfeedface",
+	}
+
+	redacted := RedactMap(payload)
+
+	for key, original := range payload {
+		got, ok := redacted[key]
+		if !ok {
+			t.Errorf("key %q missing in redacted output", key)
+			continue
+		}
+		if got != "[REDACTED]" {
+			t.Errorf("key %q was not redacted: got %v (original %v)", key, got, original)
+		}
+	}
 }
 
 func assertPathEquals(t *testing.T, payload map[string]interface{}, path []interface{}, want interface{}) {
