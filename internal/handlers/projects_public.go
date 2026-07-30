@@ -460,6 +460,9 @@ LIMIT $2 OFFSET $3
 				"last_seen_at":    lastSeen,
 			})
 		}
+		if err := rows.Err(); err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "issues_list_failed", "")
+		}
 
 		// Get total count for pagination
 		var total int
@@ -537,6 +540,9 @@ LIMIT $2 OFFSET $3
 				"merged_at":    mergedAt,
 				"last_seen_at": lastSeen,
 			})
+		}
+		if err := rows.Err(); err != nil {
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "prs_list_failed", "")
 		}
 
 		// Get total count for pagination
@@ -747,6 +753,9 @@ LIMIT $%d OFFSET $%d
 			"updated_at":         updatedAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	countQuery := fmt.Sprintf(`
 SELECT COUNT(*) FROM projects p
@@ -890,6 +899,9 @@ LIMIT $1 OFFSET $2
 			"updated_at":         updatedAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	var total int
 	if err := h.db.Pool.QueryRow(c.Context(), `
@@ -948,6 +960,9 @@ ORDER BY language
 			languages = append(languages, lang)
 		}
 	}
+	if err := langRows.Err(); err != nil {
+		return nil, err
+	}
 
 	catRows, err := h.db.Pool.Query(c.Context(), `
 SELECT DISTINCT category
@@ -967,6 +982,9 @@ ORDER BY category
 			categories = append(categories, cat)
 		}
 	}
+	if err := catRows.Err(); err != nil {
+		return nil, err
+	}
 
 	tagRows, err := h.db.Pool.Query(c.Context(), `
 SELECT DISTINCT jsonb_array_elements_text(tags) AS tag
@@ -985,6 +1003,9 @@ ORDER BY tag
 		if err := tagRows.Scan(&tag); err == nil && tag != "" {
 			tagMap[tag] = true
 		}
+	}
+	if err := tagRows.Err(); err != nil {
+		return nil, err
 	}
 	var tags []string
 	for tag := range tagMap {
