@@ -136,14 +136,14 @@ WHERE user_id = $1
 		// Count total contributions (issues + PRs) for verified projects only
 		var contributionsCount int
 		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT 
+SELECT
   (SELECT COUNT(*) FROM github_issues i
    INNER JOIN projects p ON i.project_id = p.id
-   WHERE i.author_login = $1 AND p.status = 'verified')
+   WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL)
   +
   (SELECT COUNT(*) FROM github_pull_requests pr
    INNER JOIN projects p ON pr.project_id = p.id
-   WHERE pr.author_login = $1 AND p.status = 'verified')
+   WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL)
 `, *githubLogin).Scan(&contributionsCount)
 		if err != nil {
 			slog.Error("failed to count contributions", "error", err, "user_id", userID, "github_login", *githubLogin)
@@ -162,7 +162,7 @@ FROM (
   SELECT project_id FROM github_pull_requests WHERE author_login = $1
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
-WHERE p.status = 'verified' AND p.language IS NOT NULL
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.language IS NOT NULL
 GROUP BY p.language
 ORDER BY contribution_count DESC, p.language ASC
 LIMIT 10
@@ -200,7 +200,7 @@ FROM (
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
 INNER JOIN ecosystems e ON p.ecosystem_id = e.id
-WHERE p.status = 'verified' AND e.status = 'active'
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND e.status = 'active'
 GROUP BY e.id, e.name
 ORDER BY contribution_count DESC, e.name ASC
 LIMIT 10
@@ -238,14 +238,14 @@ WITH issue_counts AS (
   SELECT i.author_login, COUNT(*) AS cnt
   FROM github_issues i
   INNER JOIN projects p ON i.project_id = p.id
-  WHERE p.status = 'verified'
+  WHERE p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY i.author_login
 ),
 pr_counts AS (
   SELECT pr.author_login, COUNT(*) AS cnt
   FROM github_pull_requests pr
   INNER JOIN projects p ON pr.project_id = p.id
-  WHERE p.status = 'verified'
+  WHERE p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY pr.author_login
 ),
 contribution_counts AS (
@@ -305,7 +305,7 @@ FROM (
   SELECT project_id FROM github_pull_requests WHERE author_login = $1
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
-WHERE p.status = 'verified'
+WHERE p.status = 'verified' AND p.deleted_at IS NULL
 `, *githubLogin).Scan(&projectsContributedToCount)
 		if err != nil {
 			slog.Warn("failed to count projects contributed to", "error", err, "user_id", userID, "github_login", *githubLogin)
@@ -589,7 +589,7 @@ SELECT
   p.id as project_id
 FROM github_issues i
 INNER JOIN projects p ON i.project_id = p.id
-WHERE i.author_login = $1 AND p.status = 'verified' AND i.created_at_github IS NOT NULL
+WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND i.created_at_github IS NOT NULL
 
 UNION ALL
 
@@ -605,7 +605,7 @@ SELECT
   p.id as project_id
 FROM github_pull_requests pr
 INNER JOIN projects p ON pr.project_id = p.id
-WHERE pr.author_login = $1 AND p.status = 'verified' AND pr.created_at_github IS NOT NULL
+WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND pr.created_at_github IS NOT NULL
 
 ORDER BY created_at_github DESC
 LIMIT $2 OFFSET $3
@@ -658,11 +658,11 @@ LIMIT $2 OFFSET $3
 SELECT 
   (SELECT COUNT(*) FROM github_issues i
    INNER JOIN projects p ON i.project_id = p.id
-   WHERE i.author_login = $1 AND p.status = 'verified' AND i.created_at_github IS NOT NULL)
+   WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND i.created_at_github IS NOT NULL)
   +
   (SELECT COUNT(*) FROM github_pull_requests pr
    INNER JOIN projects p ON pr.project_id = p.id
-   WHERE pr.author_login = $1 AND p.status = 'verified' AND pr.created_at_github IS NOT NULL)
+   WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND pr.created_at_github IS NOT NULL)
 `, *githubLogin).Scan(&total)
 		if err != nil {
 			slog.Error("failed to count total activities", "error", err)

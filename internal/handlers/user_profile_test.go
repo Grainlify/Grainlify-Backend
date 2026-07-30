@@ -480,3 +480,98 @@ func TestProfile_RankPositionOrdering(t *testing.T) {
 	assert.Equal(t, posTop+1, posMid, "mid should be exactly one position behind top")
 	assert.Equal(t, posMid+1, posLow, "low should be exactly one position behind mid")
 }
+
+// TestProfile_ExcludesSoftDeletedProjectContributions locks in issue #339:
+// Profile()'s contribution count and ContributionActivity()'s feed/total must
+// exclude contributions to verified-but-soft-deleted projects, matching the
+// convention already used by ProjectsContributed()/ProjectsLed() in the same
+// file. Seeds one contribution to a normal verified project and one to a
+// verified project that has since been soft-deleted (status untouched,
+// deleted_at set — mirroring how Mine()'s private-repo detection soft-deletes
+// without resetting status), and asserts only the former is counted/returned.
+func TestProfile_ExcludesSoftDeletedProjectContributions(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+
+	userID := uuid.New()
+	login := "soft-delete-fixture-" + uuid.New().String()[:8]
+	suffix := uuid.New().String()[:8]
+
+	_, err := pool.Exec(ctx, `INSERT INTO users (id, role) VALUES ($1, 'contributor')`, userID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO github_accounts (user_id, github_user_id, login, access_token) VALUES ($1, $2, $3, $4)`,
+		userID, int64(uuid.New().ID()), login, []byte("test-token"))
+	require.NoError(t, err)
+
+	var activeProjectID, deletedProjectID uuid.UUID
+	err = pool.QueryRow(ctx,
+		`INSERT INTO projects (owner_user_id, github_full_name, status) VALUES ($1, $2, 'verified') RETURNING id`,
+		userID, fmt.Sprintf("soft-delete-fixture/active-%s", suffix)).Scan(&activeProjectID)
+	require.NoError(t, err)
+	err = pool.QueryRow(ctx,
+		`INSERT INTO projects (owner_user_id, github_full_name, status) VALUES ($1, $2, 'verified') RETURNING id`,
+		userID, fmt.Sprintf("soft-delete-fixture-deleted/gone-%s", suffix)).Scan(&deletedProjectID)
+	require.NoError(t, err)
+
+	// Soft-delete the second project without resetting status, mirroring
+	// Mine()'s private-repo handling elsewhere in this codebase.
+	_, err = pool.Exec(ctx, `UPDATE projects SET deleted_at = now() WHERE id = $1`, deletedProjectID)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO github_issues (project_id, github_issue_id, number, author_login, title, url, state, created_at_github) VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+		activeProjectID, int64(uuid.New().ID()&0x7fffffff), 1, login, "active issue", "https://example.com/active", "open")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO github_issues (project_id, github_issue_id, number, author_login, title, url, state, created_at_github) VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+		deletedProjectID, int64(uuid.New().ID()&0x7fffffff), 1, login, "deleted-project issue", "https://example.com/deleted", "open")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM projects WHERE id = ANY($1)`, []uuid.UUID{activeProjectID, deletedProjectID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID)
+	})
+
+	cfg := config.Config{JWTSecret: "test-jwt-secret-for-soft-delete-fixture"}
+	h := handlers.NewUserProfileHandler(cfg, &db.DB{Pool: pool})
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), h.Profile())
+	app.Get("/activity", auth.RequireAuth(cfg.JWTSecret), h.ContributionActivity())
+
+	token, err := auth.IssueJWT(cfg.JWTSecret, userID, "contributor", "evm", "0x123", time.Hour)
+	require.NoError(t, err)
+
+	t.Run("Profile excludes the soft-deleted project's contribution", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+		var body struct {
+			ContributionsCount int `json:"contributions_count"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, 1, body.ContributionsCount, "only the active project's contribution should be counted")
+	})
+
+	t.Run("ContributionActivity excludes the soft-deleted project's entry", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/activity?login="+login, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+		var body struct {
+			Activities []map[string]interface{} `json:"activities"`
+			Total      int                       `json:"total"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, 1, body.Total, "only the active project's contribution should count toward the total")
+		require.Len(t, body.Activities, 1)
+		assert.NotContains(t, body.Activities[0]["project_id"], deletedProjectID.String())
+	})
+}
