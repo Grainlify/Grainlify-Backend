@@ -309,9 +309,9 @@ WHERE id = $3
 			return c.Status(fiber.StatusConflict).JSON(conflictResponse)
 		}
 
-		slog.Info("stored new kyc session", "user_id", userID, "session_id", sessionIDOut)
+				slog.Info("stored new kyc session", "user_id", userID, "session_id", sessionIDOut)
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{ 			"session_id": sessionIDOut, 			"url":        sessionURLOut, 		}) 	} }{
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"session_id": sessionIDOut,
 			"url":        sessionURLOut,
 		})
