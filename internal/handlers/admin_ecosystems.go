@@ -342,17 +342,17 @@ func (h *EcosystemsAdminHandler) Update() fiber.Handler {
 			slugVal = &slug
 		}
 
-		linksJSON := req.Links
-		if len(linksJSON) == 0 {
-			linksJSON = []byte("[]")
+		// A nil JSON field means it was omitted, so COALESCE preserves the
+		// existing value. Explicit [] remains a non-nil value and clears it.
+		var linksJSON, keyAreasJSON, technologiesJSON []byte
+		if len(req.Links) > 0 {
+			linksJSON = req.Links
 		}
-		keyAreasJSON := req.KeyAreas
-		if len(keyAreasJSON) == 0 {
-			keyAreasJSON = []byte("[]")
+		if len(req.KeyAreas) > 0 {
+			keyAreasJSON = req.KeyAreas
 		}
-		technologiesJSON := req.Technologies
-		if len(technologiesJSON) == 0 {
-			technologiesJSON = []byte("[]")
+		if len(req.Technologies) > 0 {
+			technologiesJSON = req.Technologies
 		}
 
 		aboutVal := strings.TrimSpace(req.About)

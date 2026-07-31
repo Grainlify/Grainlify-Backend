@@ -69,8 +69,12 @@ func normalizeOrigin(origin string) string {
 }
 
 func isLocalhostOrigin(origin string) bool {
-	return strings.HasPrefix(origin, "http://localhost:") ||
+	return origin == "http://localhost" ||
+		strings.HasPrefix(origin, "http://localhost:") ||
+		origin == "http://127.0.0.1" ||
 		strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		origin == "https://localhost" ||
 		strings.HasPrefix(origin, "https://localhost:") ||
+		origin == "https://127.0.0.1" ||
 		strings.HasPrefix(origin, "https://127.0.0.1:")
 }

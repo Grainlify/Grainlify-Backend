@@ -123,3 +123,41 @@ func TestTokenGate_EmptyToken_Passthrough(t *testing.T) {
 		t.Fatalf("expected 200 with empty token (no-op gate), got %d", resp.StatusCode)
 	}
 }
+
+// TestHandler_ServesPrometheusExposition locks in that Handler() actually
+// serves the Prometheus text exposition format from the default registry,
+// not just that it doesn't error. Found uncovered (0%) while auditing #361;
+// unrelated to the TokenGate/secureCompare fix itself, but a genuine gap in
+// the same file worth closing while here.
+func TestHandler_ServesPrometheusExposition(t *testing.T) {
+	app := fiber.New()
+	app.Get("/metrics", metrics.Handler())
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	text := string(body)
+
+	if !strings.Contains(text, "# HELP") || !strings.Contains(text, "# TYPE") {
+		t.Fatalf("expected Prometheus text exposition format (# HELP / # TYPE comments), got:\n%s", text)
+	}
+	// SyncJobsQueueDepth is a gauge registered at package init (promauto),
+	// present with a default value even before anything calls .Set() on it —
+	// confirms Handler() is actually serving this package's own registry,
+	// not an empty/unrelated one.
+	if !strings.Contains(text, "grainlify_syncjobs_queue_depth") {
+		t.Fatalf("expected grainlify_syncjobs_queue_depth in exposition output, got:\n%s", text)
+	}
+}

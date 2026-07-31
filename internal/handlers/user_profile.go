@@ -3,6 +3,7 @@ package handlers
 import (
 	"github.com/jagadeesh/grainlify/backend/internal/httpx"
 
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -136,14 +138,14 @@ WHERE user_id = $1
 		// Count total contributions (issues + PRs) for verified projects only
 		var contributionsCount int
 		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT 
+SELECT
   (SELECT COUNT(*) FROM github_issues i
    INNER JOIN projects p ON i.project_id = p.id
-   WHERE i.author_login = $1 AND p.status = 'verified')
+   WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL)
   +
   (SELECT COUNT(*) FROM github_pull_requests pr
    INNER JOIN projects p ON pr.project_id = p.id
-   WHERE pr.author_login = $1 AND p.status = 'verified')
+   WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL)
 `, *githubLogin).Scan(&contributionsCount)
 		if err != nil {
 			slog.Error("failed to count contributions", "error", err, "user_id", userID, "github_login", *githubLogin)
@@ -162,7 +164,7 @@ FROM (
   SELECT project_id FROM github_pull_requests WHERE author_login = $1
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
-WHERE p.status = 'verified' AND p.language IS NOT NULL
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.language IS NOT NULL
 GROUP BY p.language
 ORDER BY contribution_count DESC, p.language ASC
 LIMIT 10
@@ -200,7 +202,7 @@ FROM (
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
 INNER JOIN ecosystems e ON p.ecosystem_id = e.id
-WHERE p.status = 'verified' AND e.status = 'active'
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND e.status = 'active'
 GROUP BY e.id, e.name
 ORDER BY contribution_count DESC, e.name ASC
 LIMIT 10
@@ -238,14 +240,14 @@ WITH issue_counts AS (
   SELECT i.author_login, COUNT(*) AS cnt
   FROM github_issues i
   INNER JOIN projects p ON i.project_id = p.id
-  WHERE p.status = 'verified'
+  WHERE p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY i.author_login
 ),
 pr_counts AS (
   SELECT pr.author_login, COUNT(*) AS cnt
   FROM github_pull_requests pr
   INNER JOIN projects p ON pr.project_id = p.id
-  WHERE p.status = 'verified'
+  WHERE p.status = 'verified' AND p.deleted_at IS NULL
   GROUP BY pr.author_login
 ),
 contribution_counts AS (
@@ -281,7 +283,7 @@ WHERE login = $1
 			rankTierColor = GetRankTierColor(rankTier)
 		} else {
 			// User has no contributions or not ranked
-			rankTier = RankBronze
+			rankTier = RankTierUnranked
 			rankTierName = GetRankTierDisplayName(rankTier)
 			rankTierColor = GetRankTierColor(rankTier)
 		}
@@ -305,7 +307,7 @@ FROM (
   SELECT project_id FROM github_pull_requests WHERE author_login = $1
 ) contributions
 INNER JOIN projects p ON contributions.project_id = p.id
-WHERE p.status = 'verified'
+WHERE p.status = 'verified' AND p.deleted_at IS NULL
 `, *githubLogin).Scan(&projectsContributedToCount)
 		if err != nil {
 			slog.Warn("failed to count projects contributed to", "error", err, "user_id", userID, "github_login", *githubLogin)
@@ -384,7 +386,6 @@ func (h *UserProfileHandler) ContributionCalendar() fiber.Handler {
 		}
 
 		var githubLogin *string
-		var err error
 
 		// Check if user_id or login is provided in query params (for viewing other users)
 		userIDParam := c.Query("user_id")
@@ -392,30 +393,46 @@ func (h *UserProfileHandler) ContributionCalendar() fiber.Handler {
 
 		if userIDParam != "" {
 			// Fetch by user_id
-			parsedUserID, err := uuid.Parse(userIDParam)
+			var parsedUserID uuid.UUID
+			parsedUserID, err = uuid.Parse(userIDParam)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
-			err = h.db.Pool.QueryRow(c.Context(), `
+			// The lookup error must be checked inside this block: err is
+			// block-scoped here, so letting it escape unread would report a
+			// genuine database failure as "no linked GitHub account".
+			if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT login
 FROM github_accounts
 WHERE user_id = $1
-`, parsedUserID).Scan(&githubLogin)
+`, parsedUserID).Scan(&githubLogin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("failed to look up github account for calendar", "error", err, "user_id", parsedUserID)
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
+			}
 		} else if loginParam != "" {
 			// Fetch by login
 			githubLogin = &loginParam
 		} else {
 			// Get user ID from JWT (own profile)
 			sub, _ := c.Locals(auth.LocalUserID).(string)
-			userID, err := uuid.Parse(sub)
+			var userID uuid.UUID
+			userID, err = uuid.Parse(sub)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
-			err = h.db.Pool.QueryRow(c.Context(), `
+			if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT login
 FROM github_accounts
 WHERE user_id = $1
-`, userID).Scan(&githubLogin)
+`, userID).Scan(&githubLogin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("failed to look up github account for calendar", "error", err, "user_id", userID)
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
+			}
+		}
+
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("failed to look up github account for contribution calendar", "error", err)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
 		}
 
 		if githubLogin == nil || *githubLogin == "" {
@@ -539,30 +556,46 @@ func (h *UserProfileHandler) ContributionActivity() fiber.Handler {
 
 		if userIDParam != "" {
 			// Fetch by user_id
-			parsedUserID, err := uuid.Parse(userIDParam)
+			var parsedUserID uuid.UUID
+			parsedUserID, err = uuid.Parse(userIDParam)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusBadRequest, "invalid_user_id", "")
 			}
-			err = h.db.Pool.QueryRow(c.Context(), `
+			// The lookup error must be checked inside this block: err is
+			// block-scoped here, so letting it escape unread would report a
+			// genuine database failure as "no linked GitHub account".
+			if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT login
 FROM github_accounts
 WHERE user_id = $1
-`, parsedUserID).Scan(&githubLogin)
+`, parsedUserID).Scan(&githubLogin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("failed to look up github account for activity", "error", err, "user_id", parsedUserID)
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
+			}
 		} else if loginParam != "" {
 			// Fetch by login
 			githubLogin = &loginParam
 		} else {
 			// Get user ID from JWT (own profile)
 			sub, _ := c.Locals(auth.LocalUserID).(string)
-			userID, err := uuid.Parse(sub)
+			var userID uuid.UUID
+			userID, err = uuid.Parse(sub)
 			if err != nil {
 				return httpx.RespondError(c, fiber.StatusUnauthorized, "invalid_user", "")
 			}
-			err = h.db.Pool.QueryRow(c.Context(), `
+			if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT login
 FROM github_accounts
 WHERE user_id = $1
-`, userID).Scan(&githubLogin)
+`, userID).Scan(&githubLogin); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("failed to look up github account for activity", "error", err, "user_id", userID)
+				return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
+			}
+		}
+
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("failed to look up github account for contribution activity", "error", err)
+			return httpx.RespondError(c, fiber.StatusInternalServerError, "github_account_lookup_failed", "")
 		}
 
 		if githubLogin == nil || *githubLogin == "" {
@@ -589,7 +622,7 @@ SELECT
   p.id as project_id
 FROM github_issues i
 INNER JOIN projects p ON i.project_id = p.id
-WHERE i.author_login = $1 AND p.status = 'verified' AND i.created_at_github IS NOT NULL
+WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND i.created_at_github IS NOT NULL
 
 UNION ALL
 
@@ -605,7 +638,7 @@ SELECT
   p.id as project_id
 FROM github_pull_requests pr
 INNER JOIN projects p ON pr.project_id = p.id
-WHERE pr.author_login = $1 AND p.status = 'verified' AND pr.created_at_github IS NOT NULL
+WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND pr.created_at_github IS NOT NULL
 
 ORDER BY created_at_github DESC
 LIMIT $2 OFFSET $3
@@ -658,11 +691,11 @@ LIMIT $2 OFFSET $3
 SELECT 
   (SELECT COUNT(*) FROM github_issues i
    INNER JOIN projects p ON i.project_id = p.id
-   WHERE i.author_login = $1 AND p.status = 'verified' AND i.created_at_github IS NOT NULL)
+   WHERE i.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND i.created_at_github IS NOT NULL)
   +
   (SELECT COUNT(*) FROM github_pull_requests pr
    INNER JOIN projects p ON pr.project_id = p.id
-   WHERE pr.author_login = $1 AND p.status = 'verified' AND pr.created_at_github IS NOT NULL)
+   WHERE pr.author_login = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND pr.created_at_github IS NOT NULL)
 `, *githubLogin).Scan(&total)
 		if err != nil {
 			slog.Error("failed to count total activities", "error", err)

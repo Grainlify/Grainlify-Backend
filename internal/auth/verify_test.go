@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethCrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/stellar/go/strkey"
 )
 
 func TestNormalizeWalletType(t *testing.T) {
@@ -111,16 +112,18 @@ func TestVerifyStellarEd25519Signature(t *testing.T) {
 	message := LoginMessage("nonce-456")
 	signature := ed25519.Sign(priv, []byte(message))
 
-	if err := VerifySignature(WalletTypeStellarEd25519, "", message, hex.EncodeToString(signature), hex.EncodeToString(pub)); err != nil {
+	pubHex := hex.EncodeToString(pub)
+
+	if err := VerifySignature(WalletTypeStellarEd25519, pubHex, message, hex.EncodeToString(signature), pubHex); err != nil {
 		t.Fatalf("VerifySignature ed25519 returned error: %v", err)
 	}
-	if err := VerifySignature(WalletTypeStellarEd25519, "", message+"x", hex.EncodeToString(signature), hex.EncodeToString(pub)); err == nil {
+	if err := VerifySignature(WalletTypeStellarEd25519, pubHex, message+"x", hex.EncodeToString(signature), pubHex); err == nil {
 		t.Fatal("VerifySignature accepted ed25519 signature for wrong message")
 	}
-	if err := VerifySignature(WalletTypeStellarEd25519, "", message, "abcd", hex.EncodeToString(pub)); err == nil {
+	if err := VerifySignature(WalletTypeStellarEd25519, pubHex, message, "abcd", pubHex); err == nil {
 		t.Fatal("VerifySignature accepted malformed ed25519 signature")
 	}
-	if err := VerifySignature(WalletTypeStellarEd25519, "", message, hex.EncodeToString(signature), "abcd"); err == nil {
+	if err := VerifySignature(WalletTypeStellarEd25519, pubHex, message, hex.EncodeToString(signature), "abcd"); err == nil {
 		t.Fatal("VerifySignature accepted malformed ed25519 public key")
 	}
 }
@@ -133,30 +136,31 @@ func TestVerifyStellarSecp256k1Signature(t *testing.T) {
 	message := LoginMessage("nonce-789")
 	hash := sha256.Sum256([]byte(message))
 	signature := decredEcdsa.Sign(priv, hash[:])
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeCompressed())
 
 	if err := VerifySignature(
 		WalletTypeStellarSecp256k1,
-		"",
+		pubHex,
 		message,
 		hex.EncodeToString(signature.Serialize()),
-		hex.EncodeToString(priv.PubKey().SerializeCompressed()),
+		pubHex,
 	); err != nil {
 		t.Fatalf("VerifySignature secp256k1 returned error: %v", err)
 	}
 
 	if err := VerifySignature(
 		WalletTypeStellarSecp256k1,
-		"",
+		pubHex,
 		message+"x",
 		hex.EncodeToString(signature.Serialize()),
-		hex.EncodeToString(priv.PubKey().SerializeCompressed()),
+		pubHex,
 	); err == nil {
 		t.Fatal("VerifySignature accepted secp256k1 signature for wrong message")
 	}
-	if err := VerifySignature(WalletTypeStellarSecp256k1, "", message, "abcd", hex.EncodeToString(priv.PubKey().SerializeCompressed())); err == nil {
+	if err := VerifySignature(WalletTypeStellarSecp256k1, pubHex, message, "abcd", pubHex); err == nil {
 		t.Fatal("VerifySignature accepted malformed secp256k1 signature")
 	}
-	if err := VerifySignature(WalletTypeStellarSecp256k1, "", message, hex.EncodeToString(signature.Serialize()), "abcd"); err == nil {
+	if err := VerifySignature(WalletTypeStellarSecp256k1, pubHex, message, hex.EncodeToString(signature.Serialize()), "abcd"); err == nil {
 		t.Fatal("VerifySignature accepted malformed secp256k1 public key")
 	}
 }
@@ -175,13 +179,14 @@ func TestVerifyStellarSecp256k1CompactSignature(t *testing.T) {
 	compact := make([]byte, 64)
 	r.PutBytesUnchecked(compact[:32])
 	s.PutBytesUnchecked(compact[32:])
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeCompressed())
 
 	if err := VerifySignature(
 		WalletTypeStellarSecp256k1,
-		"",
+		pubHex,
 		message,
 		hex.EncodeToString(compact),
-		hex.EncodeToString(priv.PubKey().SerializeCompressed()),
+		pubHex,
 	); err != nil {
 		t.Fatalf("VerifySignature compact secp256k1 returned error: %v", err)
 	}
@@ -326,35 +331,88 @@ func TestVerifySignature_EdgeCases_StellarEd25519(t *testing.T) {
 	pubBHex := hex.EncodeToString(pubB)
 
 	// 1. Valid signature over a different message payload
-	err = VerifySignature(WalletTypeStellarEd25519, "", msgB, sigAHex, pubAHex)
+	err = VerifySignature(WalletTypeStellarEd25519, pubAHex, msgB, sigAHex, pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for message mismatch, got %v", err)
 	}
 
-	// 2. Signature from a different key
-	err = VerifySignature(WalletTypeStellarEd25519, "", msgA, sigAHex, pubBHex)
+	// 2. Signature from a different key (address matches the public_key
+	// parameter, so this isolates a signature/key mismatch, not an
+	// address/public_key mismatch)
+	err = VerifySignature(WalletTypeStellarEd25519, pubBHex, msgA, sigAHex, pubBHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for different key, got %v", err)
 	}
 
 	// 3. Truncated signature byte string
 	truncatedSigHex := hex.EncodeToString(sigA[:32]) // 32 bytes instead of 64
-	err = VerifySignature(WalletTypeStellarEd25519, "", msgA, truncatedSigHex, pubAHex)
+	err = VerifySignature(WalletTypeStellarEd25519, pubAHex, msgA, truncatedSigHex, pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for truncated sig, got %v", err)
 	}
 
 	// 4. Empty signature
-	err = VerifySignature(WalletTypeStellarEd25519, "", msgA, "", pubAHex)
+	err = VerifySignature(WalletTypeStellarEd25519, pubAHex, msgA, "", pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for empty sig, got %v", err)
 	}
 
 	// 5. Invalid public key length (e.g. 31 bytes instead of 32)
 	shortPubHex := hex.EncodeToString(pubA[:31])
-	err = VerifySignature(WalletTypeStellarEd25519, "", msgA, sigAHex, shortPubHex)
+	err = VerifySignature(WalletTypeStellarEd25519, pubAHex, msgA, sigAHex, shortPubHex)
 	if err == nil || err.Error() != "invalid public_key" {
 		t.Errorf("expected 'invalid public_key', got %v", err)
+	}
+}
+
+// TestVerifySignature_StellarAddressBinding_Ed25519 covers Issue #316: address
+// must cryptographically correspond to public_key, not just be an
+// unauthenticated label the caller supplies.
+func TestVerifySignature_StellarAddressBinding_Ed25519(t *testing.T) {
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey A failed: %v", err)
+	}
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey B failed: %v", err)
+	}
+
+	message := LoginMessage("nonce-addr-bind")
+	sig := ed25519.Sign(privA, []byte(message))
+	sigHex := hex.EncodeToString(sig)
+	pubAHex := hex.EncodeToString(pubA)
+
+	strkeyA, err := strkey.Encode(strkey.VersionByteAccountID, pubA)
+	if err != nil {
+		t.Fatalf("encode StrKey address: %v", err)
+	}
+	strkeyB, err := strkey.Encode(strkey.VersionByteAccountID, pubB)
+	if err != nil {
+		t.Fatalf("encode StrKey address: %v", err)
+	}
+
+	// A genuine signature from key A must NOT authenticate as key B's
+	// address — the core exploit this issue describes.
+	if err := VerifySignature(WalletTypeStellarEd25519, strkeyB, message, sigHex, pubAHex); err == nil {
+		t.Fatal("VerifySignature accepted key A's signature for key B's StrKey address")
+	}
+
+	// The correct StrKey address for the signing key must succeed.
+	if err := VerifySignature(WalletTypeStellarEd25519, strkeyA, message, sigHex, pubAHex); err != nil {
+		t.Fatalf("VerifySignature rejected the correct StrKey address: %v", err)
+	}
+
+	// The raw hex-encoded public key is also a documented address form and
+	// must succeed (case-insensitive, since hex has no case meaning).
+	if err := VerifySignature(WalletTypeStellarEd25519, strings.ToUpper(pubAHex), message, sigHex, pubAHex); err != nil {
+		t.Fatalf("VerifySignature rejected the raw-hex address form: %v", err)
+	}
+
+	// An address matching neither the StrKey nor the hex form of the actual
+	// key must be rejected outright.
+	if err := VerifySignature(WalletTypeStellarEd25519, hex.EncodeToString(pubB), message, sigHex, pubAHex); err == nil {
+		t.Fatal("VerifySignature accepted an address matching a different key's hex form")
 	}
 }
 
@@ -378,26 +436,27 @@ func TestVerifySignature_EdgeCases_StellarSecp256k1(t *testing.T) {
 	pubBHex := hex.EncodeToString(privB.PubKey().SerializeCompressed())
 
 	// 1. Valid signature over a different message payload
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgB, sigAHex, pubAHex)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubAHex, msgB, sigAHex, pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for message mismatch, got %v", err)
 	}
 
-	// 2. Signature from a different key
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, sigAHex, pubBHex)
+	// 2. Signature from a different key (address matches the public_key
+	// parameter, so this isolates a signature/key mismatch)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubBHex, msgA, sigAHex, pubBHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for different key, got %v", err)
 	}
 
 	// 3. Truncated signature byte string
 	truncatedSigHex := hex.EncodeToString(sigA.Serialize()[:30])
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, truncatedSigHex, pubAHex)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubAHex, msgA, truncatedSigHex, pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for truncated sig, got %v", err)
 	}
 
 	// 4. Empty signature
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, "", pubAHex)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubAHex, msgA, "", pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for empty sig, got %v", err)
 	}
@@ -411,18 +470,83 @@ func TestVerifySignature_EdgeCases_StellarSecp256k1(t *testing.T) {
 
 	// 6. Invalid signature bytes (valid hex, but wrong DER/compact format, covers parseSecp256k1Signature error branch)
 	invalidSigHex := "0102030405060708090a"
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, invalidSigHex, pubAHex)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubAHex, msgA, invalidSigHex, pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature', got %v", err)
 	}
 
 	// 7. Invalid hex character in signature and public key (covers decodeHex error branch in verifyStellarSecp256k1)
-	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, "not-a-hex-string", pubAHex)
+	err = VerifySignature(WalletTypeStellarSecp256k1, pubAHex, msgA, "not-a-hex-string", pubAHex)
 	if err == nil || err.Error() != "invalid signature" {
 		t.Errorf("expected 'invalid signature' for non-hex signature, got %v", err)
 	}
 	err = VerifySignature(WalletTypeStellarSecp256k1, "", msgA, sigAHex, "not-a-hex-string")
 	if err == nil || err.Error() != "invalid public_key" {
 		t.Errorf("expected 'invalid public_key' for non-hex public key, got %v", err)
+	}
+}
+
+// TestVerifySignature_StellarAddressBinding_Secp256k1 mirrors the Ed25519
+// address-binding coverage above (Issue #316). Stellar has no StrKey
+// encoding for secp256k1 keys, so the only documented address form here is
+// the raw hex public key.
+func TestVerifySignature_StellarAddressBinding_Secp256k1(t *testing.T) {
+	privA, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey A failed: %v", err)
+	}
+	privB, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey B failed: %v", err)
+	}
+
+	message := LoginMessage("nonce-secp-addr-bind")
+	hash := sha256.Sum256([]byte(message))
+	sig := decredEcdsa.Sign(privA, hash[:])
+	sigHex := hex.EncodeToString(sig.Serialize())
+	pubAHex := hex.EncodeToString(privA.PubKey().SerializeCompressed())
+	pubBHex := hex.EncodeToString(privB.PubKey().SerializeCompressed())
+
+	// A genuine signature from key A must not authenticate as key B's address.
+	if err := VerifySignature(WalletTypeStellarSecp256k1, pubBHex, message, sigHex, pubAHex); err == nil {
+		t.Fatal("VerifySignature accepted key A's signature for key B's address")
+	}
+
+	// The correct hex address (any case) for the signing key must succeed.
+	if err := VerifySignature(WalletTypeStellarSecp256k1, strings.ToUpper(pubAHex), message, sigHex, pubAHex); err != nil {
+		t.Fatalf("VerifySignature rejected the correct address: %v", err)
+	}
+}
+
+// TestNormalizeAddress_PreservesStrKeyCase covers Issue #316's suggested
+// execution point 5: StrKey addresses are case-sensitive and checksummed,
+// so lowercasing one (as NormalizeAddress previously did unconditionally)
+// would make it permanently fail the address/public-key binding check in
+// VerifySignature. Only the non-StrKey (raw hex) form should be lowercased.
+func TestNormalizeAddress_PreservesStrKeyCase(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey failed: %v", err)
+	}
+	strkeyAddr, err := strkey.Encode(strkey.VersionByteAccountID, pub)
+	if err != nil {
+		t.Fatalf("encode StrKey address: %v", err)
+	}
+
+	got, err := NormalizeAddress(WalletTypeStellarEd25519, " "+strkeyAddr+" ")
+	if err != nil {
+		t.Fatalf("NormalizeAddress returned error: %v", err)
+	}
+	if got != strkeyAddr {
+		t.Fatalf("NormalizeAddress altered a StrKey address: got %q, want %q", got, strkeyAddr)
+	}
+
+	// Raw hex addresses are still lowercased as before.
+	got, err = NormalizeAddress(WalletTypeStellarEd25519, " ABCDEF ")
+	if err != nil {
+		t.Fatalf("NormalizeAddress returned error: %v", err)
+	}
+	if got != "abcdef" {
+		t.Fatalf("normalized hex address = %q, want abcdef", got)
 	}
 }

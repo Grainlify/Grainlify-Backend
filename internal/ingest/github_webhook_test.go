@@ -737,7 +737,8 @@ func TestIngest_InstallationRepositoriesAdded_RestoresProject(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type mockDBPool struct {
-	execFunc func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	execFunc     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	queryRowFunc func(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 func (m *mockDBPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -752,6 +753,9 @@ func (m *mockDBPool) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 }
 
 func (m *mockDBPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if m.queryRowFunc != nil {
+		return m.queryRowFunc(ctx, sql, args...)
+	}
 	return nil
 }
 
@@ -768,6 +772,13 @@ func (m *mockDBPool) Close() {}
 func (m *mockDBPool) Config() *pgxpool.Config {
 	return nil
 }
+
+
+// errRow is a fake pgx.Row whose Scan always returns a fixed error --
+// used to simulate a failed QueryRow without a real database connection.
+type errRow struct{ err error }
+
+func (r errRow) Scan(dest ...any) error { return r.err }
 
 func TestIngest_InstallationRepositoriesAdded_ExecError(t *testing.T) {
 	ctx := context.Background()
@@ -863,3 +874,43 @@ func TestIngest_InstallationRepositoriesAdded_ZeroRowsAffected(t *testing.T) {
 	}
 }
 
+
+
+func TestIngest_TransientProjectLookupError_AbortsBeforeDedup(t *testing.T) {
+	ctx := context.Background()
+
+	var execCalled bool
+	mockPool := &mockDBPool{
+		queryRowFunc: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "FROM projects") {
+				return errRow{err: errors.New("connection reset by peer")}
+			}
+			return errRow{err: pgx.ErrNoRows}
+		},
+		execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			execCalled = true
+			return pgconn.NewCommandTag("INSERT 0 1"), nil
+		},
+	}
+
+	ing := &ingest.GitHubWebhookIngestor{Pool: mockPool}
+
+	ev := events.GitHubWebhookReceived{
+		DeliveryID:   "transient-lookup-" + time.Now().Format("20060102150405.000000000"),
+		Event:        "issues",
+		Action:       "opened",
+		RepoFullName: "acme/widget",
+		Payload:      json.RawMessage(`{"action":"opened"}`),
+	}
+
+	err := ing.Ingest(ctx, ev)
+	if err == nil {
+		t.Fatal("expected Ingest to return an error on a transient project lookup failure")
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("returned error should wrap the transient lookup failure, not ErrNoRows: %v", err)
+	}
+	if execCalled {
+		t.Error("Exec must not be called -- a transient lookup error should abort before the dedup/github_events transaction runs")
+	}
+}

@@ -174,9 +174,9 @@ WHERE id = $1
 					}
 				}
 
-				if sessionURL == "" && *existingSessionID != "" {
-					sessionURL = fmt.Sprintf("https://verify.didit.me/session/%s", *existingSessionID)
-				}
+			// If sessionURL is still empty here, it stays empty. We never fabricate
+			// a URL from the raw session_id UUID, since Didit's real verification
+			// links use a different short ID that we don't have access to
 
 				if h.didit != nil {
 					decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
