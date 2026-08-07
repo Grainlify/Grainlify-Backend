@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,16 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+)
+
+// GitHub App IDs are numeric; slugs are alphanumeric-with-hyphens. Validating
+// against these before building the install URL prevents a malformed config
+// value (e.g. an unstripped inline .env comment) from silently producing a
+// broken-but-200-OK URL that redirects to GitHub's generic Apps directory
+// instead of the intended app's install page.
+var (
+	githubAppIDPattern   = regexp.MustCompile(`^[0-9]+$`)
+	githubAppSlugPattern = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
 )
 
 type GitHubAppHandler struct {
@@ -35,7 +46,11 @@ func (h *GitHubAppHandler) StartInstallation() fiber.Handler {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
 
-		if h.cfg.GitHubAppID == "" {
+		appID := strings.TrimSpace(h.cfg.GitHubAppID)
+		if !githubAppIDPattern.MatchString(appID) {
+			slog.Error("GitHub App installation blocked: GITHUB_APP_ID is not a valid numeric ID",
+				"github_app_id", h.cfg.GitHubAppID,
+			)
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"error":   "github_app_not_configured",
 				"message": "GitHub App is not configured. Please contact support.",
@@ -63,10 +78,19 @@ VALUES ($1, $2, 'github_app_install', $3)
 		// Build GitHub App installation URL
 		// Format: https://github.com/apps/{app-slug}/installations/new
 		// Or: https://github.com/apps/{app-slug}/installations/new?state={state}
-		appSlug := h.cfg.GitHubAppSlug
+		appSlug := strings.TrimSpace(h.cfg.GitHubAppSlug)
 		if appSlug == "" {
 			// Fallback: use app ID if slug not configured
-			appSlug = h.cfg.GitHubAppID
+			appSlug = appID
+		}
+		if !githubAppSlugPattern.MatchString(appSlug) {
+			slog.Error("GitHub App installation blocked: GITHUB_APP_SLUG is not a valid app slug",
+				"github_app_slug", h.cfg.GitHubAppSlug,
+			)
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error":   "github_app_not_configured",
+				"message": "GitHub App is not configured. Please contact support.",
+			})
 		}
 
 		installURL := "https://github.com/apps/" + appSlug + "/installations/new"
@@ -97,7 +121,7 @@ VALUES ($1, $2, 'github_app_install', $3)
 		slog.Info("GitHub App installation started",
 			"user_id", userID,
 			"app_slug", appSlug,
-			"app_id", h.cfg.GitHubAppID,
+			"app_id", appID,
 			"state", state,
 			"install_url", installURL,
 			"expected_callback_url", h.cfg.PublicBaseURL+"/auth/github/app/install/callback",
