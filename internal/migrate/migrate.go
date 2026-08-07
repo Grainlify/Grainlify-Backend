@@ -124,6 +124,39 @@ func getLatestMigrationVersion(src source.Driver) (uint, error) {
 	return latestVersion, nil
 }
 
+// nonPooledConnConfig returns a connection config safe for golang-migrate's
+// session-level advisory locks. Session-level advisory locks - which
+// golang-migrate's postgres driver uses to stop concurrent migrations from
+// stepping on each other - are unreliable over Neon's PgBouncer-style
+// pooled endpoint: a pooled connection isn't guaranteed to map 1:1 to a
+// stable Postgres session, so a lock acquired there can be left stuck if the
+// holding connection is torn down abnormally (e.g. the process crashes
+// mid-migration). That happened in production: a lock sat unreleased for
+// the better part of an hour and every subsequent deploy failed to acquire
+// it, taking the API down.
+//
+// Neon's documented fix is to use the direct (non-pooled) endpoint for
+// anything needing session-level features - derive it from the pooled host
+// by stripping "-pooler", Neon's own naming convention, rather than
+// requiring a second connection string to configure. If the host isn't a
+// Neon pooled endpoint (e.g. local/CI Postgres) or the derived DSN fails to
+// parse, cfg is returned unchanged.
+func nonPooledConnConfig(cfg *pgx.ConnConfig) *pgx.ConnConfig {
+	if !strings.Contains(cfg.Host, "-pooler.") {
+		return cfg
+	}
+	directDSN := strings.Replace(cfg.ConnString(), "-pooler.", ".", 1)
+	directConfig, err := pgx.ParseConfig(directDSN)
+	if err != nil {
+		slog.Warn("failed to derive direct (non-pooled) migration connection, falling back to the pooled endpoint",
+			"error", err,
+		)
+		return cfg
+	}
+	slog.Info("using direct (non-pooled) connection for migrations", "host", directConfig.Host)
+	return directConfig
+}
+
 func Up(ctx context.Context, pool db.DBPool) error {
 	if pool == nil {
 		return fmt.Errorf("db pool is nil")
@@ -141,7 +174,8 @@ func Up(ctx context.Context, pool db.DBPool) error {
 	slog.Info("embedded migrations loaded")
 
 	slog.Info("opening database connection for migrations")
-	sqlDB := stdlib.OpenDB(*pool.Config().ConnConfig)
+	migrateConnConfig := nonPooledConnConfig(pool.Config().ConnConfig)
+	sqlDB := stdlib.OpenDB(*migrateConnConfig)
 	defer sqlDB.Close()
 
 	// Add random jitter (0-2 seconds) to avoid thundering herd problem
