@@ -1,0 +1,86 @@
+name: CI
+
+# Scoped to this working branch, not main - production is deployed by hand
+# from this exact branch today. Gating automation on an eventual main merge
+# (undated, non-trivial given the structural divergence between branches)
+# would mean indefinitely more manual deploys. Revisit this trigger if/when
+# this branch merges into main.
+on:
+  push:
+    branches: [restore/initial-commit-with-auth-fixes]
+  pull_request:
+    branches: [restore/initial-commit-with-auth-fixes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, vet, and test
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ci-test-${{ github.ref }}
+      cancel-in-progress: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: grainlify_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          TEST_DB_URL: postgres://postgres:postgres@localhost:5432/grainlify_test?sslmode=disable
+        # -p 1 is deliberate, not cosmetic: several integration tests
+        # (issue-application state machine, migrations) share this one
+        # Postgres database and mutate global state directly
+        # (schema_migrations, broad table state between tests). Go's default
+        # concurrent-per-package test execution would race on that shared
+        # state without -p 1 serializing it.
+        run: go test -count=1 -p 1 -cover ./...
+
+  deploy:
+    name: Deploy to Railway
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      # Never cancel a deploy mid-flight; queue instead.
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service grainlify --detach

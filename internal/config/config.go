@@ -64,6 +64,13 @@ type Config struct {
 	EscrowContractID         string
 	ProgramEscrowContractID  string
 	TokenContractID          string
+
+	// Notification emails, sent via Mailercloud
+	// (https://apidoc.mailercloud.com). If MailerCloudAPIKey is empty,
+	// email sending is disabled - in-app notifications still work either way.
+	MailerCloudAPIKey string
+	EmailFromAddress  string
+	EmailFromName     string
 }
 
 func Load() Config {
@@ -123,6 +130,10 @@ func Load() Config {
 		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
 		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
 		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
+
+		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
+		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),
+		EmailFromName:     getEnv("EMAIL_FROM_NAME", "Grainlify"),
 	}
 }
 

@@ -16,6 +16,10 @@ type OAuthConfig struct {
 	RedirectURL  string
 }
 
+// tokenEndpoint is a var (not a const) so tests can point it at an
+// httptest.Server instead of the real GitHub API.
+var tokenEndpoint = "https://github.com/login/oauth/access_token"
+
 func AuthorizeURL(clientID string, redirectURL string, state string, scopes []string) (string, error) {
 	if clientID == "" || redirectURL == "" {
 		return "", fmt.Errorf("github oauth not configured")
@@ -66,7 +70,7 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 	}
 	b, _ := json.Marshal(body)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, bytes.NewReader(b))
 	if err != nil {
 		return TokenResponse{}, err
 	}
@@ -93,24 +97,3 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 	}
 	return tr, nil
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

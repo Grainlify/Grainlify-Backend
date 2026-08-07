@@ -14,22 +14,22 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/migrations"
 )
 
 // NeedsMigration checks if migrations are needed by comparing the current database version
 // with available migrations. Returns true if migrations are needed, false otherwise.
 // This function queries the database directly to avoid acquiring locks.
-func NeedsMigration(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+func NeedsMigration(ctx context.Context, pool db.DBPool) (bool, error) {
 	if pool == nil {
 		return false, fmt.Errorf("db pool is nil")
 	}
 
 	slog.Info("checking if migrations are needed")
-	
+
 	// Query the schema_migrations table directly to avoid lock acquisition
 	var currentVersion uint
 	var dirty bool
@@ -38,7 +38,7 @@ func NeedsMigration(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 		FROM schema_migrations 
 		LIMIT 1
 	`).Scan(&currentVersion, &dirty)
-	
+
 	if err != nil {
 		// If table doesn't exist (relation does not exist) or no rows, assume first-time migration needed
 		if err == pgx.ErrNoRows {
@@ -124,7 +124,7 @@ func getLatestMigrationVersion(src source.Driver) (uint, error) {
 	return latestVersion, nil
 }
 
-func Up(ctx context.Context, pool *pgxpool.Pool) error {
+func Up(ctx context.Context, pool db.DBPool) error {
 	if pool == nil {
 		return fmt.Errorf("db pool is nil")
 	}
@@ -235,7 +235,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	_ = ctx
 
 	slog.Info("running database migrations")
-	
+
 	// Try to run migrations with simple retry logic
 	// Use fixed short delays instead of exponential backoff
 	maxRetries := 20
@@ -250,20 +250,20 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 			)
 			time.Sleep(500 * time.Millisecond)
 		}
-		
+
 		err := m.Up()
 		if err == nil || err == migrate.ErrNoChange {
 			lastErr = err
 			break
 		}
-		
+
 		// Check if it's a lock error (timeout or can't acquire)
 		errStr := err.Error()
-		isLockError := contains(errStr, "timeout") || 
-			contains(errStr, "lock") || 
+		isLockError := contains(errStr, "timeout") ||
+			contains(errStr, "lock") ||
 			contains(errStr, "can't acquire") ||
 			contains(errStr, "55P03")
-		
+
 		if attempt < maxRetries && isLockError {
 			slog.Info("migration lock error, will retry",
 				"attempt", attempt,
@@ -273,12 +273,12 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 			lastErr = err
 			continue
 		}
-		
+
 		// For other errors or final attempt, return immediately
 		lastErr = err
 		break
 	}
-	
+
 	if lastErr != nil && lastErr != migrate.ErrNoChange {
 		slog.Error("migration failed after retries",
 			"error", lastErr,
@@ -286,7 +286,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 		)
 		return lastErr
 	}
-	
+
 	err = lastErr
 
 	if err == migrate.ErrNoChange {
@@ -310,5 +310,3 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
-
-

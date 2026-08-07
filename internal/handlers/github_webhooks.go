@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/ingest"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 type GitHubWebhooksHandler struct {
@@ -24,10 +25,10 @@ type GitHubWebhooksHandler struct {
 	ing *ingest.GitHubWebhookIngestor
 }
 
-func NewGitHubWebhooksHandler(cfg config.Config, d *db.DB, b bus.Bus) *GitHubWebhooksHandler {
+func NewGitHubWebhooksHandler(cfg config.Config, d *db.DB, b bus.Bus, notifSvc *notifications.Service) *GitHubWebhooksHandler {
 	var ingestor *ingest.GitHubWebhookIngestor
 	if d != nil && d.Pool != nil {
-		ingestor = &ingest.GitHubWebhookIngestor{Pool: d.Pool}
+		ingestor = &ingest.GitHubWebhookIngestor{Pool: d.Pool, Notify: notifSvc}
 	}
 	return &GitHubWebhooksHandler{cfg: cfg, db: d, bus: b, ing: ingestor}
 }
@@ -245,7 +246,3 @@ type ghWebhookEnvelope struct {
 type ghRepoPayload struct {
 	FullName string `json:"full_name"`
 }
-
- 
-
-

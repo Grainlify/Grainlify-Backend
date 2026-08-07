@@ -10,7 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 type User struct {
@@ -29,7 +30,7 @@ type Nonce struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-func CreateNonce(ctx context.Context, pool *pgxpool.Pool, walletType WalletType, address string, ttl time.Duration) (Nonce, error) {
+func CreateNonce(ctx context.Context, pool db.DBPool, walletType WalletType, address string, ttl time.Duration) (Nonce, error) {
 	if pool == nil {
 		return Nonce{}, fmt.Errorf("db not configured")
 	}
@@ -56,7 +57,7 @@ type VerifyResult struct {
 	Wallet Wallet `json:"wallet"`
 }
 
-func ConsumeNonceAndUpsertUser(ctx context.Context, pool *pgxpool.Pool, walletType WalletType, address string, nonce string, publicKey string) (VerifyResult, error) {
+func ConsumeNonceAndUpsertUser(ctx context.Context, pool db.DBPool, walletType WalletType, address string, nonce string, publicKey string) (VerifyResult, error) {
 	if pool == nil {
 		return VerifyResult{}, fmt.Errorf("db not configured")
 	}
@@ -153,24 +154,3 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

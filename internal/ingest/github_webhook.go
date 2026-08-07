@@ -3,17 +3,19 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 type GitHubWebhookIngestor struct {
-	Pool *pgxpool.Pool
+	Pool   db.DBPool
+	Notify *notifications.Service // optional; nil disables the pr_merged notification
 }
 
 func (i *GitHubWebhookIngestor) Ingest(ctx context.Context, e events.GitHubWebhookReceived) error {
@@ -74,6 +76,16 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 
 		if (e.Event == "pull_request" || e.Event == "pull_request_review") && env.PullRequest != nil {
 			pr := env.PullRequest
+
+			// Read the pre-upsert merged state so we can detect a genuine
+			// false/unset -> true transition below, not just re-notify on
+			// every subsequent webhook for an already-merged PR (reviews,
+			// comments, etc. all re-deliver "pull_request"-adjacent events).
+			var wasMerged bool
+			_ = i.Pool.QueryRow(ctx, `
+SELECT COALESCE(merged, false) FROM github_pull_requests WHERE project_id = $1 AND github_pr_id = $2
+`, *projectID, pr.ID).Scan(&wasMerged)
+
 			_, _ = i.Pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, merged_at_github, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -91,6 +103,16 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   closed_at_github = EXCLUDED.closed_at_github,
   last_seen_at = now()
 `, *projectID, pr.ID, pr.Number, pr.State, pr.Title, pr.Body, pr.User.Login, pr.HTMLURL, pr.Merged, pr.MergedAt, pr.CreatedAt, pr.UpdatedAt, pr.ClosedAt)
+
+			if !wasMerged && pr.Merged && i.Notify != nil {
+				if authorUserID, ok := notifications.ResolveUserIDByGitHubLogin(ctx, &db.DB{Pool: i.Pool}, pr.User.Login); ok {
+					i.Notify.Notify(ctx, authorUserID, notifications.TypePRMerged,
+						fmt.Sprintf("Your PR #%d was merged", pr.Number),
+						fmt.Sprintf("Your pull request \"%s\" (#%d) in %s was merged.", pr.Title, pr.Number, repoFullName),
+						fmt.Sprintf("/dashboard?tab=browse&project=%s", *projectID),
+					)
+				}
+			}
 		}
 	}
 
@@ -212,9 +234,9 @@ WHERE github_full_name = $1
 }
 
 type ghWebhookEnvelope struct {
-	Action      string               `json:"action"`
-	Repository  *ghRepoPayload       `json:"repository"`
-	Issue       *ghIssuePayload      `json:"issue"`
+	Action      string                `json:"action"`
+	Repository  *ghRepoPayload        `json:"repository"`
+	Issue       *ghIssuePayload       `json:"issue"`
 	PullRequest *ghPullRequestPayload `json:"pull_request"`
 }
 
@@ -255,11 +277,11 @@ type ghPullRequestPayload struct {
 }
 
 type ghInstallationPayload struct {
-	Action                string                    `json:"action"`
-	Installation           ghInstallationInfo        `json:"installation"`
-	RepositoriesRemoved    []ghRepoPayload           `json:"repositories_removed,omitempty"`
-	RepositoriesAdded      []ghRepoPayload           `json:"repositories_added,omitempty"`
-	RepositorySelection    string                    `json:"repository_selection,omitempty"`
+	Action              string             `json:"action"`
+	Installation        ghInstallationInfo `json:"installation"`
+	RepositoriesRemoved []ghRepoPayload    `json:"repositories_removed,omitempty"`
+	RepositoriesAdded   []ghRepoPayload    `json:"repositories_added,omitempty"`
+	RepositorySelection string             `json:"repository_selection,omitempty"`
 }
 
 type ghInstallationInfo struct {
@@ -272,10 +294,3 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
-
-
-
-
-
-
-

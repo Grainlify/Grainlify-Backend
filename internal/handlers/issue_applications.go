@@ -15,16 +15,17 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
-
 type IssueApplicationsHandler struct {
-	cfg config.Config
-	db  *db.DB
+	cfg    config.Config
+	db     *db.DB
+	notify *notifications.Service
 }
 
-func NewIssueApplicationsHandler(cfg config.Config, d *db.DB) *IssueApplicationsHandler {
-	return &IssueApplicationsHandler{cfg: cfg, db: d}
+func NewIssueApplicationsHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *IssueApplicationsHandler {
+	return &IssueApplicationsHandler{cfg: cfg, db: d, notify: notify}
 }
 
 type applyToIssueRequest struct {
@@ -78,14 +79,15 @@ func (h *IssueApplicationsHandler) Apply() fiber.Handler {
 		var authorLogin string
 		var assigneesJSON []byte
 		var githubIssueID int64
+		var ownerUserID uuid.UUID
 		if err := h.db.Pool.QueryRow(c.Context(), `
-SELECT p.github_full_name, gi.state, gi.author_login, gi.assignees, COALESCE(gi.url, ''), gi.github_issue_id
+SELECT p.github_full_name, gi.state, gi.author_login, gi.assignees, COALESCE(gi.url, ''), gi.github_issue_id, p.owner_user_id
 FROM projects p
 JOIN github_issues gi ON gi.project_id = p.id
 WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
   AND gi.number = $2
 LIMIT 1
-`, projectID, issueNumber).Scan(&fullName, &state, &authorLogin, &assigneesJSON, &issueURL, &githubIssueID); err != nil {
+`, projectID, issueNumber).Scan(&fullName, &state, &authorLogin, &assigneesJSON, &issueURL, &githubIssueID, &ownerUserID); err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "issue_not_found"})
 		}
 
@@ -119,6 +121,7 @@ LIMIT 1
 		if issueURL == "" {
 			issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", fullName, issueNumber)
 		}
+		applicationLinkPath := fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID)
 		commentBody := fmt.Sprintf("**📋 Grainlify Application**\n\n**@%s has applied to work on this issue as part of the Grainlify program.**\n\n%s\n\n---\n\n**Repo Maintainers:** To accept this application, [review their application](%s) or [assign @%s](%s) to this issue.",
 			linked.Login, quotedMsg, reviewURL, linked.Login, issueURL)
 		gh := github.NewClient()
@@ -147,12 +150,18 @@ SET comments = COALESCE(comments, '[]'::jsonb) || $3::jsonb,
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
 
+		h.notify.Notify(c.Context(), ownerUserID, notifications.TypeIssueApplicationSubmitted,
+			fmt.Sprintf("New application from @%s", linked.Login),
+			fmt.Sprintf("@%s applied to work on issue #%d in %s.", linked.Login, issueNumber, fullName),
+			applicationLinkPath,
+		)
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
@@ -263,9 +272,9 @@ WHERE project_id = $1 AND number = $2
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"ok": true,
 			"comment": fiber.Map{
-				"id": ghComment.ID,
-				"body": ghComment.Body,
-				"user": fiber.Map{"login": ghComment.User.Login},
+				"id":         ghComment.ID,
+				"body":       ghComment.Body,
+				"user":       fiber.Map{"login": ghComment.User.Login},
 				"created_at": ghComment.CreatedAt,
 				"updated_at": ghComment.UpdatedAt,
 			},
@@ -494,6 +503,14 @@ WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
 		}
 
+		if assigneeUserID, ok := notifications.ResolveUserIDByGitHubLogin(c.Context(), h.db, req.Assignee); ok {
+			h.notify.Notify(c.Context(), assigneeUserID, notifications.TypeIssueAssigned,
+				fmt.Sprintf("You've been assigned to issue #%d", issueNumber),
+				fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
+				fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID),
+			)
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -691,7 +708,16 @@ UPDATE github_issues SET comments = COALESCE(comments, '[]'::jsonb) || $3::jsonb
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
 
+		if applicantUserID, ok := notifications.ResolveUserIDByGitHubLogin(c.Context(), h.db, req.Assignee); ok {
+			var githubIssueID int64
+			_ = h.db.Pool.QueryRow(c.Context(), `SELECT github_issue_id FROM github_issues WHERE project_id = $1 AND number = $2`, projectID, issueNumber).Scan(&githubIssueID)
+			h.notify.Notify(c.Context(), applicantUserID, notifications.TypeIssueApplicationRejected,
+				fmt.Sprintf("Application not accepted for issue #%d", issueNumber),
+				fmt.Sprintf("Your application for issue #%d in %s was not accepted this time.", issueNumber, fullName),
+				fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID),
+			)
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
-

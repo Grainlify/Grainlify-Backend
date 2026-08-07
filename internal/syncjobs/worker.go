@@ -11,22 +11,22 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
 
 type Worker struct {
-	cfg     config.Config
-	pool    *pgxpool.Pool
-	limiter *rate.Limiter
-	gh      *github.Client
+	cfg      config.Config
+	pool     db.DBPool
+	limiter  *rate.Limiter
+	gh       *github.Client
 	workerID string
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool) *Worker {
+func New(cfg config.Config, pool db.DBPool) *Worker {
 	return &Worker{
 		cfg:      cfg,
 		pool:     pool,
@@ -202,7 +202,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			assigneesJSON, _ := json.Marshal(it.Assignees)
 			// Convert labels to JSONB (array of {name, color} objects)
 			labelsJSON, _ := json.Marshal(it.Labels)
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -244,7 +244,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					)
 				}
 			}
-			
+
 			// Fetch comments for this issue (if comments_count > 0)
 			var commentsJSON []byte = []byte("[]")
 			if it.Comments > 0 {
@@ -255,7 +255,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 					}
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
@@ -277,7 +277,7 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 `, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt)
 		}
 	}
-	
+
 	slog.Info("sync issues completed",
 		"project_id", projectID,
 		"repo", fullName,
@@ -313,7 +313,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 
 		for _, it := range items {
 			totalPRs++
-			
+
 			// Parse date strings from GitHub API
 			var createdAt, updatedAt, closedAt, mergedAt *time.Time
 			if it.CreatedAt != nil && *it.CreatedAt != "" {
@@ -336,7 +336,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 					mergedAt = &t
 				}
 			}
-			
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -366,7 +366,3 @@ func hostname() string {
 	}
 	return h
 }
-
-
-
-
