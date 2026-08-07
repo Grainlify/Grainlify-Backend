@@ -20,6 +20,10 @@ func NewClient() *Client {
 	}
 }
 
+// userAPIURL is a var (not a const) so tests can point it at an
+// httptest.Server instead of the real GitHub API.
+var userAPIURL = "https://api.github.com/user"
+
 type User struct {
 	ID        int64  `json:"id"`
 	Login     string `json:"login"`
@@ -39,7 +43,7 @@ type Email struct {
 }
 
 func (c *Client) GetUser(ctx context.Context, accessToken string) (User, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userAPIURL, nil)
 	if err != nil {
 		return User{}, err
 	}
@@ -105,26 +109,25 @@ func (c *Client) GetPrimaryEmail(ctx context.Context, accessToken string) (strin
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Find primary email
 	for _, email := range emails {
 		if email.Primary && email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no primary verified email, return first verified email
 	for _, email := range emails {
 		if email.Verified {
 			return email.Email, nil
 		}
 	}
-	
+
 	// If no verified email, return first email
 	if len(emails) > 0 {
 		return emails[0].Email, nil
 	}
-	
+
 	return "", fmt.Errorf("no email found")
 }
-

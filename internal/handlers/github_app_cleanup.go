@@ -5,19 +5,18 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/jagadeesh/grainlify/backend/internal/config"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
 
 // GitHubAppCleanupHandler handles periodic cleanup of uninstalled GitHub Apps
 type GitHubAppCleanupHandler struct {
 	cfg  config.Config
-	pool *pgxpool.Pool
+	pool db.DBPool
 }
 
-func NewGitHubAppCleanupHandler(cfg config.Config, pool *pgxpool.Pool) *GitHubAppCleanupHandler {
+func NewGitHubAppCleanupHandler(cfg config.Config, pool db.DBPool) *GitHubAppCleanupHandler {
 	return &GitHubAppCleanupHandler{
 		cfg:  cfg,
 		pool: pool,
@@ -143,12 +142,12 @@ WHERE github_app_installation_id = $1
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		(s == substr || 
-		 (len(s) > len(substr) && 
-		  (s[:len(substr)] == substr || 
-		   s[len(s)-len(substr):] == substr || 
-		   containsSubstring(s, substr))))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			(len(s) > len(substr) &&
+				(s[:len(substr)] == substr ||
+					s[len(s)-len(substr):] == substr ||
+					containsSubstring(s, substr))))
 }
 
 func containsSubstring(s, substr string) bool {
@@ -159,4 +158,3 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
-

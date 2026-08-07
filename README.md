@@ -398,6 +398,17 @@ Patchwork is:
 
 an open-source contribution coordination layer with verifiable payouts.
 
+## 16. Testing
+
+```bash
+make test-db-create   # once, creates a local grainlify_test database
+make test              # go vet + go test -p 1 -cover ./...
+```
+
+Tests that need a real database read `TEST_DB_URL`; if it's unset they `t.Skip` rather than fail, so plain `go test ./...` also stays green with no Postgres running. `make test` sets it for you against the local `grainlify_test` database.
+
+CI (`.github/workflows/ci.yml`) runs the same suite against a `postgres:16` service container and gates deploys on it passing.
+
 
 
 

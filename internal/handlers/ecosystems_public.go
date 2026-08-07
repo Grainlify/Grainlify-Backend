@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
@@ -41,7 +43,7 @@ FROM ecosystems e
 WHERE e.id = $1 AND e.status = 'active'
 `, ecoID).Scan(&id, &slug, &name, &desc, &website, &logoURL, &status, &createdAt, &updatedAt, &about, &linksJSON, &keyAreasJSON, &technologiesJSON)
 		if err != nil {
-			if err.Error() == "no rows in result set" {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ecosystem_not_found"})
 			}
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "ecosystem_lookup_failed"})
@@ -76,7 +78,7 @@ SELECT
   ), 0),
   COALESCE((SELECT COUNT(*) FROM github_issues gi INNER JOIN projects p ON p.id = gi.project_id WHERE p.ecosystem_id = $1 AND p.deleted_at IS NULL AND p.status = 'verified' AND p.needs_metadata = false AND gi.state = 'open'), 0),
   COALESCE((SELECT COUNT(*) FROM github_pull_requests gpr INNER JOIN projects p ON p.id = gpr.project_id WHERE p.ecosystem_id = $1 AND p.deleted_at IS NULL AND p.status = 'verified' AND p.needs_metadata = false AND gpr.state = 'open'), 0)
-`, ecoID, ecoID, ecoID, ecoID).Scan(&projectCount, &contributorsCount, &openIssuesCount, &openPRsCount)
+`, ecoID).Scan(&projectCount, &contributorsCount, &openIssuesCount, &openPRsCount)
 
 		out := fiber.Map{
 			"id":                   id.String(),

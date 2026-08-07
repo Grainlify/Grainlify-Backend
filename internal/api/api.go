@@ -15,7 +15,9 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/email"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 type Deps struct {
@@ -143,6 +145,16 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/health", handlers.Health())
 	app.Get("/ready", handlers.Ready(deps.DB))
 
+	// A nil *MailerCloudMailer boxed directly into the email.Mailer interface
+	// would be a non-nil interface wrapping a nil pointer (classic Go
+	// gotcha) - Service checks "mailer != nil" to decide whether to attempt
+	// sending, so this must stay a genuine nil interface when disabled.
+	var mailer email.Mailer
+	if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
+		mailer = m
+	}
+	notifSvc := notifications.New(deps.DB, mailer, cfg.FrontendBaseURL)
+
 	authHandler := handlers.NewAuthHandler(cfg, deps.DB)
 	authGroup := app.Group("/auth")
 	app.Get("/me", auth.RequireAuth(cfg.JWTSecret), authHandler.Me())
@@ -226,7 +238,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/projects/:id/prs", auth.RequireAuth(cfg.JWTSecret), data.PRs())
 	app.Get("/projects/:id/events", auth.RequireAuth(cfg.JWTSecret), data.Events())
 
-	issueApps := handlers.NewIssueApplicationsHandler(cfg, deps.DB)
+	issueApps := handlers.NewIssueApplicationsHandler(cfg, deps.DB, notifSvc)
 	app.Post("/projects/:id/issues/:number/apply", auth.RequireAuth(cfg.JWTSecret), issueApps.Apply())
 	app.Post("/projects/:id/issues/:number/bot-comment", auth.RequireAuth(cfg.JWTSecret), issueApps.PostBotComment())
 	app.Post("/projects/:id/issues/:number/withdraw", auth.RequireAuth(cfg.JWTSecret), issueApps.Withdraw())
@@ -253,7 +265,17 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.Create())
 	adminGroup.Delete("/open-source-week/events/:id", auth.RequireRole("admin"), oswAdmin.Delete())
 
-	webhooks := handlers.NewGitHubWebhooksHandler(cfg, deps.DB, deps.Bus)
+	// Notifications (in-app list/read + per-type email/in-app preferences)
+	notif := handlers.NewNotificationsHandler(deps.DB)
+	notifGroup := app.Group("/notifications", auth.RequireAuth(cfg.JWTSecret))
+	notifGroup.Get("/", notif.List())
+	notifGroup.Get("/unread-count", notif.UnreadCount())
+	notifGroup.Post("/read-all", notif.MarkAllRead())
+	notifGroup.Post("/:id/read", notif.MarkRead())
+	notifGroup.Get("/preferences", notif.GetPreferences())
+	notifGroup.Put("/preferences", notif.UpdatePreferences())
+
+	webhooks := handlers.NewGitHubWebhooksHandler(cfg, deps.DB, deps.Bus, notifSvc)
 	// Register webhook endpoint with explicit OPTIONS support for CORS
 	app.Options("/webhooks/github", func(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
