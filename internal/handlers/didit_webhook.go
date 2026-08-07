@@ -1,9 +1,15 @@
 package handlers
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -12,6 +18,35 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 )
+
+// diditSignatureMaxAgeSeconds bounds how old an X-Timestamp may be before a
+// webhook is rejected as a replay, per Didit's documented 5-minute window.
+const diditSignatureMaxAgeSeconds = 300
+
+// verifyDiditSignature checks the HMAC-SHA256 X-Signature header (computed
+// by Didit over the exact raw request body bytes) against the configured
+// webhook secret, plus the X-Timestamp replay window. Without this, anyone
+// who learns or guesses a session_id can POST a forged status update and
+// have it applied directly - the session_id is looked up with no other
+// authentication.
+func verifyDiditSignature(secret string, body []byte, signatureHeader string, timestampHeader string) bool {
+	if secret == "" || signatureHeader == "" || timestampHeader == "" {
+		return false
+	}
+	ts, err := strconv.ParseInt(timestampHeader, 10, 64)
+	if err != nil {
+		return false
+	}
+	if math.Abs(float64(time.Now().Unix()-ts)) > diditSignatureMaxAgeSeconds {
+		return false
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+
+	return hmac.Equal([]byte(expected), []byte(strings.TrimSpace(signatureHeader)))
+}
 
 type DiditWebhookHandler struct {
 	cfg   config.Config
@@ -56,13 +91,21 @@ func (h *DiditWebhookHandler) Receive() fiber.Handler {
 		if c.Method() == "GET" {
 			sessionID = c.Query("verificationSessionId")
 			status = c.Query("status")
-			
+
 			if sessionID == "" {
 				// Try alternative query param name
 				sessionID = c.Query("session_id")
 			}
 		} else {
-			// Handle POST request (webhook event from Didit)
+			// Handle POST request (webhook event from Didit) - authenticate it
+			// before trusting anything in the body.
+			if h.cfg.DiditWebhookSecret == "" {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook_secret_not_configured"})
+			}
+			if !verifyDiditSignature(h.cfg.DiditWebhookSecret, c.Body(), c.Get("X-Signature"), c.Get("X-Timestamp")) {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
+			}
+
 			var event WebhookEvent
 			if err := c.BodyParser(&event); err != nil {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
@@ -91,7 +134,7 @@ WHERE kyc_session_id = $1
 		// Fetch latest decision from Didit API if available
 		var kycStatus string
 		var decisionData map[string]interface{}
-		
+
 		if h.didit != nil {
 			decision, err := h.didit.GetSessionDecision(c.Context(), sessionID)
 			if err != nil {
@@ -145,4 +188,3 @@ WHERE id = $3
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
 	}
 }
-
