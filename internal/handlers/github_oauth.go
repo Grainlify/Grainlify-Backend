@@ -138,6 +138,11 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 		redirectURI := c.Query("redirect")
 		slog.Info("OAuth login start - received redirect parameter", "redirect", redirectURI)
 
+		// Optional referral code (see internal/handlers/referrals.go). Not
+		// validated here - an unknown/stale code is simply a no-op attach at
+		// the callback, same as if no code were passed at all.
+		refCode := c.Query("ref")
+
 		// Validate redirect_uri is a valid URL and from an allowed origin
 		if redirectURI != "" {
 			parsedURL, err := url.Parse(redirectURI)
@@ -166,9 +171,9 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 
 		// Store CSRF token in database for validation (OAuth 2.0 security requirement)
 		_, err := h.db.Pool.Exec(c.Context(), `
-INSERT INTO oauth_states (state, user_id, kind, expires_at, redirect_uri)
-VALUES ($1, NULL, 'github_login', $2, $3)
-`, csrfToken, expiresAt, redirectURI)
+INSERT INTO oauth_states (state, user_id, kind, expires_at, redirect_uri, ref_code)
+VALUES ($1, NULL, 'github_login', $2, $3, $4)
+`, csrfToken, expiresAt, redirectURI, nullIfEmpty(refCode))
 		if err != nil {
 			slog.Error("OAuth login start - failed to store state", "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "state_create_failed"})
@@ -238,12 +243,13 @@ func (h *GitHubOAuthHandler) CallbackUnified() fiber.Handler {
 		var storedKind string
 		var stateUserID *uuid.UUID
 		var storedRedirectURI *string
+		var storedRefCode *string
 		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT kind, user_id, redirect_uri
+SELECT kind, user_id, redirect_uri, ref_code
 FROM oauth_states
 WHERE state = $1
   AND expires_at > now()
-`, csrfToken).Scan(&storedKind, &stateUserID, &storedRedirectURI)
+`, csrfToken).Scan(&storedKind, &stateUserID, &storedRedirectURI, &storedRefCode)
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.Warn("OAuth callback - state not found or expired",
 				"csrf_token", csrfToken,
@@ -345,7 +351,8 @@ SELECT id, role
 FROM users
 WHERE github_user_id = $1
 `, u.ID).Scan(&userID, &role)
-			if errors.Is(err, pgx.ErrNoRows) {
+			isNewUser := errors.Is(err, pgx.ErrNoRows)
+			if isNewUser {
 				err = h.db.Pool.QueryRow(c.Context(), `
 INSERT INTO users (github_user_id) VALUES ($1)
 RETURNING id, role
@@ -353,6 +360,13 @@ RETURNING id, role
 			}
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_upsert_failed"})
+			}
+			// Only ever attach a referral at the moment this account is
+			// first created - an existing user logging back in must never
+			// pick up a referral from a ref code that happens to be in the
+			// URL they clicked.
+			if isNewUser && storedRefCode != nil && *storedRefCode != "" {
+				attachReferral(c.Context(), h.db, *storedRefCode, userID)
 			}
 		case "github_link":
 			if stateUserID == nil {
@@ -589,6 +603,15 @@ func randomState(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// nullIfEmpty converts "" to nil so an optional query param stores as SQL
+// NULL rather than an empty string.
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // encodeStateWithRedirect encodes both a CSRF token and redirect_uri in the state parameter.

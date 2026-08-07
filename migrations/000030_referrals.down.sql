@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS referrals;
+ALTER TABLE oauth_states DROP COLUMN IF EXISTS ref_code;
+ALTER TABLE users DROP COLUMN IF EXISTS referral_code;

@@ -51,7 +51,7 @@ func diditWebhookSuiteSignedHeaders(secret string, body []byte, timestamp time.T
 // internal/api/api.go wires DiditWebhookHandler.
 func diditWebhookSuiteApp(cfg config.Config, d *db.DB) *fiber.App {
 	app := fiber.New()
-	h := handlers.NewDiditWebhookHandler(cfg, d)
+	h := handlers.NewDiditWebhookHandler(cfg, d, nil)
 	app.Get("/webhooks/didit", h.Receive())
 	app.Post("/webhooks/didit", h.Receive())
 	return app

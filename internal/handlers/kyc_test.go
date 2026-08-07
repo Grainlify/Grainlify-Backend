@@ -44,7 +44,7 @@ const kycSuiteJWTSecret = "kyc-suite-test-jwt-secret"
 // internal/api/api.go registers against handlers.KYCHandler, including the
 // same auth.RequireAuth middleware production uses.
 func kycSuiteApp(cfg config.Config, d *db.DB) *fiber.App {
-	h := handlers.NewKYCHandler(cfg, d)
+	h := handlers.NewKYCHandler(cfg, d, nil)
 	app := fiber.New()
 	app.Post("/auth/kyc/start", auth.RequireAuth(cfg.JWTSecret), h.Start())
 	app.Get("/auth/kyc/status", auth.RequireAuth(cfg.JWTSecret), h.Status())

@@ -17,6 +17,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 // diditSignatureMaxAgeSeconds bounds how old an X-Timestamp may be before a
@@ -49,20 +50,22 @@ func verifyDiditSignature(secret string, body []byte, signatureHeader string, ti
 }
 
 type DiditWebhookHandler struct {
-	cfg   config.Config
-	db    *db.DB
-	didit *didit.Client
+	cfg    config.Config
+	db     *db.DB
+	didit  *didit.Client
+	notify *notifications.Service
 }
 
-func NewDiditWebhookHandler(cfg config.Config, d *db.DB) *DiditWebhookHandler {
+func NewDiditWebhookHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *DiditWebhookHandler {
 	var diditClient *didit.Client
 	if cfg.DiditAPIKey != "" {
 		diditClient = didit.NewClient(cfg.DiditAPIKey)
 	}
 	return &DiditWebhookHandler{
-		cfg:   cfg,
-		db:    d,
-		didit: diditClient,
+		cfg:    cfg,
+		db:     d,
+		didit:  diditClient,
+		notify: notify,
 	}
 }
 
@@ -157,6 +160,13 @@ WHERE kyc_session_id = $1
 		// Store decision data as JSONB (includes both Decision and Data)
 		decisionJSON, _ := json.Marshal(decisionData)
 
+		// Capture the pre-update status so a duplicate "verified" delivery
+		// (Didit may redeliver webhooks) doesn't re-trigger referral
+		// completion - only a genuine not-verified -> verified transition
+		// should.
+		var previousStatus string
+		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COALESCE(kyc_status, '') FROM users WHERE id = $1`, userID).Scan(&previousStatus)
+
 		// Update user KYC status
 		_, err = h.db.Pool.Exec(c.Context(), `
 UPDATE users
@@ -168,6 +178,10 @@ WHERE id = $3
 `, kycStatus, decisionJSON, userID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+		}
+
+		if kycStatus == "verified" && previousStatus != "verified" {
+			maybeCompleteReferral(c.Context(), h.db, h.notify, userID)
 		}
 
 		// For GET requests (callback redirect), redirect to success page

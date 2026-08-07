@@ -14,6 +14,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 // extractKYCInfo extracts structured information from Didit response data
@@ -95,20 +96,22 @@ func mapDiditStatus(diditStatus string) string {
 }
 
 type KYCHandler struct {
-	cfg   config.Config
-	db    *db.DB
-	didit *didit.Client
+	cfg    config.Config
+	db     *db.DB
+	didit  *didit.Client
+	notify *notifications.Service
 }
 
-func NewKYCHandler(cfg config.Config, d *db.DB) *KYCHandler {
+func NewKYCHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *KYCHandler {
 	var diditClient *didit.Client
 	if cfg.DiditAPIKey != "" {
 		diditClient = didit.NewClient(cfg.DiditAPIKey)
 	}
 	return &KYCHandler{
-		cfg:   cfg,
-		db:    d,
-		didit: diditClient,
+		cfg:    cfg,
+		db:     d,
+		didit:  diditClient,
+		notify: notify,
 	}
 }
 
@@ -532,6 +535,9 @@ WHERE id = $3
 						kycData = decisionJSON
 						if statusChanged {
 							slog.Info("kyc status changed", "user_id", userID, "old_status", oldStatusStr, "new_status", newStatus, "didit_status", decision.Status)
+							if newStatus == "verified" {
+								maybeCompleteReferral(c.Context(), h.db, h.notify, userID)
+							}
 						}
 					}
 				} else {
