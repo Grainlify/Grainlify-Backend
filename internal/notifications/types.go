@@ -26,6 +26,16 @@ const (
 	// GitHub signup + KYC verification, crediting the referrer with points
 	// (internal/handlers/referrals.go maybeCompleteReferral).
 	TypeReferralCompleted Type = "referral_completed"
+	// TypeSocialFollowCompleted fires once a user's proof submissions for
+	// every social-follow platform have been approved
+	// (internal/handlers/social_follow.go maybeCompleteSocialFollow).
+	TypeSocialFollowCompleted Type = "social_follow_completed"
+	// TypeRedemptionPaid fires when an admin marks a points->USDC redemption
+	// request as paid (internal/handlers/redemptions.go).
+	TypeRedemptionPaid Type = "redemption_paid"
+	// TypeRedemptionRejected fires when an admin rejects a redemption
+	// request; the spent points are refunded at the same time.
+	TypeRedemptionRejected Type = "redemption_rejected"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -37,6 +47,9 @@ var AllTypes = []Type{
 	TypePRMerged,
 	TypeRewardReceived,
 	TypeReferralCompleted,
+	TypeSocialFollowCompleted,
+	TypeRedemptionPaid,
+	TypeRedemptionRejected,
 }
 
 func (t Type) Valid() bool {

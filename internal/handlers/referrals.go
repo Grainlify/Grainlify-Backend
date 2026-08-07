@@ -78,11 +78,11 @@ WHERE referrer_user_id = $1
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"code":              code,
-			"total_referred":    totalReferred,
-			"pending":           pending,
-			"completed":         completed,
-			"points_earned":     pointsEarned,
+			"code":                code,
+			"total_referred":      totalReferred,
+			"pending":             pending,
+			"completed":           completed,
+			"points_earned":       pointsEarned,
 			"points_per_referral": referralPointsPerCompletion,
 		})
 	}
@@ -191,6 +191,10 @@ WHERE id = $2 AND status = 'pending'
 	}
 	if tag.RowsAffected() == 0 {
 		return
+	}
+
+	if err := insertLedgerEntry(ctx, d.Pool, referrerUserID, referralPointsPerCompletion, "referral", &referralID); err != nil {
+		slog.Warn("referrals: ledger entry failed", "referral_id", referralID, "error", err)
 	}
 
 	notify.Notify(ctx, referrerUserID, notifications.TypeReferralCompleted,

@@ -196,6 +196,20 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	referrals := handlers.NewReferralsHandler(deps.DB)
 	app.Get("/referrals/me", auth.RequireAuth(cfg.JWTSecret), referrals.Me())
 
+	// Points balance (internal/handlers/points.go).
+	points := handlers.NewPointsHandler(deps.DB)
+	app.Get("/points/me", auth.RequireAuth(cfg.JWTSecret), points.Me())
+
+	// Social-follow program: proof-of-follow submissions + review (internal/handlers/social_follow.go).
+	socialFollow := handlers.NewSocialFollowHandler(deps.DB, notifSvc)
+	app.Post("/social-follow/:platform/submit", auth.RequireAuth(cfg.JWTSecret), socialFollow.Submit())
+	app.Get("/social-follow/me", auth.RequireAuth(cfg.JWTSecret), socialFollow.Me())
+
+	// Points -> USDC redemption requests (internal/handlers/redemptions.go).
+	redemptions := handlers.NewRedemptionsHandler(deps.DB, notifSvc)
+	app.Post("/redemptions", auth.RequireAuth(cfg.JWTSecret), redemptions.Create())
+	app.Get("/redemptions/me", auth.RequireAuth(cfg.JWTSecret), redemptions.Mine())
+
 	// Public ecosystems list and detail (includes computed project_count and user_count).
 	ecosystems := handlers.NewEcosystemsPublicHandler(deps.DB)
 	app.Get("/ecosystems", ecosystems.ListActive())
@@ -255,6 +269,14 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
 	adminGroup.Get("/users", auth.RequireRole("admin"), admin.ListUsers())
 	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), admin.SetUserRole())
+
+	adminGroup.Get("/social-follow/submissions", auth.RequireRole("admin"), socialFollow.ListSubmissions())
+	adminGroup.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), socialFollow.Approve())
+	adminGroup.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), socialFollow.Reject())
+
+	adminGroup.Get("/redemptions", auth.RequireRole("admin"), redemptions.ListAdmin())
+	adminGroup.Post("/redemptions/:id/mark-paid", auth.RequireRole("admin"), redemptions.MarkPaid())
+	adminGroup.Post("/redemptions/:id/reject", auth.RequireRole("admin"), redemptions.Reject())
 
 	ecosystemsAdmin := handlers.NewEcosystemsAdminHandler(deps.DB)
 	adminGroup.Get("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.List())
