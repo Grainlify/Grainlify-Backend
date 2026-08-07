@@ -84,3 +84,36 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: railway up --service grainlify --detach
+
+      # railway up --detach returns as soon as the deploy is *triggered*, not
+      # once it's actually serving traffic - a build/startup/migration
+      # failure after this point would otherwise go unnoticed by CI even
+      # though the job shows green. This is what actually verifies the
+      # deployed artifact works, not just that it built - a pre-deploy test
+      # runs against code, never against the real, live, deployed service,
+      # so this is the only place in the pipeline that can catch a
+      # production-only failure mode (e.g. the migration-lock incident this
+      # was added for: the API can build and "deploy" successfully and still
+      # never come up because it hung retrying a stuck lock).
+      - name: Smoke test production
+        run: |
+          echo "Waiting for the new deployment to become healthy..."
+          for i in $(seq 1 24); do
+            if curl -sf -m 10 https://api.grainlify.0xo.in/health > /dev/null; then
+              echo "Health check passed on attempt $i"
+              break
+            fi
+            if [ "$i" -eq 24 ]; then
+              echo "::error::/health did not return 200 within 2 minutes of deploy"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "Checking the GitHub sign-in redirect..."
+          location=$(curl -sI -m 10 "https://api.grainlify.0xo.in/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify.0xo.in" | grep -i "^location:" || true)
+          if ! echo "$location" | grep -q "github.com/login/oauth/authorize"; then
+            echo "::error::Sign-in redirect is broken - expected a redirect to github.com/login/oauth/authorize, got: $location"
+            exit 1
+          fi
+          echo "Sign-in redirect OK: $location"
