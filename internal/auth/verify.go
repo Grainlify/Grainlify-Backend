@@ -65,9 +65,9 @@ func VerifySignature(t WalletType, address string, message string, signatureHex 
 	case WalletTypeEVM:
 		return verifyEVM(address, message, signatureHex)
 	case WalletTypeStellarEd25519:
-		return verifyStellarEd25519(message, signatureHex, publicKeyHex)
+		return verifyStellarEd25519(address, message, signatureHex, publicKeyHex)
 	case WalletTypeStellarSecp256k1:
-		return verifyStellarSecp256k1(message, signatureHex, publicKeyHex)
+		return verifyStellarSecp256k1(address, message, signatureHex, publicKeyHex)
 	default:
 		return fmt.Errorf("unsupported wallet_type")
 	}
@@ -99,7 +99,23 @@ func verifyEVM(expectedAddr string, message string, signatureHex string) error {
 	return nil
 }
 
-func verifyStellarEd25519(message string, signatureHex string, publicKeyHex string) error {
+// addressMatchesPublicKey binds the caller-claimed address to the public key
+// that will actually be checked against the signature. Without this, a
+// caller could submit a validly-signed message under a public key they
+// control while claiming an unrelated address, and verification would
+// succeed for an identity they never proved ownership of - NormalizeAddress
+// treats the Stellar "address" as the hex-encoded public key itself (see its
+// comment), so the two must match once both are hex-normalized.
+func addressMatchesPublicKey(address string, publicKeyHex string) bool {
+	a := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(address), "0x"))
+	k := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(publicKeyHex), "0x"))
+	return a != "" && a == k
+}
+
+func verifyStellarEd25519(address string, message string, signatureHex string, publicKeyHex string) error {
+	if !addressMatchesPublicKey(address, publicKeyHex) {
+		return fmt.Errorf("address does not match public_key")
+	}
 	pubKeyBytes, err := decodeHex(publicKeyHex)
 	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid public_key")
@@ -114,7 +130,10 @@ func verifyStellarEd25519(message string, signatureHex string, publicKeyHex stri
 	return nil
 }
 
-func verifyStellarSecp256k1(message string, signatureHex string, publicKeyHex string) error {
+func verifyStellarSecp256k1(address string, message string, signatureHex string, publicKeyHex string) error {
+	if !addressMatchesPublicKey(address, publicKeyHex) {
+		return fmt.Errorf("address does not match public_key")
+	}
 	pubKeyBytes, err := decodeHex(publicKeyHex)
 	if err != nil {
 		return fmt.Errorf("invalid public_key")
