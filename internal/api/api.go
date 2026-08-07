@@ -188,9 +188,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/auth/github/app/install/callback", ghApp.HandleInstallationCallback())
 
 	// KYC verification endpoints
-	kyc := handlers.NewKYCHandler(cfg, deps.DB)
+	kyc := handlers.NewKYCHandler(cfg, deps.DB, notifSvc)
 	authGroup.Post("/kyc/start", auth.RequireAuth(cfg.JWTSecret), kyc.Start())
 	authGroup.Get("/kyc/status", auth.RequireAuth(cfg.JWTSecret), kyc.Status())
+
+	// Referral program: code + stats for the caller (internal/handlers/referrals.go).
+	referrals := handlers.NewReferralsHandler(deps.DB)
+	app.Get("/referrals/me", auth.RequireAuth(cfg.JWTSecret), referrals.Me())
 
 	// Public ecosystems list and detail (includes computed project_count and user_count).
 	ecosystems := handlers.NewEcosystemsPublicHandler(deps.DB)
@@ -288,7 +292,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/webhooks/github/", webhooks.Receive())
 
 	// Didit webhook handler (supports both GET callback redirects and POST webhook events)
-	diditWebhook := handlers.NewDiditWebhookHandler(cfg, deps.DB)
+	diditWebhook := handlers.NewDiditWebhookHandler(cfg, deps.DB, notifSvc)
 	app.Get("/webhooks/didit", diditWebhook.Receive())
 	app.Post("/webhooks/didit", diditWebhook.Receive())
 

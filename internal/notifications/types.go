@@ -22,6 +22,10 @@ const (
 	// since that system isn't wired to any request flow today. The
 	// preference toggle exists in the UI so it's ready once payouts ship.
 	TypeRewardReceived Type = "reward_received"
+	// TypeReferralCompleted fires when someone a user referred finishes
+	// GitHub signup + KYC verification, crediting the referrer with points
+	// (internal/handlers/referrals.go maybeCompleteReferral).
+	TypeReferralCompleted Type = "referral_completed"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -32,6 +36,7 @@ var AllTypes = []Type{
 	TypeIssueApplicationRejected,
 	TypePRMerged,
 	TypeRewardReceived,
+	TypeReferralCompleted,
 }
 
 func (t Type) Valid() bool {
