@@ -9,11 +9,13 @@
 tmp/
 tmp/**/*
 
-# Build artifacts (Railway builds these)
+# Build artifacts (Railway builds these). Anchored to repo root (leading /) —
+# unanchored patterns match at any depth and were excluding cmd/api,
+# cmd/worker, and cmd/migrate (the actual source directories) too.
 bin/
-api
-worker
-migrate
+/api
+/worker
+/migrate
 
 # IDE files
 .idea/
