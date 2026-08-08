@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -26,6 +28,73 @@ type IssueApplicationsHandler struct {
 
 func NewIssueApplicationsHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *IssueApplicationsHandler {
 	return &IssueApplicationsHandler{cfg: cfg, db: d, notify: notify}
+}
+
+// recordApplication upserts the caller's issue_applications row to
+// status='applied', creating it on a first application or reviving it after
+// a prior withdrawal. commentID is nil-able since every other status
+// transition below has no comment of its own to record.
+func recordApplication(ctx context.Context, exec pgExecutor, userID, projectID uuid.UUID, issueNumber int, login string, commentID *int64) error {
+	_, err := exec.Exec(ctx, `
+INSERT INTO issue_applications (user_id, project_id, issue_number, github_login, github_comment_id, status, applied_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, 'applied', now(), now())
+ON CONFLICT (project_id, issue_number, user_id) DO UPDATE SET
+  status = 'applied',
+  github_login = EXCLUDED.github_login,
+  github_comment_id = COALESCE(EXCLUDED.github_comment_id, issue_applications.github_comment_id),
+  applied_at = now(),
+  updated_at = now()
+`, userID, projectID, issueNumber, login, commentID)
+	return err
+}
+
+// recordAssignment upserts to status='assigned'. Upsert rather than
+// update-only because a maintainer can Assign() a contributor who never
+// called Apply() first.
+func recordAssignment(ctx context.Context, exec pgExecutor, userID, projectID uuid.UUID, issueNumber int, login string) error {
+	_, err := exec.Exec(ctx, `
+INSERT INTO issue_applications (user_id, project_id, issue_number, github_login, status, assigned_at, updated_at)
+VALUES ($1, $2, $3, $4, 'assigned', now(), now())
+ON CONFLICT (project_id, issue_number, user_id) DO UPDATE SET
+  status = 'assigned',
+  github_login = EXCLUDED.github_login,
+  assigned_at = now(),
+  updated_at = now()
+`, userID, projectID, issueNumber, login)
+	return err
+}
+
+// recordRejection marks an existing application rejected. Update-only (not
+// an upsert): rejecting a login with no application on file has nothing to
+// persist.
+func recordRejection(ctx context.Context, exec pgExecutor, projectID uuid.UUID, issueNumber int, login string) error {
+	_, err := exec.Exec(ctx, `
+UPDATE issue_applications SET status = 'rejected', resolved_at = now(), updated_at = now()
+WHERE project_id = $1 AND issue_number = $2 AND LOWER(github_login) = LOWER($3)
+`, projectID, issueNumber, login)
+	return err
+}
+
+// recordWithdrawal marks the caller's own application withdrawn.
+func recordWithdrawal(ctx context.Context, exec pgExecutor, userID, projectID uuid.UUID, issueNumber int) error {
+	_, err := exec.Exec(ctx, `
+UPDATE issue_applications SET status = 'withdrawn', resolved_at = now(), updated_at = now()
+WHERE user_id = $1 AND project_id = $2 AND issue_number = $3
+`, userID, projectID, issueNumber)
+	return err
+}
+
+// recordUnassignment reverts a formerly-assigned application back to
+// 'applied' (rather than deleting it) and clears assigned_at. Unassign()
+// clears every assignee on the GitHub issue at once without knowing which
+// specific applicant is being removed, so this mirrors that at the
+// (project_id, issue_number) level rather than per-user.
+func recordUnassignment(ctx context.Context, exec pgExecutor, projectID uuid.UUID, issueNumber int) error {
+	_, err := exec.Exec(ctx, `
+UPDATE issue_applications SET status = 'applied', assigned_at = NULL, updated_at = now()
+WHERE project_id = $1 AND issue_number = $2 AND status = 'assigned'
+`, projectID, issueNumber)
+	return err
 }
 
 type applyToIssueRequest struct {
@@ -149,6 +218,10 @@ SET comments = COALESCE(comments, '[]'::jsonb) || $3::jsonb,
     last_seen_at = now()
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
+
+		if err := recordApplication(c.Context(), h.db.Pool, userID, projectID, issueNumber, linked.Login, &ghComment.ID); err != nil {
+			slog.Error("issue_applications: record application failed", "error", err, "project_id", projectID, "issue_number", issueNumber)
+		}
 
 		h.notify.Notify(c.Context(), ownerUserID, notifications.TypeIssueApplicationSubmitted,
 			fmt.Sprintf("New application from @%s", linked.Login),
@@ -392,6 +465,10 @@ last_seen_at = now()
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, req.CommentID)
 
+		if err := recordWithdrawal(c.Context(), h.db.Pool, userID, projectID, issueNumber); err != nil {
+			slog.Error("issue_applications: record withdrawal failed", "error", err, "project_id", projectID, "issue_number", issueNumber)
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
@@ -455,6 +532,14 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "project_has_no_github_app_installation"})
 		}
 
+		var alreadyAssigned bool
+		_ = h.db.Pool.QueryRow(c.Context(), `
+SELECT EXISTS(SELECT 1 FROM issue_applications WHERE project_id = $1 AND issue_number = $2 AND status = 'assigned')
+`, projectID, issueNumber).Scan(&alreadyAssigned)
+		if alreadyAssigned {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "issue_already_assigned"})
+		}
+
 		appClient, err := github.NewGitHubAppClient(h.cfg.GitHubAppID, h.cfg.GitHubAppPrivateKey)
 		if err != nil {
 			slog.Error("failed to create GitHub App client for assign", "error", err)
@@ -504,6 +589,9 @@ WHERE project_id = $1 AND number = $2
 		}
 
 		if assigneeUserID, ok := notifications.ResolveUserIDByGitHubLogin(c.Context(), h.db, req.Assignee); ok {
+			if err := recordAssignment(c.Context(), h.db.Pool, assigneeUserID, projectID, issueNumber, req.Assignee); err != nil {
+				slog.Error("issue_applications: record assignment failed", "error", err, "project_id", projectID, "issue_number", issueNumber)
+			}
 			h.notify.Notify(c.Context(), assigneeUserID, notifications.TypeIssueAssigned,
 				fmt.Sprintf("You've been assigned to issue #%d", issueNumber),
 				fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
@@ -601,6 +689,10 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND gi.number
 UPDATE github_issues SET assignees = '[]'::jsonb, last_seen_at = now()
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber)
+
+		if err := recordUnassignment(c.Context(), h.db.Pool, projectID, issueNumber); err != nil {
+			slog.Error("issue_applications: record unassignment failed", "error", err, "project_id", projectID, "issue_number", issueNumber)
+		}
 
 		who := "@" + logins[0]
 		if len(logins) > 1 {
@@ -708,6 +800,10 @@ UPDATE github_issues SET comments = COALESCE(comments, '[]'::jsonb) || $3::jsonb
 WHERE project_id = $1 AND number = $2
 `, projectID, issueNumber, commentJSON, ghComment.UpdatedAt)
 
+		if err := recordRejection(c.Context(), h.db.Pool, projectID, issueNumber, req.Assignee); err != nil {
+			slog.Error("issue_applications: record rejection failed", "error", err, "project_id", projectID, "issue_number", issueNumber)
+		}
+
 		if applicantUserID, ok := notifications.ResolveUserIDByGitHubLogin(c.Context(), h.db, req.Assignee); ok {
 			var githubIssueID int64
 			_ = h.db.Pool.QueryRow(c.Context(), `SELECT github_issue_id FROM github_issues WHERE project_id = $1 AND number = $2`, projectID, issueNumber).Scan(&githubIssueID)
@@ -719,5 +815,126 @@ WHERE project_id = $1 AND number = $2
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
+	}
+}
+
+type issueApplicationDTO struct {
+	ID          uuid.UUID  `json:"id"`
+	Status      string     `json:"status"` // applied | assigned | pending_review | complete
+	ProjectID   uuid.UUID  `json:"project_id"`
+	ProjectName string     `json:"project_name"`
+	IssueNumber int        `json:"issue_number"`
+	IssueTitle  string     `json:"issue_title"`
+	IssueURL    string     `json:"issue_url"`
+	Labels      []string   `json:"labels"`
+	AppliedAt   *time.Time `json:"applied_at,omitempty"`
+	AssignedAt  *time.Time `json:"assigned_at,omitempty"`
+	PRNumber    *int       `json:"pr_number,omitempty"`
+	PRURL       *string    `json:"pr_url,omitempty"`
+	PRTitle     *string    `json:"pr_title,omitempty"`
+	PRCreatedAt *time.Time `json:"pr_created_at,omitempty"`
+	PRMergedAt  *time.Time `json:"pr_merged_at,omitempty"`
+}
+
+// issueLabelNames extracts label names from a github_issues.labels JSONB
+// value, shaped [{"name": "...", "color": "..."}] per internal/github/list.go.
+func issueLabelNames(labelsJSON []byte) []string {
+	var labels []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(labelsJSON, &labels); err != nil {
+		return []string{}
+	}
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if l.Name != "" {
+			names = append(names, l.Name)
+		}
+	}
+	return names
+}
+
+// Mine handles GET /issue-applications/me: the caller's own issue
+// applications, bucketed into applied/assigned/pending_review/complete.
+// pending_review/complete are derived at read time, not stored - an assigned
+// application is matched against github_pull_requests.body for a GitHub
+// closing keyword ("fixes #12"/"closes #12"/"resolves #12") referencing this
+// issue, rather than a persisted PR<->issue link (see migration 000032).
+func (h *IssueApplicationsHandler) Mine() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+		userIDStr, _ := c.Locals(auth.LocalUserID).(string)
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		}
+
+		rows, err := h.db.Pool.Query(c.Context(), `
+SELECT
+  ia.id, ia.status, ia.applied_at, ia.assigned_at,
+  gi.number, gi.title, COALESCE(gi.url, ''), COALESCE(gi.labels, '[]'::jsonb),
+  p.id, p.github_full_name,
+  pr.number, pr.url, pr.title, pr.merged, pr.created_at_github, pr.merged_at_github
+FROM issue_applications ia
+INNER JOIN github_issues gi ON gi.project_id = ia.project_id AND gi.number = ia.issue_number
+INNER JOIN projects p ON p.id = ia.project_id
+LEFT JOIN LATERAL (
+  SELECT pr.number, pr.url, pr.title, pr.merged, pr.created_at_github, pr.merged_at_github
+  FROM github_pull_requests pr
+  WHERE pr.project_id = ia.project_id
+    AND LOWER(pr.author_login) = LOWER(ia.github_login)
+    -- GitHub only auto-closes an issue when its own keyword+number appears
+    -- ("Closes #12, #34" does not link #34 without its own keyword), so this
+    -- intentionally requires the same per-number pairing rather than
+    -- matching any issue number mentioned anywhere in the body.
+    AND pr.body ~* ('(^|[^0-9A-Za-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*#' || ia.issue_number::text || '([^0-9]|$)')
+  ORDER BY pr.created_at_github DESC NULLS LAST
+  LIMIT 1
+) pr ON ia.status = 'assigned'
+WHERE ia.user_id = $1 AND ia.status IN ('applied', 'assigned')
+ORDER BY ia.created_at DESC
+LIMIT 200
+`, userID)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issue_applications_list_failed"})
+		}
+		defer rows.Close()
+
+		out := []issueApplicationDTO{}
+		for rows.Next() {
+			var (
+				d          issueApplicationDTO
+				dbStatus   string
+				labelsJSON []byte
+				prMerged   *bool
+			)
+			if err := rows.Scan(
+				&d.ID, &dbStatus, &d.AppliedAt, &d.AssignedAt,
+				&d.IssueNumber, &d.IssueTitle, &d.IssueURL, &labelsJSON,
+				&d.ProjectID, &d.ProjectName,
+				&d.PRNumber, &d.PRURL, &d.PRTitle, &prMerged, &d.PRCreatedAt, &d.PRMergedAt,
+			); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issue_applications_scan_failed"})
+			}
+
+			d.Labels = issueLabelNames(labelsJSON)
+
+			switch {
+			case dbStatus == "applied":
+				d.Status = "applied"
+			case d.PRNumber == nil:
+				d.Status = "assigned"
+			case prMerged != nil && *prMerged:
+				d.Status = "complete"
+			default:
+				d.Status = "pending_review"
+			}
+
+			out = append(out, d)
+		}
+
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"issue_applications": out})
 	}
 }
