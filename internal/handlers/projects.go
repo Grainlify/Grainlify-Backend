@@ -109,6 +109,24 @@ RETURNING id, status
 	}
 }
 
+// repoPrivacyFromFetch interprets a GetRepo() outcome for Mine(), which uses
+// it to decide whether to soft-delete a project. Only a CONFIRMED response
+// (err == nil) can mark a project private - a fetch error (rate limit,
+// expired token, transient 5xx, momentary network blip) is not evidence the
+// repo turned private. Treating any error as "private" previously caused
+// Mine() to silently and permanently soft-delete legitimate public projects
+// on nothing more than a flaky GitHub API call.
+func repoPrivacyFromFetch(repo github.Repo, err error) (confirmedPrivate bool, ownerAvatarURL *string) {
+	if err != nil {
+		return false, nil
+	}
+	if repo.Private {
+		return true, nil
+	}
+	avatar := repo.Owner.AvatarURL
+	return false, &avatar
+}
+
 func (h *ProjectsHandler) Mine() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		slog.Info("projects/mine: handler called",
@@ -215,25 +233,26 @@ ORDER BY p.created_at DESC
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "projects_list_failed"})
 			}
 
-			// Fetch repo data from GitHub to check if it's private and get owner avatar
+			// Fetch repo data from GitHub to check if it's private and get owner
+			// avatar. See repoPrivacyFromFetch for why a fetch error must not be
+			// treated as confirmation the repo is private.
 			var ownerAvatarURL *string
-			var isPrivate bool
+			var confirmedPrivate bool
 			if accessToken != "" {
 				repo, err := gh.GetRepo(c.Context(), accessToken, fullName)
-				if err == nil {
-					isPrivate = repo.Private
-					if !isPrivate {
-						ownerAvatarURL = &repo.Owner.AvatarURL
-					}
-				} else {
-					// If we can't fetch (404/403), assume it's private
-					isPrivate = true
+				confirmedPrivate, ownerAvatarURL = repoPrivacyFromFetch(repo, err)
+				if err != nil {
+					slog.Warn("projects/mine: failed to fetch repo from GitHub, leaving project as-is",
+						"project_id", id.String(),
+						"github_full_name", fullName,
+						"error", err,
+						"request_id", c.Locals("requestid"),
+					)
 				}
 			}
 
-			// Skip private repos
-			if isPrivate {
-				// Soft delete private repos from database
+			// Skip and soft-delete only repos GitHub confirmed are now private.
+			if confirmedPrivate {
 				_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE projects
 SET deleted_at = now()
