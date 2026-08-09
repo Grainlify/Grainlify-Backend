@@ -36,6 +36,16 @@ const (
 	// TypeRedemptionRejected fires when an admin rejects a redemption
 	// request; the spent points are refunded at the same time.
 	TypeRedemptionRejected Type = "redemption_rejected"
+	// TypeGrainHackIssueCapExceeded fires when a maintainer labels an issue
+	// for GrainHack but the org has already hit max_issues_per_org for that
+	// hackathon (internal/hackathon/intake.go SyncIssueLabel).
+	TypeGrainHackIssueCapExceeded Type = "grainhack_issue_cap_exceeded"
+	// TypeGrainHackApplicationAccepted fires when an admin accepts a
+	// project's GrainHack application (internal/handlers/admin_hackathon_applications.go).
+	TypeGrainHackApplicationAccepted Type = "grainhack_application_accepted"
+	// TypeGrainHackApplicationReviewed fires when an admin rejects a
+	// project's GrainHack application or requests more info on it.
+	TypeGrainHackApplicationReviewed Type = "grainhack_application_reviewed"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -50,6 +60,9 @@ var AllTypes = []Type{
 	TypeSocialFollowCompleted,
 	TypeRedemptionPaid,
 	TypeRedemptionRejected,
+	TypeGrainHackIssueCapExceeded,
+	TypeGrainHackApplicationAccepted,
+	TypeGrainHackApplicationReviewed,
 }
 
 func (t Type) Valid() bool {

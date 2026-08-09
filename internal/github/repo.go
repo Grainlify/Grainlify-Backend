@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Repo struct {
@@ -19,15 +20,16 @@ type Repo struct {
 		Login     string `json:"login"`
 		AvatarURL string `json:"avatar_url"`
 	} `json:"owner"`
-	FullName        string `json:"full_name"`
-	HTMLURL         string `json:"html_url"`
-	Homepage        string `json:"homepage"`
-	Private         bool   `json:"private"`
-	StargazersCount int    `json:"stargazers_count"`
-	ForksCount      int    `json:"forks_count"`
-	OpenIssuesCount int    `json:"open_issues_count"`
-	Description     string `json:"description"`
-	Permissions struct {
+	FullName        string    `json:"full_name"`
+	HTMLURL         string    `json:"html_url"`
+	Homepage        string    `json:"homepage"`
+	Private         bool      `json:"private"`
+	StargazersCount int       `json:"stargazers_count"`
+	ForksCount      int       `json:"forks_count"`
+	OpenIssuesCount int       `json:"open_issues_count"`
+	Description     string    `json:"description"`
+	CreatedAt       time.Time `json:"created_at"`
+	Permissions     struct {
 		Admin bool `json:"admin"`
 		Push  bool `json:"push"`
 		Pull  bool `json:"pull"`
@@ -35,12 +37,12 @@ type Repo struct {
 }
 
 type GitHubAPIError struct {
-	StatusCode        int
-	Message           string
-	DocumentationURL  string
+	StatusCode         int
+	Message            string
+	DocumentationURL   string
 	RateLimitRemaining *int
 	RateLimitResetUnix *int64
-	Body              string
+	Body               string
 }
 
 func (e *GitHubAPIError) Error() string {
@@ -88,12 +90,12 @@ func parseGitHubAPIError(resp *http.Response) error {
 	}
 
 	return &GitHubAPIError{
-		StatusCode:        resp.StatusCode,
-		Message:           payload.Message,
-		DocumentationURL:  payload.DocumentationURL,
+		StatusCode:         resp.StatusCode,
+		Message:            payload.Message,
+		DocumentationURL:   payload.DocumentationURL,
 		RateLimitRemaining: remaining,
 		RateLimitResetUnix: reset,
-		Body:              bodyStr,
+		Body:               bodyStr,
 	}
 }
 
@@ -178,9 +180,9 @@ func (c *Client) GetRepoLanguages(ctx context.Context, accessToken string, fullN
 
 // ReadmeResponse represents the GitHub API response for README content
 type ReadmeResponse struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Content string `json:"content"` // Base64 encoded
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Content  string `json:"content"` // Base64 encoded
 	Encoding string `json:"encoding"`
 }
 
@@ -245,5 +247,3 @@ func splitFullName(fullName string) (string, string, error) {
 	}
 	return owner, repo, nil
 }
-
-

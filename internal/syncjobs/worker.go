@@ -16,7 +16,10 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/email"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 type Worker struct {
@@ -24,15 +27,29 @@ type Worker struct {
 	pool     db.DBPool
 	limiter  *rate.Limiter
 	gh       *github.Client
+	notify   *notifications.Service
 	workerID string
 }
 
 func New(cfg config.Config, pool db.DBPool) *Worker {
+	// A separate, independently-constructed Service (rather than one shared
+	// with internal/api.New, which has no way to hand this one back to
+	// cmd/api/main.go today) - same construction as api.go's own notifSvc,
+	// just built from the pieces this package already has (cfg, pool). Both
+	// end up reading/writing the same notifications/notification_preferences
+	// tables either way, so this duplication is harmless.
+	var mailer email.Mailer
+	if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
+		mailer = m
+	}
+	notify := notifications.New(&db.DB{Pool: pool}, mailer, cfg.FrontendBaseURL)
+
 	return &Worker{
 		cfg:      cfg,
 		pool:     pool,
 		limiter:  rate.NewLimiter(rate.Every(250*time.Millisecond), 2), // ~4 req/s, burst 2
 		gh:       github.NewClient(),
+		notify:   notify,
 		workerID: fmt.Sprintf("%s:%d", hostname(), os.Getpid()),
 	}
 }
@@ -207,6 +224,43 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 		return instToken, instTokenErr
 	}
 
+	// Widens the legacy literal below to also cover this project's active
+	// hackathon's configured grainhack_label, if any (internal/hackathon's
+	// EffectiveGrainHackLabels) - computed once per call, not per issue,
+	// since it only depends on projectID. A resolution failure falls back
+	// to nil, which shouldEnforceAssignmentEligibility itself treats as
+	// "just the legacy literal", so this never regresses existing behavior.
+	candidateLabels, err := hackathon.EffectiveGrainHackLabels(ctx, w.pool, projectID)
+	if err != nil {
+		slog.Warn("failed to resolve effective GrainHack labels, falling back to legacy literal",
+			"project_id", projectID, "error", err)
+		candidateLabels = nil
+	}
+
+	// Primary language for a freshly-intake hackathon_issues row - fetched
+	// at most once for this whole call, same lazy-once shape as
+	// getInstallationToken above, and only if an issue actually needs it.
+	var primaryLang string
+	var primaryLangFetched bool
+	getPrimaryLanguage := func() (string, error) {
+		if primaryLangFetched {
+			return primaryLang, nil
+		}
+		primaryLangFetched = true
+		langs, err := w.gh.GetRepoLanguages(ctx, token, fullName)
+		if err != nil {
+			return "", err
+		}
+		var maxBytes int64
+		for lang, bytes := range langs {
+			if bytes > maxBytes {
+				maxBytes = bytes
+				primaryLang = lang
+			}
+		}
+		return primaryLang, nil
+	}
+
 	for page := 1; page <= 50; page++ { // safety cap
 		if err := w.limiter.Wait(ctx); err != nil {
 			return err
@@ -240,7 +294,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			// work is done, nothing to enforce) and issues outside the
 			// hackathon are never touched by this, regardless of assignee.
 			var ineligible []string
-			if shouldEnforceAssignmentEligibility(it.State, it.Labels) {
+			if shouldEnforceAssignmentEligibility(it.State, it.Labels, candidateLabels) {
 				var recErr error
 				ineligible, recErr = reconcileApplicationStatuses(ctx, w.pool, projectID, it.Number, ghLogins)
 				if recErr != nil {
@@ -248,6 +302,21 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 						"project_id", projectID, "issue_number", it.Number, "error", recErr)
 					ineligible = nil
 				}
+			}
+
+			// GrainHack Phase-2 issue intake (AI-specs.md §2.2) - keeps this
+			// project's hackathon_issues row in sync with the issue's
+			// current label/state, if it belongs to an active hackathon at
+			// all. Best-effort: never fails the surrounding sync job.
+			labelNames := make([]string, len(it.Labels))
+			for i, l := range it.Labels {
+				labelNames[i] = l.Name
+			}
+			if err := hackathon.SyncIssueLabel(ctx, w.pool, w.gh, w.notify, getInstallationToken,
+				projectID, fullName, it.Number, labelNames, strings.EqualFold(it.State, "open"), getPrimaryLanguage,
+			); err != nil {
+				slog.Warn("hackathon issue intake failed",
+					"project_id", projectID, "issue_number", it.Number, "error", err)
 			}
 
 			removed := make(map[string]bool, len(ineligible))
@@ -391,16 +460,27 @@ const grainHackLabel = "GrainHack"
 // open, and carrying the GrainHack label. Closed issues (nothing left to
 // enforce - the work is done) and issues outside the hackathon must never
 // be touched by this, no matter who's assigned to them.
+// candidateLabels widens the check beyond the hardcoded literal above once a
+// project has an accepted, active-hackathon application whose configured
+// grainhack_label differs from it (internal/hackathon's Definitions - see
+// label.go's EffectiveGrainHackLabels) - passing nil/empty falls back to
+// checking only the legacy literal, so every existing caller/test keeps
+// behaving exactly as before.
 func shouldEnforceAssignmentEligibility(state string, labels []struct {
 	Name  string `json:"name"`
 	Color string `json:"color"`
-}) bool {
+}, candidateLabels []string) bool {
 	if !strings.EqualFold(state, "open") {
 		return false
 	}
+	if len(candidateLabels) == 0 {
+		candidateLabels = []string{grainHackLabel}
+	}
 	for _, l := range labels {
-		if strings.EqualFold(l.Name, grainHackLabel) {
-			return true
+		for _, cl := range candidateLabels {
+			if strings.EqualFold(l.Name, cl) {
+				return true
+			}
 		}
 	}
 	return false

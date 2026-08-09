@@ -14,6 +14,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
 )
@@ -21,7 +22,7 @@ import (
 func main() {
 	slog.Info("=== Grainlify API Starting ===")
 	slog.Info("loading environment variables", "step", "1", "action", "loading_environment_variables")
-	
+
 	config.LoadDotenv()
 	slog.Info("loading configuration", "step", "2", "action", "loading_configuration")
 	cfg := config.Load()
@@ -146,6 +147,18 @@ func main() {
 		go func() {
 			slog.Info("background worker started")
 			_ = worker.Run(context.Background())
+		}()
+
+		// GrainHack's periodic reconciliation crawl (AI-specs.md §2.2) -
+		// re-enqueues sync_issues jobs for hackathon-relevant projects so
+		// issue-prep label changes get picked up even with no other GitHub
+		// webhook firing in between. Started alongside the main worker
+		// above since it only ever produces sync_jobs rows for that same
+		// worker to consume; same NATS_URL-unset condition applies.
+		reconciler := hackathon.NewReconciler(database.Pool)
+		go func() {
+			slog.Info("hackathon reconciler started")
+			_ = reconciler.Run(context.Background())
 		}()
 
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)

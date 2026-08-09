@@ -246,8 +246,8 @@ func TestShouldEnforceAssignmentEligibility(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldEnforceAssignmentEligibility(tc.state, tc.labels); got != tc.want {
-				t.Errorf("shouldEnforceAssignmentEligibility(%q, %v) = %v, want %v", tc.state, tc.labels, got, tc.want)
+			if got := shouldEnforceAssignmentEligibility(tc.state, tc.labels, nil); got != tc.want {
+				t.Errorf("shouldEnforceAssignmentEligibility(%q, %v, nil) = %v, want %v", tc.state, tc.labels, got, tc.want)
 			}
 		})
 	}

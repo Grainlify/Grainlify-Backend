@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
@@ -34,6 +35,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		IdleTimeout:  60 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		// Default is 4MB. Raised so a ~5MB bug-report screenshot (matching
+		// the frontend's own upload cap) still fits after base64 inflation
+		// (~1.37x) plus JSON overhead, instead of Fiber itself rejecting the
+		// request with a raw 413 before it reaches any handler-level check.
+		BodyLimit: 8 * 1024 * 1024,
 	})
 	slog.Info("Fiber app created")
 
@@ -97,6 +103,15 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 		// Allow production domain (*.0xo.in) for grainlify.0xo.in / api.grainlify.0xo.in
 		if strings.HasSuffix(origin, ".0xo.in") {
+			return true
+		}
+
+		// Allow the new production domain (grainlify.com and its subdomains,
+		// e.g. www.grainlify.com) - kept alongside .0xo.in above during the
+		// migration rather than replacing it, so the still-live .0xo.in
+		// frontend doesn't lose CORS access before DNS/OAuth app settings for
+		// grainlify.com are actually cut over.
+		if origin == "https://grainlify.com" || strings.HasSuffix(origin, ".grainlify.com") {
 			return true
 		}
 
@@ -171,6 +186,19 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Put("/profile/update", auth.RequireAuth(cfg.JWTSecret), userProfile.UpdateProfile())
 	app.Put("/profile/avatar", auth.RequireAuth(cfg.JWTSecret), userProfile.UpdateAvatar())
 
+	// Org profile + ratings endpoints
+	orgRatings := handlers.NewOrgRatingsHandler(cfg, deps.DB)
+	app.Get("/orgs/:login", orgRatings.Summary())
+	app.Get("/orgs/:login/activity", orgRatings.Activity())
+	app.Get("/orgs/:login/calendar", orgRatings.Calendar())
+	app.Get("/orgs/:login/ratings", orgRatings.List())
+	app.Get("/orgs/:login/ratings/me", auth.RequireAuth(cfg.JWTSecret), orgRatings.MyStatus())
+	app.Post("/orgs/:login/ratings", auth.RequireAuth(cfg.JWTSecret), orgRatings.Submit())
+
+	orgLinks := handlers.NewOrgLinksHandler(deps.DB)
+	app.Get("/orgs/:login/links", orgLinks.Get())
+	app.Put("/orgs/:login/links", auth.RequireAuth(cfg.JWTSecret), orgLinks.Update())
+
 	ghOAuth := handlers.NewGitHubOAuthHandler(cfg, deps.DB)
 	// GitHub-only login/signup:
 	authGroup.Get("/github/login/start", ghOAuth.LoginStart())
@@ -232,6 +260,19 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	landingStats := handlers.NewLandingStatsHandler(deps.DB)
 	app.Get("/stats/landing", landingStats.Get())
 
+	// Bug reports: public, unauthenticated, relays straight to Discord (no
+	// DB persistence). Rate-limited since it's an anonymous-reachable route
+	// that fans out to a third-party webhook - Discord itself will throttle
+	// or flag the webhook if hit too fast.
+	bugReports := handlers.NewBugReportsHandler(cfg)
+	app.Post("/bug-reports", limiter.New(limiter.Config{
+		Max:        5,
+		Expiration: 1 * time.Minute,
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "rate_limited"})
+		},
+	}), bugReports.Create())
+
 	// Public projects list with filtering
 	projectsPublic := handlers.NewProjectsPublicHandler(cfg, deps.DB)
 	app.Get("/projects", projectsPublic.List())
@@ -269,6 +310,23 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/projects/:id/issues/:number/reject", auth.RequireAuth(cfg.JWTSecret), issueApps.Reject())
 	app.Get("/issue-applications/me", auth.RequireAuth(cfg.JWTSecret), issueApps.Mine())
 
+	// GrainHack (AI-specs.md) - Slice 1: hackathon lifecycle, project
+	// applications, GitHub-label issue intake. Public + authenticated
+	// contributor/maintainer routes here; admin routes are below with the
+	// rest of adminGroup.
+	hackathonPublic := handlers.NewHackathonPublicHandler(deps.DB)
+	app.Get("/hackathons", hackathonPublic.List())
+	app.Get("/hackathons/:id", hackathonPublic.GetByID())
+
+	hackathonApps := handlers.NewHackathonApplicationsHandler(deps.DB)
+	app.Post("/hackathons/:id/applications", auth.RequireAuth(cfg.JWTSecret), hackathonApps.Apply())
+	app.Get("/hackathon-applications/me", auth.RequireAuth(cfg.JWTSecret), hackathonApps.Mine())
+
+	hackathonIssues := handlers.NewHackathonIssuesHandler(deps.DB)
+	app.Get("/projects/:id/hackathon-issues", auth.RequireAuth(cfg.JWTSecret), hackathonIssues.ListForProject())
+	app.Get("/projects/:id/hackathon-issues/:number", auth.RequireAuth(cfg.JWTSecret), hackathonIssues.Get())
+	app.Put("/projects/:id/hackathon-issues/:number", auth.RequireAuth(cfg.JWTSecret), hackathonIssues.UpdateFields())
+
 	admin := handlers.NewAdminHandler(cfg, deps.DB)
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
@@ -295,6 +353,29 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.List())
 	adminGroup.Post("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.Create())
 	adminGroup.Delete("/open-source-week/events/:id", auth.RequireRole("admin"), oswAdmin.Delete())
+
+	// GrainHack (admin)
+	adminHackathons := handlers.NewAdminHackathonsHandler(deps.DB)
+	adminGroup.Post("/hackathons", auth.RequireRole("admin"), adminHackathons.Create())
+	adminGroup.Get("/hackathons", auth.RequireRole("admin"), adminHackathons.List())
+	adminGroup.Get("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.GetByID())
+	adminGroup.Put("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.Update())
+	adminGroup.Post("/hackathons/:id/transition", auth.RequireRole("admin"), adminHackathons.Transition())
+
+	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(cfg, deps.DB, notifSvc)
+	adminGroup.Get("/hackathons/:id/applications", auth.RequireRole("admin"), adminHackathonApps.ListAdmin())
+	adminGroup.Get("/hackathons/applications/:appId/signals", auth.RequireRole("admin"), adminHackathonApps.Signals())
+	adminGroup.Post("/hackathons/applications/:appId/accept", auth.RequireRole("admin"), adminHackathonApps.Accept())
+	adminGroup.Post("/hackathons/applications/:appId/reject", auth.RequireRole("admin"), adminHackathonApps.Reject())
+	adminGroup.Post("/hackathons/applications/:appId/request-more-info", auth.RequireRole("admin"), adminHackathonApps.RequestMoreInfo())
+
+	adminGroup.Get("/hackathons/:id/issues", auth.RequireRole("admin"), hackathonIssues.ListForHackathon())
+
+	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
+	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())
+	adminGroup.Put("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.Update())
+	adminGroup.Post("/hackathon-config/reset", auth.RequireRole("admin"), adminHackathonConfig.Reset())
+	adminGroup.Get("/hackathon-config/audit", auth.RequireRole("admin"), adminHackathonConfig.Audit())
 
 	// Notifications (in-app list/read + per-type email/in-app preferences)
 	notif := handlers.NewNotificationsHandler(deps.DB)
