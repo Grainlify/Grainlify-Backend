@@ -561,6 +561,52 @@ func TestIssueApplicationsHandler_Assign(t *testing.T) {
 		}
 		assertErrorCode(t, body, "issue_already_assigned")
 	})
+
+	t.Run("assignee who never applied returns 400 before reaching the GitHub call", func(t *testing.T) {
+		installID := "not-applied-guard-install"
+		guardedProject := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: maintainer, Status: "verified", InstallationID: &installID})
+
+		status, body := projectsFxDoJSON(t, app, "POST", fmt.Sprintf("/projects/%s/issues/401/assign", guardedProject), maintainerToken, map[string]any{"assignee": "never-applied"})
+		if status != fiber.StatusBadRequest {
+			t.Errorf("status = %d, want 400, body=%s", status, body)
+		}
+		assertErrorCode(t, body, "assignee_has_not_applied")
+	})
+
+	t.Run("assignee whose application was rejected returns 400", func(t *testing.T) {
+		installID := "rejected-guard-install"
+		guardedProject := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: maintainer, Status: "verified", InstallationID: &installID})
+		issueAppsFxApplication(t, d.Pool, issueAppsFxApplicationSpec{
+			UserID: other, ProjectID: guardedProject, IssueNumber: 402, GitHubLogin: "rejected-contributor", Status: "rejected",
+		})
+
+		status, body := projectsFxDoJSON(t, app, "POST", fmt.Sprintf("/projects/%s/issues/402/assign", guardedProject), maintainerToken, map[string]any{"assignee": "rejected-contributor"})
+		if status != fiber.StatusBadRequest {
+			t.Errorf("status = %d, want 400, body=%s", status, body)
+		}
+		assertErrorCode(t, body, "assignee_has_not_applied")
+	})
+
+	t.Run("assignee who applied passes the new eligibility check", func(t *testing.T) {
+		installID := "eligible-guard-install"
+		guardedProject := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: maintainer, Status: "verified", InstallationID: &installID})
+		issueAppsFxApplication(t, d.Pool, issueAppsFxApplicationSpec{
+			UserID: other, ProjectID: guardedProject, IssueNumber: 403, GitHubLogin: "eligible-contributor", Status: "applied",
+		})
+
+		// Case-insensitive match, matching recordRejection's own LOWER() usage.
+		// Whatever status comes back (the GitHub App client/token call is
+		// untestable here, same as every other Assign() success-path scenario
+		// in this file), it must not be the new eligibility rejection.
+		status, body := projectsFxDoJSON(t, app, "POST", fmt.Sprintf("/projects/%s/issues/403/assign", guardedProject), maintainerToken, map[string]any{"assignee": "Eligible-Contributor"})
+		var resp map[string]any
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("decode response: %v (body=%s)", err, body)
+		}
+		if resp["error"] == "assignee_has_not_applied" {
+			t.Errorf("eligible applicant was rejected by the new check: status=%d, body=%s", status, body)
+		}
+	})
 }
 
 func TestIssueApplicationsHandler_Reject(t *testing.T) {

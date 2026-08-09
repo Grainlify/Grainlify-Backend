@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,11 +114,12 @@ func (w *Worker) runJob(ctx context.Context, jobID uuid.UUID, projectID uuid.UUI
 	// Load project + owner to get GitHub token.
 	var fullName string
 	var ownerUserID uuid.UUID
+	var installationID string
 	err := w.pool.QueryRow(ctx, `
-SELECT github_full_name, owner_user_id
+SELECT github_full_name, owner_user_id, COALESCE(github_app_installation_id, '')
 FROM projects
 WHERE id = $1
-`, projectID).Scan(&fullName, &ownerUserID)
+`, projectID).Scan(&fullName, &ownerUserID, &installationID)
 	if err != nil {
 		slog.Error("sync job failed: project not found",
 			"job_id", jobID,
@@ -151,7 +153,7 @@ WHERE id = $1
 	var syncErr error
 	switch jobType {
 	case "sync_issues":
-		syncErr = w.syncIssues(ctx, projectID, fullName, linked.AccessToken)
+		syncErr = w.syncIssues(ctx, projectID, fullName, linked.AccessToken, installationID)
 	case "sync_prs":
 		syncErr = w.syncPRs(ctx, projectID, fullName, linked.AccessToken)
 	default:
@@ -178,8 +180,33 @@ WHERE id = $1
 	return nil
 }
 
-func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName string, token string) error {
+func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName string, token string, installationID string) error {
 	totalIssues := 0
+
+	// Installation token for reconciliation writes (removing an ineligible
+	// assignee, posting the explanatory comment) - fetched at most once for
+	// this whole call, and only if an issue actually needs it.
+	var instToken string
+	var instTokenFetched bool
+	var instTokenErr error
+	getInstallationToken := func() (string, error) {
+		if instTokenFetched {
+			return instToken, instTokenErr
+		}
+		instTokenFetched = true
+		if installationID == "" {
+			instTokenErr = fmt.Errorf("project has no github app installation")
+			return "", instTokenErr
+		}
+		appClient, err := github.NewGitHubAppClient(w.cfg.GitHubAppID, w.cfg.GitHubAppPrivateKey)
+		if err != nil {
+			instTokenErr = err
+			return "", err
+		}
+		instToken, instTokenErr = appClient.GetInstallationToken(ctx, installationID)
+		return instToken, instTokenErr
+	}
+
 	for page := 1; page <= 50; page++ { // safety cap
 		if err := w.limiter.Wait(ctx); err != nil {
 			return err
@@ -198,8 +225,65 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				continue
 			}
 			totalIssues++
-			// Convert assignees to JSONB (array of login strings)
-			assigneesJSON, _ := json.Marshal(it.Assignees)
+
+			ghLogins := make([]string, len(it.Assignees))
+			for i, a := range it.Assignees {
+				ghLogins[i] = a.Login
+			}
+
+			// Grainlify is the source of truth for who may be assigned: an
+			// assignee with no eligible issue_applications row (e.g. assigned
+			// directly on GitHub, bypassing the platform) gets removed here,
+			// and issue_applications.status is reconciled in both directions
+			// regardless of which interface made the change.
+			ineligible, recErr := reconcileApplicationStatuses(ctx, w.pool, projectID, it.Number, ghLogins)
+			if recErr != nil {
+				slog.Warn("reconcile application statuses failed",
+					"project_id", projectID, "issue_number", it.Number, "error", recErr)
+				ineligible = nil
+			}
+
+			removed := make(map[string]bool, len(ineligible))
+			commentPosted := false
+			if len(ineligible) > 0 {
+				if tok, tokErr := getInstallationToken(); tokErr != nil {
+					slog.Warn("no installation token available to remove ineligible assignees",
+						"project_id", projectID, "issue_number", it.Number, "logins", ineligible, "error", tokErr)
+				} else if err := w.limiter.Wait(ctx); err != nil {
+					return err
+				} else if err := w.gh.RemoveIssueAssignees(ctx, tok, fullName, it.Number, ineligible); err != nil {
+					slog.Warn("failed to remove ineligible assignees",
+						"project_id", projectID, "issue_number", it.Number, "logins", ineligible, "error", err)
+				} else {
+					for _, login := range ineligible {
+						removed[strings.ToLower(login)] = true
+						if err := w.limiter.Wait(ctx); err != nil {
+							continue
+						}
+						body := fmt.Sprintf("@%s was removed as assignee: no matching application for this issue was found on Grainlify. Maintainers can only assign contributors who applied through the platform.", login)
+						if _, err := w.gh.CreateIssueComment(ctx, tok, fullName, it.Number, body); err != nil {
+							slog.Warn("failed to post reconciliation bot comment",
+								"project_id", projectID, "issue_number", it.Number, "login", login, "error", err)
+							continue
+						}
+						commentPosted = true
+					}
+				}
+			}
+
+			// Filter out only what was actually removed on GitHub - if
+			// removal failed above, assigneesJSON should still reflect
+			// reality (they're still assigned) rather than what we merely
+			// attempted.
+			finalAssignees := make([]struct {
+				Login string `json:"login"`
+			}, 0, len(it.Assignees))
+			for _, a := range it.Assignees {
+				if !removed[strings.ToLower(a.Login)] {
+					finalAssignees = append(finalAssignees, a)
+				}
+			}
+			assigneesJSON, _ := json.Marshal(finalAssignees)
 			// Convert labels to JSONB (array of {name, color} objects)
 			labelsJSON, _ := json.Marshal(it.Labels)
 
@@ -245,9 +329,13 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				}
 			}
 
-			// Fetch comments for this issue (if comments_count > 0)
+			// Fetch comments for this issue (if comments_count > 0, or if the
+			// reconciliation step above just posted a new one - it.Comments
+			// is the count from before that comment existed, so relying on
+			// it alone here would let the bulk UPSERT below clobber the
+			// comment just posted with the stale empty default).
 			var commentsJSON []byte = []byte("[]")
-			if it.Comments > 0 {
+			if it.Comments > 0 || commentPosted {
 				if err := w.limiter.Wait(ctx); err == nil {
 					comments, err := w.gh.ListIssueComments(ctx, token, fullName, it.Number)
 					if err == nil {
@@ -284,6 +372,80 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 		"total_issues", totalIssues,
 	)
 	return nil
+}
+
+// reconcileApplicationStatuses keeps issue_applications in sync with
+// GitHub's current assignee list for one issue, regardless of whether the
+// assignment happened through Grainlify's own Assign()/Unassign() or
+// directly on GitHub:
+//   - an issue_applications row still 'assigned' whose login GitHub no
+//     longer lists as an assignee is demoted back to 'applied'
+//   - an eligible ('applied' or 'assigned') row whose login GitHub does
+//     list, but that's still 'applied', is promoted to 'assigned'
+//   - a GitHub assignee with no eligible row at all is reported back in
+//     ineligible for the caller to remove via the GitHub API - Grainlify is
+//     the source of truth for who may be assigned, so this is what makes
+//     that enforceable even when the assignment bypassed the platform
+//
+// ghAssigneeLogins may be empty (GitHub reports no assignees at all) - that
+// is exactly the case the demote step needs to handle, so this must be
+// called unconditionally per issue, not skipped when there are no assignees.
+func reconcileApplicationStatuses(ctx context.Context, pool db.DBPool, projectID uuid.UUID, issueNumber int, ghAssigneeLogins []string) (ineligible []string, err error) {
+	lowered := make([]string, len(ghAssigneeLogins))
+	for i, l := range ghAssigneeLogins {
+		lowered[i] = strings.ToLower(l)
+	}
+
+	rows, err := pool.Query(ctx, `
+SELECT LOWER(github_login)
+FROM issue_applications
+WHERE project_id = $1 AND issue_number = $2 AND status IN ('applied', 'assigned')
+`, projectID, issueNumber)
+	if err != nil {
+		return nil, err
+	}
+	eligibleLogins := make(map[string]bool)
+	for rows.Next() {
+		var login string
+		if err := rows.Scan(&login); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		eligibleLogins[login] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	eligible := make([]string, 0, len(ghAssigneeLogins))
+	for i, l := range lowered {
+		if eligibleLogins[l] {
+			eligible = append(eligible, l)
+		} else {
+			ineligible = append(ineligible, ghAssigneeLogins[i])
+		}
+	}
+
+	if len(eligible) > 0 {
+		if _, err := pool.Exec(ctx, `
+UPDATE issue_applications
+SET status = 'assigned', assigned_at = now(), updated_at = now()
+WHERE project_id = $1 AND issue_number = $2 AND status = 'applied' AND LOWER(github_login) = ANY($3::text[])
+`, projectID, issueNumber, eligible); err != nil {
+			return ineligible, err
+		}
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE issue_applications
+SET status = 'applied', assigned_at = NULL, updated_at = now()
+WHERE project_id = $1 AND issue_number = $2 AND status = 'assigned' AND NOT (LOWER(github_login) = ANY($3::text[]))
+`, projectID, issueNumber, lowered); err != nil {
+		return ineligible, err
+	}
+
+	return ineligible, nil
 }
 
 func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName string, token string) error {

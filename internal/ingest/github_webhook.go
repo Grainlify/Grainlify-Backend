@@ -116,8 +116,10 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 		}
 	}
 
-	// Enqueue follow-up sync jobs (best-effort).
-	if projectID != nil && (e.Event == "issues" || e.Event == "pull_request" || e.Event == "push") {
+	// Enqueue follow-up sync jobs (best-effort). issue_comment is included so
+	// a comment posted directly on GitHub (outside Grainlify) gets picked up
+	// by syncIssues()'s existing full comment refetch - see internal/syncjobs.
+	if projectID != nil && (e.Event == "issues" || e.Event == "pull_request" || e.Event == "push" || e.Event == "issue_comment") {
 		_, _ = i.Pool.Exec(ctx, `
 INSERT INTO sync_jobs (project_id, job_type, status, run_at)
 VALUES ($1::uuid, 'sync_issues', 'pending', now()),

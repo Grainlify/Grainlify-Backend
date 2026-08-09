@@ -170,6 +170,7 @@ Based on the permissions selected, subscribe to:
 - ✅ **Installation** - "Installation created, deleted, or new permissions accepted"
 - ✅ **Installation repositories** - "Repositories added or removed from installation"
 - ✅ **Issues** - "Issue opened, edited, deleted, transferred, pinned, unpinned, closed, reopened, assigned, unassigned, labeled, unlabeled, locked, unlocked, milestoned, or demilestoned"
+- ✅ **Issue comment** - "Issue comment created, edited, or deleted" - required so a comment posted directly on GitHub (outside the Grainlify UI) triggers a resync and shows up in the platform's Discussions tab. No new permission needed - already covered by "Issues: Read & write" above, so this takes effect immediately for every installation once saved (no re-acceptance prompt).
 - ✅ **Pull request** - "Pull request opened, edited, closed, merged, synchronized, ready for review, locked, unlocked, a pull request review was requested, or a review request was removed"
 - ✅ **Push** - "One or more commits pushed to a repository"
 - ✅ **Repository** - "Repository created, deleted, archived, unarchived, publicized, or privatized"

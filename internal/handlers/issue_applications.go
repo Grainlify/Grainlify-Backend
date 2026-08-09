@@ -540,6 +540,18 @@ SELECT EXISTS(SELECT 1 FROM issue_applications WHERE project_id = $1 AND issue_n
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "issue_already_assigned"})
 		}
 
+		var applicantStatus string
+		err = h.db.Pool.QueryRow(c.Context(), `
+SELECT status FROM issue_applications
+WHERE project_id = $1 AND issue_number = $2 AND LOWER(github_login) = LOWER($3)
+`, projectID, issueNumber, req.Assignee).Scan(&applicantStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "applicant_lookup_failed"})
+		}
+		if applicantStatus != "applied" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "assignee_has_not_applied"})
+		}
+
 		appClient, err := github.NewGitHubAppClient(h.cfg.GitHubAppID, h.cfg.GitHubAppPrivateKey)
 		if err != nil {
 			slog.Error("failed to create GitHub App client for assign", "error", err)
