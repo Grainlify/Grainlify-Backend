@@ -235,12 +235,19 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			// assignee with no eligible issue_applications row (e.g. assigned
 			// directly on GitHub, bypassing the platform) gets removed here,
 			// and issue_applications.status is reconciled in both directions
-			// regardless of which interface made the change.
-			ineligible, recErr := reconcileApplicationStatuses(ctx, w.pool, projectID, it.Number, ghLogins)
-			if recErr != nil {
-				slog.Warn("reconcile application statuses failed",
-					"project_id", projectID, "issue_number", it.Number, "error", recErr)
-				ineligible = nil
+			// regardless of which interface made the change. Scoped to open
+			// issues carrying the GrainHack label only - closed issues (the
+			// work is done, nothing to enforce) and issues outside the
+			// hackathon are never touched by this, regardless of assignee.
+			var ineligible []string
+			if shouldEnforceAssignmentEligibility(it.State, it.Labels) {
+				var recErr error
+				ineligible, recErr = reconcileApplicationStatuses(ctx, w.pool, projectID, it.Number, ghLogins)
+				if recErr != nil {
+					slog.Warn("reconcile application statuses failed",
+						"project_id", projectID, "issue_number", it.Number, "error", recErr)
+					ineligible = nil
+				}
 			}
 
 			removed := make(map[string]bool, len(ineligible))
@@ -372,6 +379,31 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 		"total_issues", totalIssues,
 	)
 	return nil
+}
+
+// grainHackLabel is the GitHub label that marks an issue as part of the
+// Grainlify hackathon - the only issues the assignment-eligibility
+// reconciliation below is allowed to touch.
+const grainHackLabel = "GrainHack"
+
+// shouldEnforceAssignmentEligibility reports whether an issue is in scope
+// for the auto-revert-ineligible-assignee reconciliation in syncIssues:
+// open, and carrying the GrainHack label. Closed issues (nothing left to
+// enforce - the work is done) and issues outside the hackathon must never
+// be touched by this, no matter who's assigned to them.
+func shouldEnforceAssignmentEligibility(state string, labels []struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}) bool {
+	if !strings.EqualFold(state, "open") {
+		return false
+	}
+	for _, l := range labels {
+		if strings.EqualFold(l.Name, grainHackLabel) {
+			return true
+		}
+	}
+	return false
 }
 
 // reconcileApplicationStatuses keeps issue_applications in sync with

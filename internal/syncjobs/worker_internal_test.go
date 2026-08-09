@@ -187,3 +187,68 @@ SELECT count(*) FROM issue_applications WHERE project_id = $1 AND issue_number =
 		}
 	})
 }
+
+func TestShouldEnforceAssignmentEligibility(t *testing.T) {
+	type label = struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+
+	cases := []struct {
+		name   string
+		state  string
+		labels []label
+		want   bool
+	}{
+		{
+			name:   "open with GrainHack label",
+			state:  "open",
+			labels: []label{{Name: "GrainHack"}},
+			want:   true,
+		},
+		{
+			name:   "open with GrainHack label in a different case",
+			state:  "OPEN",
+			labels: []label{{Name: "grainhack"}},
+			want:   true,
+		},
+		{
+			name:   "closed with GrainHack label is never enforced",
+			state:  "closed",
+			labels: []label{{Name: "GrainHack"}},
+			want:   false,
+		},
+		{
+			name:   "open without GrainHack label is never enforced",
+			state:  "open",
+			labels: []label{{Name: "bug"}, {Name: "good first issue"}},
+			want:   false,
+		},
+		{
+			name:   "open with no labels at all",
+			state:  "open",
+			labels: nil,
+			want:   false,
+		},
+		{
+			name:   "closed with no labels",
+			state:  "closed",
+			labels: nil,
+			want:   false,
+		},
+		{
+			name:   "GrainHack label present among several others",
+			state:  "open",
+			labels: []label{{Name: "bug"}, {Name: "GrainHack"}, {Name: "priority:high"}},
+			want:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldEnforceAssignmentEligibility(tc.state, tc.labels); got != tc.want {
+				t.Errorf("shouldEnforceAssignmentEligibility(%q, %v) = %v, want %v", tc.state, tc.labels, got, tc.want)
+			}
+		})
+	}
+}
