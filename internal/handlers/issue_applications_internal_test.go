@@ -13,6 +13,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -198,5 +199,26 @@ func TestIssueLabelNames(t *testing.T) {
 
 	if got := issueLabelNames(nil); len(got) != 0 {
 		t.Fatalf("issueLabelNames(nil) = %v, want empty (not a panic)", got)
+	}
+}
+
+func TestIsGitHubInstallationNotFoundError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"real GitHub 404 shape", fmt.Errorf("failed to get installation token: status 404, error: map[message:Not Found status:404]"), true},
+		{"mixed-case Not Found", fmt.Errorf("some wrapper: Installation Not Found"), true},
+		{"network timeout", fmt.Errorf("context deadline exceeded"), false},
+		{"401 auth error", fmt.Errorf("status 401, error: map[message:Bad credentials]"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isGitHubInstallationNotFoundError(tc.err); got != tc.want {
+				t.Errorf("isGitHubInstallationNotFoundError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

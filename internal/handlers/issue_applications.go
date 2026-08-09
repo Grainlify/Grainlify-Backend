@@ -30,6 +30,20 @@ func NewIssueApplicationsHandler(cfg config.Config, d *db.DB, notify *notificati
 	return &IssueApplicationsHandler{cfg: cfg, db: d, notify: notify}
 }
 
+// isGitHubInstallationNotFoundError reports whether err is GitHub responding
+// that an installation access-token request failed because the installation
+// itself no longer exists (app uninstalled, or the stored installation id is
+// stale) - as opposed to a transient network/auth error. Distinguishing this
+// matters because it's the one case with a clear, actionable fix (reinstall
+// the GitHub App), unlike a generic installation_token_failed.
+func isGitHubInstallationNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "404") || strings.Contains(s, "not found")
+}
+
 // recordApplication upserts the caller's issue_applications row to
 // status='applied', creating it on a first application or reviving it after
 // a prior withdrawal. commentID is nil-able since every other status
@@ -317,6 +331,9 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 				"installation_id", installationID,
 				"error", err,
 			)
+			if isGitHubInstallationNotFoundError(err) {
+				return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "github_installation_not_found"})
+			}
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "installation_token_failed"})
 		}
 
@@ -560,6 +577,9 @@ WHERE project_id = $1 AND issue_number = $2 AND LOWER(github_login) = LOWER($3)
 		token, err := appClient.GetInstallationToken(c.Context(), installationID)
 		if err != nil {
 			slog.Warn("failed to get installation token for assign", "project_id", projectID.String(), "error", err)
+			if isGitHubInstallationNotFoundError(err) {
+				return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "github_installation_not_found"})
+			}
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "installation_token_failed"})
 		}
 
@@ -688,6 +708,9 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND gi.number
 		token, err := appClient.GetInstallationToken(c.Context(), installationID)
 		if err != nil {
 			slog.Warn("failed to get installation token for unassign", "project_id", projectID.String(), "error", err)
+			if isGitHubInstallationNotFoundError(err) {
+				return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "github_installation_not_found"})
+			}
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "installation_token_failed"})
 		}
 
@@ -795,6 +818,9 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 		token, err := appClient.GetInstallationToken(c.Context(), installationID)
 		if err != nil {
 			slog.Warn("failed to get installation token for reject", "project_id", projectID.String(), "error", err)
+			if isGitHubInstallationNotFoundError(err) {
+				return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "github_installation_not_found"})
+			}
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "installation_token_failed"})
 		}
 
