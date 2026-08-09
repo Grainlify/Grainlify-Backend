@@ -648,7 +648,7 @@ WHERE %s
 
 // Recommended returns top projects ordered by contributors count, enriched with GitHub data.
 // Query parameters:
-//   - limit: max results (default 8, max 20)
+//   - limit: max results (default 8, max 50)
 func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -656,7 +656,7 @@ func (h *ProjectsPublicHandler) Recommended() fiber.Handler {
 		}
 
 		limit := 8
-		if l := c.QueryInt("limit", 8); l > 0 && l <= 20 {
+		if l := c.QueryInt("limit", 8); l > 0 && l <= 50 {
 			limit = l
 		}
 

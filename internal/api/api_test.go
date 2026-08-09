@@ -145,6 +145,14 @@ func TestAPICORSAllowOriginsFunc(t *testing.T) {
 		{"vercel preview deployment is allowed", "https://grainlify-git-feature-branch.vercel.app", true},
 		{"0xo.in production subdomain is allowed", "https://grainlify.0xo.in", true},
 		{"api subdomain of 0xo.in is allowed", "https://api.grainlify.0xo.in", true},
+		// grainlify.com is the new production domain, kept alongside .0xo.in
+		// during the migration (see the api.go comment right above this
+		// check). Unlike .0xo.in, the bare apex IS allowed here (exact-match
+		// check), not just subdomains - grainlify.com itself is the frontend.
+		{"grainlify.com apex domain is allowed", "https://grainlify.com", true},
+		{"www subdomain of grainlify.com is allowed", "https://www.grainlify.com", true},
+		{"api subdomain of grainlify.com is allowed", "https://api.grainlify.com", true},
+		{"lookalike grainlify.com suffix without a leading dot is rejected", "https://evilgrainlify.com", false},
 		{"unrelated origin is rejected", "https://evil-phishing-site.example.com", false},
 		{"lookalike suffix without a leading dot is rejected", "https://notvercel.app", false},
 		// The AllowOriginsFunc suffix check is strictly "*.0xo.in" (must be

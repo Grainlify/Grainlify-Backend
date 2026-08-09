@@ -437,6 +437,59 @@ func TestProjectsPublicHandler_Recommended_NeedsMetadataFilter(t *testing.T) {
 	}
 }
 
+// TestProjectsPublicHandler_Recommended_LimitCapRaisedTo50 guards against a
+// regression to the bug this fix addressed: the handler used to silently
+// cap accepted `limit` values at 20 (falling back to the default of 8 for
+// anything above that), even though the frontend requests limit=50 to have
+// a large enough pool to dedupe into one card per org. All 25 fixture
+// projects are given a synthetic contributor count comfortably above this
+// file's sibling NeedsMetadataFilter test's own dominance value (40) so
+// they reliably outrank ordinary ambient noise - if fewer than all 25 come
+// back for limit=50, the cap is still silently clamping below what was
+// requested. The fixture is torn down in t.Cleanup rather than left in the
+// shared, never-truncated test database: an earlier version of this test
+// left its rows behind permanently, which on the *next* suite run silently
+// outranked (and broke) the sibling test's own smaller dominance value -
+// this test must never again be the reason another test's fixture data
+// stops ranking where it expects to.
+func TestProjectsPublicHandler_Recommended_LimitCapRaisedTo50(t *testing.T) {
+	d := testDB(t)
+	owner := projectsFxUser(t, d.Pool)
+
+	const n = 25
+	ids := make([]uuid.UUID, 0, n)
+	for i := 0; i < n; i++ {
+		id := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: owner, Status: "verified", NeedsMetadata: false})
+		projectsFxSeedManyContributors(t, d.Pool, id, 100)
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		// github_issues.project_id / github_pull_requests.project_id both
+		// cascade on delete, so removing the projects rows is sufficient.
+		if _, err := d.Pool.Exec(context.Background(), `DELETE FROM projects WHERE id = ANY($1)`, ids); err != nil {
+			t.Logf("cleanup: failed to delete fixture projects: %v", err)
+		}
+	})
+
+	app := newProjectsPublicTestApp(config.Config{}, d)
+	status, body := projectsFxDoJSON(t, app, "GET", "/projects/recommended?limit=50", "", nil)
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	var resp struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := projectsFxIDSet(resp.Projects)
+	for _, id := range ids {
+		if !got[id.String()] {
+			t.Errorf("project %s missing from limit=50 response (got %d projects back); limit cap regressed below 25", id, len(resp.Projects))
+		}
+	}
+}
+
 // TestProjectsPublicHandler_FilterOptions_NeedsMetadataFilter proves
 // FilterOptions() (GET /projects/filters) sources its language/category/tag
 // facets only from projects that are verified, not soft-deleted, and have

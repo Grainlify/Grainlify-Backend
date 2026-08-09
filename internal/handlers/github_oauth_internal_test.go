@@ -26,8 +26,19 @@ func TestIsAllowedRedirectURI(t *testing.T) {
 		{"first cors origin match", "https://allowed-cors.example.com/auth/callback", true},
 		{"second cors origin match", "https://another-cors.example.com/some/path", true},
 		{"frontend base url exact match", "https://app.grainlify.com/auth/callback", true},
+		// grainlify.com and its subdomains are allowed independent of
+		// FrontendBaseURL's exact value (this suite's cfg above sets it to
+		// a different subdomain, app.grainlify.com, specifically so these
+		// cases exercise the dedicated grainlify.com check, not that exact
+		// match) - regression coverage for the 2026-08-09 domain migration
+		// incident, where redirect=https://www.grainlify.com was rejected
+		// because this function is a separate, hand-duplicated allowlist
+		// from api.go's CORS check and only the latter was updated at first.
+		{"grainlify.com apex domain is allowed", "https://grainlify.com/auth/callback", true},
+		{"www subdomain of grainlify.com is allowed", "https://www.grainlify.com/auth/callback", true},
 		{"unrelated origin", "https://evil.example.com/auth/callback", false},
 		{"unrelated origin similar to frontend base url", "https://notapp.grainlify.com.evil.com/x", false},
+		{"lookalike grainlify.com suffix without a leading dot is rejected", "https://evilgrainlify.com/x", false},
 		{"malformed url with control byte", "\x7f", false},
 	}
 

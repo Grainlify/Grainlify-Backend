@@ -9,7 +9,7 @@ Our OAuth implementation follows the OAuth 2.0 specification recommendation for 
 ### ✅ Static Redirect URI (Required)
 - **Requirement:** Authorization callback URL must be static and pre-registered
 - **Our Implementation:** 
-  - Single static callback URL: `https://api.grainlify.0xo.in/auth/github/login/callback`
+  - Single static callback URL: `https://api.grainlify.com/auth/github/login/callback`
   - Registered in GitHub OAuth App settings
   - Never changes, works for all environments
 
@@ -39,14 +39,14 @@ base64(csrf_token + "|" + redirect_uri)
 
 **Example:**
 - CSRF Token: `abc123...`
-- Redirect URI: `https://grainlify.0xo.in`
-- Encoded State: `base64("abc123...|https://grainlify.0xo.in")`
+- Redirect URI: `https://grainlify.com`
+- Encoded State: `base64("abc123...|https://grainlify.com")`
 
 ### Flow
 
 1. **Frontend initiates OAuth:**
    ```
-   GET /auth/github/login/start?redirect=https://grainlify.0xo.in
+   GET /auth/github/login/start?redirect=https://grainlify.com
    ```
 
 2. **Backend generates state:**

@@ -34,6 +34,11 @@ type Config struct {
 	// Used to validate GitHub webhook signatures (X-Hub-Signature-256).
 	GitHubWebhookSecret string
 
+	// Discord webhook URL that bug reports (POST /bug-reports) are relayed
+	// to. If empty, the endpoint responds 503 rather than silently dropping
+	// reports.
+	DiscordBugReportWebhookURL string
+
 	// Public base URL of this backend, used when registering GitHub webhooks.
 	PublicBaseURL string
 
@@ -108,6 +113,8 @@ func Load() Config {
 		GitHubAppPrivateKey: getEnv("GITHUB_APP_PRIVATE_KEY", ""),
 
 		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
+
+		DiscordBugReportWebhookURL: getEnv("DISCORD_BUG_REPORT_WEBHOOK_URL", ""),
 
 		PublicBaseURL: getEnv("PUBLIC_BASE_URL", ""),
 

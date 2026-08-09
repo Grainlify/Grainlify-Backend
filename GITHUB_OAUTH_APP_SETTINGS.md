@@ -1,5 +1,23 @@
 # GitHub OAuth App Settings - Production Configuration
 
+## 🚧 Domain migration in progress (grainlify.0xo.in → grainlify.com)
+
+The values below already show the **new** `grainlify.com` domain, but as of
+this writing `grainlify.com` DNS still resolves to GoDaddy's default parked
+page (not Vercel) and `api.grainlify.com` doesn't resolve at all - the new
+domain is not actually serving the app yet. The backend's CORS allowlist
+accepts both domains during the transition (see `internal/api/api.go`), but
+the GitHub OAuth App itself only has room for **one** live Authorization
+callback URL.
+
+**Do not change the GitHub OAuth App's Authorization callback URL to the
+`api.grainlify.com` value below until DNS for `api.grainlify.com` is
+confirmed pointed at the backend and serving real traffic** - changing it
+prematurely breaks every GitHub login immediately, since GitHub would start
+redirecting to a callback URL nothing answers yet. Until then, the live
+GitHub OAuth App should keep using the `.0xo.in` callback URL from git
+history / your current App settings.
+
 ## ⚠️ Critical Settings
 
 When configuring your GitHub OAuth App for production, these settings are critical:
@@ -8,7 +26,7 @@ When configuring your GitHub OAuth App for production, these settings are critic
 
 **✅ CORRECT (Production):**
 ```
-https://grainlify.0xo.in
+https://grainlify.com
 ```
 
 **❌ WRONG:**
@@ -26,7 +44,7 @@ https://localhost:5173
 
 **✅ CORRECT (Backend - Single URL for all environments):**
 ```
-https://api.grainlify.0xo.in/auth/github/login/callback
+https://api.grainlify.com/auth/github/login/callback
 ```
 
 **Why this works:**
@@ -39,8 +57,8 @@ https://api.grainlify.0xo.in/auth/github/login/callback
 | Setting | Value | Notes |
 |---------|-------|-------|
 | **Application name** | Grainlify | Your app name |
-| **Homepage URL** | `https://grainlify.0xo.in` | Production frontend |
-| **Authorization callback URL** | `https://api.grainlify.0xo.in/auth/github/login/callback` | Backend callback (never changes) |
+| **Homepage URL** | `https://grainlify.com` | Production frontend |
+| **Authorization callback URL** | `https://api.grainlify.com/auth/github/login/callback` | Backend callback (never changes) |
 | **Application description** | (Optional) | Describe your app |
 
 ## How It Works

@@ -1119,7 +1119,7 @@ WHERE u.id = $1
 		}
 		// If no avatar in database, use GitHub avatar URL as fallback
 		if (avatarURL == nil || *avatarURL == "") && githubLogin != nil {
-			ghAvatarURL := fmt.Sprintf("https://github.com/%s.png?size=200", *githubLogin)
+			ghAvatarURL := github.AvatarURL(*githubLogin, 200)
 			avatarURL = &ghAvatarURL
 		}
 

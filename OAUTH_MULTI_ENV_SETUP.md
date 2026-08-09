@@ -5,7 +5,7 @@ This document explains how GitHub OAuth works across multiple environments (prod
 ## Problem
 
 GitHub OAuth Apps only allow **ONE Authorization Callback URL**, but Vercel preview deployments create different URLs for each PR:
-- Production: `https://grainlify.0xo.in`
+- Production: `https://grainlify.com`
 - Preview: `https://grainlify-xyz.vercel.app`
 - Fork Preview: `https://grainlify-git-fork-abc.vercel.app`
 
@@ -30,7 +30,7 @@ export const getGitHubLoginUrl = () => {
 ```
 
 **Examples:**
-- Production: `https://api.grainlify.com/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify.0xo.in`
+- Production: `https://api.grainlify.com/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify.com`
 - Preview: `https://api.grainlify.com/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify-xyz.vercel.app`
 
 ### 2. Backend Stores Redirect URI (with Security Validation)
@@ -86,7 +86,7 @@ After successful authentication, the backend:
 
 1. **Homepage URL** (PRODUCTION):
    ```
-   https://grainlify.0xo.in
+   https://grainlify.com
    ```
    - ❌ **DO NOT** use `localhost` in production
    - This is used by GitHub as the default landing page
@@ -94,7 +94,7 @@ After successful authentication, the backend:
 
 2. **Authorization callback URL** (BACKEND - set once, never change):
    ```
-   https://api.grainlify.0xo.in/auth/github/login/callback
+   https://api.grainlify.com/auth/github/login/callback
    ```
    - This is the single callback URL that works for all environments
    - Must match `GITHUB_OAUTH_REDIRECT_URL` in backend config
@@ -116,8 +116,8 @@ GITHUB_OAUTH_REDIRECT_URL=https://grainlify-production.up.railway.app/auth/githu
 
 **Optional (fallbacks):**
 ```bash
-GITHUB_LOGIN_SUCCESS_REDIRECT_URL=https://grainlify.0xo.in/auth/callback  # Fallback if redirect param not provided
-FRONTEND_BASE_URL=https://grainlify.0xo.in  # Another fallback
+GITHUB_LOGIN_SUCCESS_REDIRECT_URL=https://grainlify.com/auth/callback  # Fallback if redirect param not provided
+FRONTEND_BASE_URL=https://grainlify.com  # Another fallback
 ```
 
 ### Database Migration

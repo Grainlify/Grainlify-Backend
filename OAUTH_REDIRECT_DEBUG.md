@@ -31,15 +31,15 @@ After implementing the logging changes, check backend logs when OAuth flow happe
 
 1. **When user clicks "Sign in":**
    ```
-   OAuth login start - received redirect parameter redirect=https://grainlify.0xo.in
-   OAuth login start - stored redirect_uri in state redirect_uri=https://grainlify.0xo.in state=...
+   OAuth login start - received redirect parameter redirect=https://grainlify.com
+   OAuth login start - stored redirect_uri in state redirect_uri=https://grainlify.com state=...
    ```
 
 2. **When GitHub redirects back:**
    ```
-   OAuth callback - retrieved redirect_uri from state redirect_uri=https://grainlify.0xo.in kind=github_login
-   OAuth redirect - using stored redirect_uri redirect_url=https://grainlify.0xo.in/auth/callback
-   OAuth redirect - redirecting user final_redirect_url=https://grainlify.0xo.in/auth/callback?token=...
+   OAuth callback - retrieved redirect_uri from state redirect_uri=https://grainlify.com kind=github_login
+   OAuth redirect - using stored redirect_uri redirect_url=https://grainlify.com/auth/callback
+   OAuth redirect - redirecting user final_redirect_url=https://grainlify.com/auth/callback?token=...
    ```
 
 **If you see:**
@@ -52,7 +52,7 @@ Check browser Network tab when clicking "Sign in with GitHub":
 
 1. Look for request to: `/auth/github/login/start?redirect=...`
 2. Verify the `redirect` parameter contains the correct frontend URL
-3. Should be: `redirect=https%3A%2F%2Fgrainlify.0xo.in` (URL encoded)
+3. Should be: `redirect=https%3A%2F%2Fgrainlify.com` (URL encoded)
 
 **If redirect parameter is missing:**
 - Check `frontend/src/shared/api/client.ts` - `getGitHubLoginUrl()` function
@@ -71,27 +71,27 @@ ORDER BY created_at DESC
 LIMIT 5;
 ```
 
-**Expected:** `redirect_uri` column should contain the frontend URL (e.g., `https://grainlify.0xo.in`)
+**Expected:** `redirect_uri` column should contain the frontend URL (e.g., `https://grainlify.com`)
 
 **If NULL:** The redirect parameter wasn't passed from frontend or validation failed.
 
 ## Step 5: Check GitHub OAuth App Settings
 
 **Homepage URL** should be set to production (but backend redirect should override it):
-- ✅ `https://grainlify.0xo.in` (production)
+- ✅ `https://grainlify.com` (production)
 - ❌ `http://localhost:5173` (wrong for production)
 
 **Authorization callback URL** should be:
-- ✅ `https://api.grainlify.0xo.in/auth/github/login/callback`
+- ✅ `https://api.grainlify.com/auth/github/login/callback`
 
 ## Step 6: Test the Flow
 
 1. **Clear browser cache/cookies**
 2. **Open browser DevTools → Network tab**
 3. **Click "Sign in with GitHub"**
-4. **Check the request URL** - should include `?redirect=https://grainlify.0xo.in`
+4. **Check the request URL** - should include `?redirect=https://grainlify.com`
 5. **After GitHub authorization**, check backend logs
-6. **Verify final redirect** - should go to `https://grainlify.0xo.in/auth/callback?token=...`
+6. **Verify final redirect** - should go to `https://grainlify.com/auth/callback?token=...`
 
 ## Common Issues
 

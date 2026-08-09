@@ -49,6 +49,17 @@ func isAllowedRedirectURI(redirectURI string, cfg config.Config) bool {
 		return true
 	}
 
+	// Allow the production domain (grainlify.com and its subdomains, e.g.
+	// www.grainlify.com) during the migration off grainlify.0xo.in - mirrors
+	// the equivalent check in internal/api/api.go's CORS AllowOriginsFunc.
+	// This function is a separate, hand-duplicated allowlist (not shared code
+	// with that one), which is exactly how it went out of sync and started
+	// rejecting redirect=https://www.grainlify.com after the CORS check was
+	// updated but this one wasn't - kept in mind for next time either changes.
+	if origin == "https://grainlify.com" || strings.HasSuffix(origin, ".grainlify.com") {
+		return true
+	}
+
 	// Check explicit CORS origins
 	if strings.TrimSpace(cfg.CORSOrigins) != "" {
 		for _, o := range strings.Split(cfg.CORSOrigins, ",") {

@@ -6,6 +6,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
 
 type SearchHandler struct {
@@ -124,7 +125,7 @@ LIMIT $2
 				var contributions int
 				if rows.Scan(&login, &avatarURL, &userID, &contributions) == nil {
 					if avatarURL == "" {
-						avatarURL = "https://github.com/" + login + ".png?size=200"
+						avatarURL = github.AvatarURL(login, 200)
 					}
 					contributors = append(contributors, fiber.Map{
 						"login":         login,

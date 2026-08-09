@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
 
@@ -301,7 +302,7 @@ func TestLeaderboardSuite_RanksByContributionCountAndReportsExpectedFields(t *te
 		t.Errorf("alice user_id = %v, want %v", aliceEntry["user_id"], aliceUser.String())
 	}
 
-	wantBobAvatar := fmt.Sprintf("https://github.com/%s.png?size=200", bobLogin)
+	wantBobAvatar := github.AvatarURL(bobLogin, 200)
 	if bobEntry["avatar"] != wantBobAvatar {
 		t.Errorf("bob avatar = %v, want fallback %v (bob never linked a github_accounts row)", bobEntry["avatar"], wantBobAvatar)
 	}

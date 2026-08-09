@@ -3,7 +3,6 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math/rand"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
 
@@ -300,6 +300,19 @@ func TestSearchSuite_MatchesContributorLogin_SumsIssuesAndPRs_CaseInsensitive(t 
 	searchSuiteIssue(t, d.Pool, project, "unrelated title", "open", login)
 	searchSuiteIssue(t, d.Pool, project, "unrelated title", "closed", login)
 	searchSuitePR(t, d.Pool, project, login)
+	// grainlify_test is never truncated between runs (see backend test-suite
+	// notes) - every "SearchSuiteAlice*" login this test creates has an
+	// identical contributions count (3), so without cleanup, enough
+	// accumulated runs eventually crowd this test's own fresh login out of
+	// the search's top-searchResultLimit results. Delete just this run's own
+	// rows (matched by the unique generated login, never a shared prefix) so
+	// the suite stays reliable regardless of how many times it's been run.
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = d.Pool.Exec(ctx, `DELETE FROM github_pull_requests WHERE author_login = $1`, login)
+		_, _ = d.Pool.Exec(ctx, `DELETE FROM github_issues WHERE author_login = $1`, login)
+		_, _ = d.Pool.Exec(ctx, `DELETE FROM github_accounts WHERE login = $1`, login)
+	})
 
 	// Search with a different case than the stored login to confirm ILIKE
 	// case-insensitivity end to end.
@@ -352,7 +365,7 @@ func TestSearchSuite_ContributorWithoutLinkedAccount_FallsBackToGitHubAvatar(t *
 	if found == nil {
 		t.Fatalf("expected to find contributor %q; got %v", login, contributors)
 	}
-	wantAvatar := fmt.Sprintf("https://github.com/%s.png?size=200", login)
+	wantAvatar := github.AvatarURL(login, 200)
 	if found["avatar_url"] != wantAvatar {
 		t.Errorf("avatar_url = %v, want fallback %v", found["avatar_url"], wantAvatar)
 	}

@@ -1,12 +1,12 @@
 package handlers
 
 import (
-	"fmt"
 	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
 
 type LeaderboardHandler struct {
@@ -146,7 +146,7 @@ LIMIT $1 OFFSET $2
 				avatar = *avatarURL
 			} else {
 				// Fallback to GitHub avatar URL if not in database
-				avatar = fmt.Sprintf("https://github.com/%s.png?size=200", username)
+				avatar = github.AvatarURL(username, 200)
 			}
 
 			// Ensure ecosystems is not nil
