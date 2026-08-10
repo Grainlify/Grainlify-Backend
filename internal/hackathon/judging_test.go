@@ -254,7 +254,7 @@ func TestComputePayout_SpecWorkedExample(t *testing.T) {
 		t.Fatalf("ComputePayout: %v", err)
 	}
 	if plan.TotalUnits != 91 {
-		t.Errorf("TotalUnits = %d, want 91", plan.TotalUnits)
+		t.Errorf("TotalUnits = %v, want 91", plan.TotalUnits)
 	}
 	if got := round2(plan.UnitValue); got != 109.89 {
 		t.Errorf("UnitValue = %v, want 109.89", got)
@@ -285,7 +285,7 @@ func TestComputePayout_RejectedTakeNoShare(t *testing.T) {
 		t.Fatalf("ComputePayout: %v", err)
 	}
 	if plan.TotalUnits != 1 {
-		t.Errorf("TotalUnits = %d, want 1 - a rejected PR contributes no units", plan.TotalUnits)
+		t.Errorf("TotalUnits = %v, want 1 - a rejected PR contributes no units", plan.TotalUnits)
 	}
 	for _, e := range plan.Entries {
 		if e.Bucket == "rejected" && (e.Amount != 0 || e.Funded) {
@@ -377,7 +377,7 @@ func TestComputePayout_ZeroPoolPaysNothingButStillRanks(t *testing.T) {
 	}
 	// A $0 test event still produces a full plan; it just pays nothing.
 	if plan.TotalUnits != 3 {
-		t.Errorf("TotalUnits = %d, want 3", plan.TotalUnits)
+		t.Errorf("TotalUnits = %v, want 3", plan.TotalUnits)
 	}
 	for _, e := range plan.Entries {
 		if e.Amount != 0 {

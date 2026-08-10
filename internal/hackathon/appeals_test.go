@@ -14,14 +14,22 @@ import (
 // apFxVerdict inserts a judged verdict owned by userID.
 func apFxVerdict(t *testing.T, pool db.DBPool, hackathonID, projectID uuid.UUID, userID *uuid.UUID, pr int, bucket string) uuid.UUID {
 	t.Helper()
+	return apFxVerdictAs(t, pool, hackathonID, projectID, userID, pr, bucket, "octocat")
+}
+
+// apFxVerdictAs is the same with an explicit login. The diminishing-returns
+// curve groups by login, so tests that mean "two different people" have to
+// say so - a shared login makes their PRs one contributor's sequence.
+func apFxVerdictAs(t *testing.T, pool db.DBPool, hackathonID, projectID uuid.UUID, userID *uuid.UUID, pr int, bucket, login string) uuid.UUID {
+	t.Helper()
 	var id uuid.UUID
 	err := pool.QueryRow(context.Background(), `
 INSERT INTO hackathon_verdicts
   (hackathon_id, project_id, pr_number, user_id, github_login,
    prefilter_status, final_bucket, final_source)
-VALUES ($1,$2,$3,$4,'octocat','passed',$5,'auto_confirmed')
+VALUES ($1,$2,$3,$4,$6,'passed',$5,'auto_confirmed')
 RETURNING id
-`, hackathonID, projectID, pr, userID, bucket).Scan(&id)
+`, hackathonID, projectID, pr, userID, bucket, login).Scan(&id)
 	if err != nil {
 		t.Fatalf("apFxVerdict: %v", err)
 	}
@@ -177,11 +185,11 @@ func TestCloseAppealsAndRecompute_RedividesThePoolForEveryone(t *testing.T) {
 
 	appellant := fxUser(t, pool)
 	// Four accepted PRs at 1 unit each = 4 units, $250 apiece.
-	appealVerdict := apFxVerdict(t, pool, hackathonID, projectID, &appellant, 910, "accepted")
+	appealVerdict := apFxVerdictAs(t, pool, hackathonID, projectID, &appellant, 910, "accepted", "appellant")
 	other := fxUser(t, pool)
-	apFxVerdict(t, pool, hackathonID, projectID, &other, 911, "accepted")
-	apFxVerdict(t, pool, hackathonID, projectID, &other, 912, "accepted")
-	apFxVerdict(t, pool, hackathonID, projectID, &other, 913, "accepted")
+	apFxVerdictAs(t, pool, hackathonID, projectID, &other, 911, "accepted", "bystander")
+	apFxVerdictAs(t, pool, hackathonID, projectID, &other, 912, "accepted", "bystander")
+	apFxVerdictAs(t, pool, hackathonID, projectID, &other, 913, "accepted", "bystander")
 
 	apFxPublishResults(t, pool, hackathonID, 1)
 
@@ -205,12 +213,11 @@ func TestCloseAppealsAndRecompute_RedividesThePoolForEveryone(t *testing.T) {
 		t.Fatal("expected a recomputed plan")
 	}
 
-	// 3 accepted (1 unit) + 1 substantial (3 units) = 6 units.
-	if plan.TotalUnits != 6 {
-		t.Fatalf("total_units = %d, want 6 (3 accepted + 1 substantial)", plan.TotalUnits)
-	}
-	if plan.UnitValue < 166.0 || plan.UnitValue > 167.0 {
-		t.Errorf("unit_value = %v, want ~166.67 ($1000 / 6 units)", plan.UnitValue)
+	// The appellant's single substantial PR is 3 units at full weight. The
+	// bystander's three accepted PRs run down the curve: 1.0 + 0.8 + 0.6.
+	// 3 + 2.4 = 5.4 effective units.
+	if plan.TotalUnits < 5.39 || plan.TotalUnits > 5.41 {
+		t.Fatalf("total_units = %v, want 5.4 (substantial at full weight + three accepted down the curve)", plan.TotalUnits)
 	}
 
 	// The other three contributors' payouts must have moved too. That is the

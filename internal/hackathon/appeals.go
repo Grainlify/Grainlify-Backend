@@ -2,6 +2,7 @@ package hackathon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -309,10 +310,13 @@ SELECT COALESCE(contributor_prize_pool, 0) FROM hackathons WHERE id = $1
 	}
 
 	rows, err := pool.Query(ctx, `
-SELECT id::text, github_login, final_bucket
-FROM hackathon_verdicts
-WHERE hackathon_id = $1 AND final_bucket IS NOT NULL
-ORDER BY id
+SELECT v.id::text, v.github_login, v.final_bucket,
+       COALESCE(pr.merged_at_github, v.created_at)
+FROM hackathon_verdicts v
+LEFT JOIN github_pull_requests pr
+       ON pr.project_id = v.project_id AND pr.number = v.pr_number
+WHERE v.hackathon_id = $1 AND v.final_bucket IS NOT NULL
+ORDER BY v.id
 `, hackathonID)
 	if err != nil {
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: load verdicts: %w", err)
@@ -320,7 +324,7 @@ ORDER BY id
 	var judged []JudgedPR
 	for rows.Next() {
 		var p JudgedPR
-		if err := rows.Scan(&p.VerdictID, &p.Login, &p.Bucket); err != nil {
+		if err := rows.Scan(&p.VerdictID, &p.Login, &p.Bucket, &p.MergedAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: scan verdict: %w", err)
 		}
@@ -368,15 +372,22 @@ SELECT id FROM hackathon_payout_runs WHERE hackathon_id = $1 ORDER BY created_at
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: find prior run: %w", err)
 	}
 
+	curveJSON, err := json.Marshal(plan.Curve)
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: marshal curve: %w", err)
+	}
+
 	var runID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 INSERT INTO hackathon_payout_runs (
   hackathon_id, contributor_prize_pool, total_units, unit_value,
-  floor_applied, payout_floor, unfunded_count, computed_by, trigger, supersedes_run_id
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'appeal_recompute',$9)
+  floor_applied, payout_floor, unfunded_count, computed_by, trigger,
+  supersedes_run_id, curve_applied, curve
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'appeal_recompute',$9,$10,$11)
 RETURNING id
 `, hackathonID, plan.Pool, plan.TotalUnits, plan.UnitValue,
-		plan.FloorApplied, plan.PayoutFloor, plan.UnfundedCount, actorID, priorRun).Scan(&runID); err != nil {
+		plan.FloorApplied, plan.PayoutFloor, plan.UnfundedCount, actorID, priorRun,
+		plan.CurveApplied, curveJSON).Scan(&runID); err != nil {
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: insert payout run: %w", err)
 	}
 
@@ -387,9 +398,11 @@ RETURNING id
 		}
 		if _, err := tx.Exec(ctx, `
 UPDATE hackathon_verdicts
-SET units = $1, payout_amount = $2, payout_run_id = $3, updated_at = now()
-WHERE id = $4
-`, e.Units, amount, runID, e.VerdictID); err != nil {
+SET units = $1, payout_amount = $2, payout_run_id = $3,
+    curve_position = $4, curve_multiplier = $5, effective_units = $6,
+    updated_at = now()
+WHERE id = $7
+`, e.Units, amount, runID, e.CurvePosition, e.CurveMultiplier, e.EffectiveUnits, e.VerdictID); err != nil {
 			return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: write verdict payout: %w", err)
 		}
 	}

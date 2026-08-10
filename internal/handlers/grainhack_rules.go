@@ -121,6 +121,15 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 			// underlying contributor counts and that difference is easy to
 			// misread as the scoring not working.
 			"section_notes": fiber.Map{
+				"Judging and payout": "Each additional pull request you get accepted is worth progressively less. " +
+					"Your first accepted PR counts in full, your second a little less, and so on down the published " +
+					"curve, with the last value repeating after that. Position is by merge time and counts only PRs " +
+					"that were accepted - one that was rejected does not use up a place. " +
+					"You cannot work out a specific PR's multiplier while the event is running, because its position " +
+					"depends on how many you end up getting accepted in total, and that is not known until the event " +
+					"closes. The units this removes are not kept back: they raise the value of everyone else's share, " +
+					"which is the point of doing it. The payout floor is applied afterwards, so a PR whose share falls " +
+					"below the floor is handled by the published floor rule rather than being paid a token amount.",
 				"Maintainer pool": "Two of these are floor criteria rather than growth measures: whether the repo " +
 					"had commits before the event was announced, and whether it stayed active afterwards. A repo that " +
 					"has been around and stays around scores full marks on both, so most participating repos sit near " +
