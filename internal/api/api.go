@@ -393,6 +393,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/hackathons/:id/draws", auth.RequireRole("admin"), adminDraws.ListDraws())
 	adminGroup.Get("/hackathons/:id/assignments", auth.RequireRole("admin"), adminDraws.ListAssignments())
 
+	// §5 judging - the human review interface. In shadow mode (the default)
+	// every verdict is reviewed by hand, so this is the primary surface.
+	adminVerdicts := handlers.NewAdminHackathonVerdictsHandler(deps.DB)
+	adminGroup.Get("/hackathons/:id/verdicts", auth.RequireRole("admin"), adminVerdicts.List())
+	adminGroup.Get("/hackathon-verdicts/:id", auth.RequireRole("admin"), adminVerdicts.Get())
+	adminGroup.Post("/hackathon-verdicts/:id/override", auth.RequireRole("admin"), adminVerdicts.Override())
+
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
 	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())
 	adminGroup.Put("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.Update())

@@ -27,7 +27,7 @@ type IssueListItem struct {
 		Name  string `json:"name"`
 		Color string `json:"color"`
 	} `json:"labels"`
-	Comments int `json:"comments"` // Comments count
+	Comments  int     `json:"comments"` // Comments count
 	CreatedAt *string `json:"created_at"`
 	UpdatedAt *string `json:"updated_at"`
 	ClosedAt  *string `json:"closed_at"`
@@ -47,9 +47,13 @@ type PRListItem struct {
 	} `json:"user"`
 	Merged   bool    `json:"merged"`
 	MergedAt *string `json:"merged_at"`
-	CreatedAt *string `json:"created_at"`
-	UpdatedAt *string `json:"updated_at"`
-	ClosedAt  *string `json:"closed_at"`
+	// The commit the PR was merged as. Used to pin judging citations to
+	// the diff as merged, so a link to "file.go:44-61" still points at the
+	// right lines after the branch moves on.
+	MergeCommitSHA *string `json:"merge_commit_sha"`
+	CreatedAt      *string `json:"created_at"`
+	UpdatedAt      *string `json:"updated_at"`
+	ClosedAt       *string `json:"closed_at"`
 }
 
 func (c *Client) ListIssuesPage(ctx context.Context, accessToken string, fullName string, page int) ([]IssueListItem, error) {
@@ -132,9 +136,9 @@ func (c *Client) ListPRsPage(ctx context.Context, accessToken string, fullName s
 
 // IssueComment represents a comment on a GitHub issue.
 type IssueComment struct {
-	ID        int64  `json:"id"`
-	Body      string `json:"body"`
-	User      struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	CreatedAt string `json:"created_at"`
@@ -181,7 +185,3 @@ func looksLikeRFC3339(s string) bool {
 	// cheap heuristic; actual parsing happens where stored.
 	return strings.Contains(s, "T") && (strings.HasSuffix(s, "Z") || strings.Contains(s, "+") || strings.Contains(s, "-"))
 }
-
-
-
-
