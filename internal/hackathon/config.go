@@ -142,13 +142,13 @@ var Definitions = map[string]SettingDef{
 	"weight_per_abandon":            {Key: "weight_per_abandon", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier per prior abandon (< 1.0, i.e. a penalty).", Active: true},
 
 	// §3.10 judging and payout - inert until the judging slice
-	"units_rejected":                  {Key: "units_rejected", Type: "int", Default: "0", Section: "Judging and payout", Description: "Payout units for a 'rejected' PR bucket."},
-	"units_accepted":                  {Key: "units_accepted", Type: "int", Default: "1", Section: "Judging and payout", Description: "Payout units for an 'accepted' PR bucket."},
-	"units_substantial":               {Key: "units_substantial", Type: "int", Default: "3", Section: "Judging and payout", Description: "Payout units for a 'substantial' PR bucket."},
-	"units_exceptional":               {Key: "units_exceptional", Type: "int", Default: "5", Section: "Judging and payout", Description: "Payout units for an 'exceptional' PR bucket."},
-	"payout_floor":                    {Key: "payout_floor", Type: "money", Default: "50", Section: "Judging and payout", Description: "Minimum payout; below this, payout_floor_strategy decides how the pool is allocated."},
-	"payout_floor_strategy":           {Key: "payout_floor_strategy", Type: "enum", Default: "fund_highest_buckets_first", Section: "Judging and payout", Description: "How the pool is allocated when unit_value would fall below the floor.", ValidRange: "fund_highest_buckets_first"},
-	"duplicate_similarity_threshold":  {Key: "duplicate_similarity_threshold", Type: "float", Default: "0.92", Section: "Judging and payout", Description: "Embedding cosine-similarity threshold for flagging duplicate PRs.", ValidRange: "0-1"},
+	"units_rejected":                  {Key: "units_rejected", Type: "int", Default: "0", Section: "Judging and payout", Description: "Payout units for a 'rejected' PR bucket.", Active: true},
+	"units_accepted":                  {Key: "units_accepted", Type: "int", Default: "1", Section: "Judging and payout", Description: "Payout units for an 'accepted' PR bucket.", Active: true},
+	"units_substantial":               {Key: "units_substantial", Type: "int", Default: "3", Section: "Judging and payout", Description: "Payout units for a 'substantial' PR bucket.", Active: true},
+	"units_exceptional":               {Key: "units_exceptional", Type: "int", Default: "5", Section: "Judging and payout", Description: "Payout units for an 'exceptional' PR bucket.", Active: true},
+	"payout_floor":                    {Key: "payout_floor", Type: "money", Default: "50", Section: "Judging and payout", Description: "Minimum payout; below this, payout_floor_strategy decides how the pool is allocated.", Active: true},
+	"payout_floor_strategy":           {Key: "payout_floor_strategy", Type: "enum", Default: "fund_highest_buckets_first", Section: "Judging and payout", Description: "How the pool is allocated when unit_value would fall below the floor.", ValidRange: "fund_highest_buckets_first", Active: true},
+	"duplicate_similarity_threshold":  {Key: "duplicate_similarity_threshold", Type: "float", Default: "0.92", Section: "Judging and payout", Description: "Embedding cosine-similarity threshold for flagging duplicate PRs.", ValidRange: "0-1", Active: true},
 	"cross_check_enabled":             {Key: "cross_check_enabled", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Run every judged PR through a second AI provider."},
 	"cross_check_provider":            {Key: "cross_check_provider", Type: "enum", Default: "openai", Section: "Judging and payout", Description: "The second provider used for cross-checking."},
 	"escalate_on_low_confidence":      {Key: "escalate_on_low_confidence", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Route low-confidence verdicts to human escalation."},
@@ -167,6 +167,14 @@ var Definitions = map[string]SettingDef{
 	// which is a valid §4.4 outcome, so gates/tickets/draws stay fully
 	// exercisable with zero model calls.
 	"ai_fit_assessment_enabled": {Key: "ai_fit_assessment_enabled", Type: "bool", Default: "false", Section: "Models", Description: "Run the AI fit assessment (§4.3). When off, every applicant that passes the hard gates is assessed 'plausible'.", Active: true},
+	// Gates §5 stages 3-5 (judge, cross-check, escalation). Stages 1, 2
+	// and 6 - pre-filter, duplicate detection and payout maths - are
+	// deterministic and run regardless.
+	"ai_judging_enabled": {Key: "ai_judging_enabled", Type: "bool", Default: "false", Section: "Models", Description: "Run the AI judging stages (§5.3-5.5). When off, PRs are pre-filtered and duplicate-checked but not bucketed by a model.", Active: true},
+	// §12: "Event 1 - shadow mode. Judging runs but publishes nothing; pay
+	// by hand." On by default so that is what happens unless someone
+	// deliberately turns it off.
+	"judging_shadow_mode":       {Key: "judging_shadow_mode", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Compute verdicts and payouts but publish nothing to contributors. The rollout's first event is meant to run this way.", Active: true},
 	"model_assignment":          {Key: "model_assignment", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-applicant AI fit assessment."},
 	"model_judging":             {Key: "model_judging", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-PR judging call."},
 	"model_cross_check":         {Key: "model_cross_check", Type: "string", Default: "", Section: "Models", Description: "Model used by the cross-check provider."},
