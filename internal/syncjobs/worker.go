@@ -321,7 +321,23 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 
 			removed := make(map[string]bool, len(ineligible))
 			commentPosted := false
-			if len(ineligible) > 0 {
+			// auto_revert_oob_assignment gates the GitHub write only. The
+			// issue_applications reconciliation above still runs either way:
+			// an admin switching this off is asking us to stop touching their
+			// repository, not asking us to stop keeping accurate records.
+			//
+			// This gate did not exist until now - the setting was seeded and
+			// shown in the admin UI while being read by nothing, so an admin
+			// could turn it off, see it off, and Grainlify would keep removing
+			// assignees and commenting on repositories it does not own.
+			//
+			// Counting these against oob_assignment_flag_threshold (§2.3) is
+			// still to come; until it lands, switching this off means the
+			// out-of-band assignment leaves no record beyond this log line.
+			if len(ineligible) > 0 && !hackathon.AutoRevertOOBAssignment(ctx, w.pool, projectID) {
+				slog.Info("out-of-band assignees left in place: auto_revert_oob_assignment is off",
+					"project_id", projectID, "issue_number", it.Number, "logins", ineligible)
+			} else if len(ineligible) > 0 {
 				if tok, tokErr := getInstallationToken(); tokErr != nil {
 					slog.Warn("no installation token available to remove ineligible assignees",
 						"project_id", projectID, "issue_number", it.Number, "logins", ineligible, "error", tokErr)
