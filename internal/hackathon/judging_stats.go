@@ -21,6 +21,14 @@ import (
 // about. The fix in that case is the definitions and the calibration set,
 // not a bigger review queue or a better model.
 type JudgingStats struct {
+	// Unresolvable counts verdicts the escalation stage explicitly could not
+	// settle. Tracked next to the disagreement rate because they are the same
+	// signal seen from a different angle: a disagreement says two reviews
+	// differed, an unresolvable says a third look could not say which was
+	// right. If this climbs, the bucket definitions are ambiguous and the fix
+	// is the definitions and the calibration set, not more reviewers.
+	Unresolvable int `json:"unresolvable"`
+
 	Total int `json:"total"`
 	// BothJudged is the denominator for the disagreement rate: verdicts
 	// where a judge and a cross-check both returned a bucket. A missing
@@ -65,11 +73,12 @@ SELECT
   count(*) FILTER (WHERE overridden_at IS NOT NULL),
   count(*) FILTER (WHERE prefilter_status = 'rejected'),
   count(*) FILTER (WHERE cross_check_bucket IS NOT NULL),
-  count(*) FILTER (WHERE judge_payload -> 'concerns' ? 'instruction_injection_attempt')
+  count(*) FILTER (WHERE judge_payload -> 'concerns' ? 'instruction_injection_attempt'),
+  count(*) FILTER (WHERE review_reason = 'escalation_could_not_resolve')
 FROM hackathon_verdicts
 WHERE hackathon_id = $1
 `, hackathonID).Scan(&s.Total, &s.BothJudged, &s.Disagreements, &s.NeedsReview,
-		&s.Overridden, &s.PrefilterOut, &s.CrossChecked, &s.InjectionFlagged)
+		&s.Overridden, &s.PrefilterOut, &s.CrossChecked, &s.InjectionFlagged, &s.Unresolvable)
 	if err != nil {
 		return nil, fmt.Errorf("hackathon.ComputeJudgingStats: %w", err)
 	}

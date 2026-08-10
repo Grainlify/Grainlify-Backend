@@ -142,7 +142,7 @@ SELECT
     WHERE gpr.project_id = p.id AND gpr.state = 'open'
   ) AS open_prs_count,
   (
-    SELECT COUNT(DISTINCT a.author_login)
+    SELECT COUNT(DISTINCT LOWER(a.author_login))
     FROM (
       SELECT author_login FROM github_issues WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
       UNION
@@ -475,7 +475,6 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 		// Exclude special GitHub repositories (owner/.github)
 		conditions = append(conditions, "split_part(p.github_full_name, '/', 2) != '.github'")
 
-
 		// Filter by ecosystem
 		if ecosystem != "" {
 			conditions = append(conditions, fmt.Sprintf("LOWER(TRIM(e.name)) = LOWER($%d)", argPos))
@@ -539,7 +538,7 @@ SELECT
     WHERE gpr.project_id = p.id AND gpr.state = 'open'
   ) AS open_prs_count,
   (
-    SELECT COUNT(DISTINCT a.author_login)
+    SELECT COUNT(DISTINCT LOWER(a.author_login))
     FROM (
       SELECT author_login FROM github_issues WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
       UNION
@@ -682,7 +681,7 @@ SELECT
     WHERE gpr.project_id = p.id AND gpr.state = 'open'
   ) AS open_prs_count,
   (
-    SELECT COUNT(DISTINCT a.author_login)
+    SELECT COUNT(DISTINCT LOWER(a.author_login))
     FROM (
       SELECT author_login FROM github_issues WHERE project_id = p.id AND author_login IS NOT NULL AND author_login != ''
       UNION

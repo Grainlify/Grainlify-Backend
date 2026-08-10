@@ -124,7 +124,16 @@ func (h *AdminHackathonVerdictsHandler) List() fiber.Handler {
 
 		switch c.Query("status") {
 		case "needs_review":
-			query += ` AND (v.needs_human_review OR v.duplicate_flagged)`
+			// Ordinary review only. Cases the adjudicator could not resolve
+			// are excluded here and have their own filter below, because
+			// they are a different finding and get lost in the general queue.
+			query += ` AND (v.needs_human_review OR v.duplicate_flagged)` +
+				` AND (v.review_reason IS DISTINCT FROM '` + hackathon.ReviewReasonUnresolvable + `')`
+		case "unresolvable":
+			// §5.6/§5.7: the adjudicator saw both reviews and could not say
+			// which was better supported. That points at the bucket
+			// definitions rather than at this pull request.
+			query += ` AND v.review_reason = '` + hackathon.ReviewReasonUnresolvable + `'`
 		case "rejected":
 			query += ` AND v.prefilter_status = 'rejected'`
 		case "overridden":
@@ -134,7 +143,7 @@ func (h *AdminHackathonVerdictsHandler) List() fiber.Handler {
 			args = append(args, bucket)
 			query += ` AND v.final_bucket = $2`
 		}
-		query += ` ORDER BY v.needs_human_review DESC, v.duplicate_flagged DESC, v.created_at DESC LIMIT 500`
+		query += ` ORDER BY (v.review_reason = 'escalation_could_not_resolve') DESC, v.needs_human_review DESC, v.duplicate_flagged DESC, v.created_at DESC LIMIT 500`
 
 		rows, err := h.db.Pool.Query(c.Context(), query, args...)
 		if err != nil {

@@ -90,32 +90,41 @@ LIMIT $2
 
 		contributors := []fiber.Map{}
 		if rows, err := h.db.Pool.Query(ctx, `
+-- Deduplicated case-insensitively, because the same person appears with
+-- different capitalisation across issues and PRs - but displayed with a real
+-- capitalisation, never a lowercased one. Grouping on LOWER() and then
+-- showing that value renders someone's name wrong; the login_key is for
+-- matching, login_display is what a human sees.
 WITH matched_contributors AS (
-  SELECT DISTINCT i.author_login AS login
-  FROM github_issues i
-  INNER JOIN projects p ON i.project_id = p.id
-  WHERE p.status = 'verified' AND i.author_login IS NOT NULL AND i.author_login != ''
-    AND i.author_login ILIKE $1
-  UNION
-  SELECT DISTINCT pr.author_login AS login
-  FROM github_pull_requests pr
-  INNER JOIN projects p ON pr.project_id = p.id
-  WHERE p.status = 'verified' AND pr.author_login IS NOT NULL AND pr.author_login != ''
-    AND pr.author_login ILIKE $1
+  SELECT LOWER(login) AS login_key, MIN(login) AS login_display
+  FROM (
+    SELECT i.author_login AS login
+    FROM github_issues i
+    INNER JOIN projects p ON i.project_id = p.id
+    WHERE p.status = 'verified' AND i.author_login IS NOT NULL AND i.author_login != ''
+      AND i.author_login ILIKE $1
+    UNION ALL
+    SELECT pr.author_login
+    FROM github_pull_requests pr
+    INNER JOIN projects p ON pr.project_id = p.id
+    WHERE p.status = 'verified' AND pr.author_login IS NOT NULL AND pr.author_login != ''
+      AND pr.author_login ILIKE $1
+  ) raw
+  GROUP BY LOWER(login)
 )
 SELECT
-  mc.login,
+  COALESCE(ga.login, mc.login_display),
   COALESCE(ga.avatar_url, ''),
   COALESCE(u.id::text, ''),
   (
     SELECT COUNT(*) FROM github_issues i INNER JOIN projects p ON i.project_id = p.id
-    WHERE LOWER(i.author_login) = LOWER(mc.login) AND p.status = 'verified'
+    WHERE LOWER(i.author_login) = mc.login_key AND p.status = 'verified'
   ) + (
     SELECT COUNT(*) FROM github_pull_requests pr INNER JOIN projects p ON pr.project_id = p.id
-    WHERE LOWER(pr.author_login) = LOWER(mc.login) AND p.status = 'verified'
+    WHERE LOWER(pr.author_login) = mc.login_key AND p.status = 'verified'
   ) AS contributions
 FROM matched_contributors mc
-LEFT JOIN github_accounts ga ON LOWER(ga.login) = LOWER(mc.login)
+LEFT JOIN github_accounts ga ON LOWER(ga.login) = mc.login_key
 LEFT JOIN users u ON u.id = ga.user_id
 ORDER BY contributions DESC
 LIMIT $2

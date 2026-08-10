@@ -69,7 +69,7 @@ WHERE e.id = $1 AND e.status = 'active'
 SELECT
   (SELECT COUNT(*) FROM projects p WHERE p.ecosystem_id = $1 AND p.deleted_at IS NULL AND p.status = 'verified' AND p.needs_metadata = false),
   COALESCE((
-    SELECT COUNT(DISTINCT a.author_login)
+    SELECT COUNT(DISTINCT LOWER(a.author_login))
     FROM (
       SELECT author_login FROM github_issues WHERE project_id IN (SELECT id FROM projects WHERE ecosystem_id = $1 AND deleted_at IS NULL AND status = 'verified' AND needs_metadata = false) AND author_login IS NOT NULL AND author_login != ''
       UNION
@@ -81,23 +81,23 @@ SELECT
 `, ecoID).Scan(&projectCount, &contributorsCount, &openIssuesCount, &openPRsCount)
 
 		out := fiber.Map{
-			"id":                   id.String(),
-			"slug":                 slug,
-			"name":                 name,
-			"description":          desc,
-			"website_url":          website,
-			"logo_url":             logoURL,
-			"status":               status,
-			"created_at":           createdAt,
-			"updated_at":           updatedAt,
-			"about":                about,
-			"links":                links,
-			"key_areas":            keyAreas,
-			"technologies":         technologies,
-			"project_count":        projectCount,
-			"contributors_count":   contributorsCount,
-			"open_issues_count":    openIssuesCount,
-			"open_prs_count":       openPRsCount,
+			"id":                 id.String(),
+			"slug":               slug,
+			"name":               name,
+			"description":        desc,
+			"website_url":        website,
+			"logo_url":           logoURL,
+			"status":             status,
+			"created_at":         createdAt,
+			"updated_at":         updatedAt,
+			"about":              about,
+			"links":              links,
+			"key_areas":          keyAreas,
+			"technologies":       technologies,
+			"project_count":      projectCount,
+			"contributors_count": contributorsCount,
+			"open_issues_count":  openIssuesCount,
+			"open_prs_count":     openPRsCount,
 		}
 		return c.Status(fiber.StatusOK).JSON(out)
 	}

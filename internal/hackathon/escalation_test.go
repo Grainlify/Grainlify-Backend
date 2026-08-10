@@ -1,6 +1,8 @@
 package hackathon
 
 import (
+	"context"
+	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
 	"strings"
 	"testing"
 
@@ -121,5 +123,48 @@ func TestNeedsEscalation_RoutesEveryUnresolvedCase(t *testing.T) {
 				t.Error("escalated with no reason recorded; the adjudicator is told what the disagreement was")
 			}
 		})
+	}
+}
+
+// "Cannot resolve" must be its own state, not folded in with ordinary
+// needs-review. They are different findings: an ordinary escalation says one
+// review was wrong, this says the bucket definitions are ambiguous - and the
+// second is the one that gets lost if they look the same in the queue.
+func TestRunJudgingPipeline_UnresolvableIsItsOwnState(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+
+	mk := func(pr int, reviewReason string) uuid.UUID {
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx, `
+INSERT INTO hackathon_verdicts
+  (hackathon_id, project_id, pr_number, github_login, prefilter_status,
+   judge_bucket, cross_check_bucket, needs_human_review, review_reason)
+VALUES ($1,$2,$3,'octocat','passed','substantial','accepted',true,$4)
+RETURNING id`, hackathonID, projectID, pr, reviewReason).Scan(&id); err != nil {
+			t.Fatalf("seed verdict: %v", err)
+		}
+		return id
+	}
+	mk(2100, "judge said substantial, cross-check said accepted")
+	mk(2101, ReviewReasonUnresolvable)
+	mk(2102, ReviewReasonUnresolvable)
+
+	stats, err := ComputeJudgingStats(ctx, pool, hackathonID)
+	if err != nil {
+		t.Fatalf("ComputeJudgingStats: %v", err)
+	}
+	if stats.Unresolvable != 2 {
+		t.Errorf("unresolvable = %d, want 2", stats.Unresolvable)
+	}
+	if stats.NeedsReview != 3 {
+		t.Errorf("needs_review = %d, want 3 (unresolvable cases still need a human)", stats.NeedsReview)
+	}
+	// It is a distinct signal from disagreement, not a replacement: both of
+	// these also disagreed at the bucket level.
+	if stats.Disagreements != 3 {
+		t.Errorf("disagreements = %d, want 3", stats.Disagreements)
 	}
 }
