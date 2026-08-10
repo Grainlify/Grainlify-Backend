@@ -121,6 +121,17 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 			// underlying contributor counts and that difference is easy to
 			// misread as the scoring not working.
 			"section_notes": fiber.Map{
+				"Chains": "Each chain in this event has its own prize pool, funded by its own sponsor. " +
+					"That money pays that chain's contributors and nobody else's, and it never moves between " +
+					"chains. One consequence is worth stating plainly: identical work can pay differently on " +
+					"different chains. If one chain's pool draws far more accepted pull requests than another's, " +
+					"each one is worth less there. That is what separate pools mean, and the pool sizes and " +
+					"issue counts are published here from the moment the event goes live so you can choose with " +
+					"the same information we have. " +
+					"The diminishing-returns curve is also counted per chain, so working across two chains " +
+					"restarts it on each. That is a known property of separate pools rather than a loophole - " +
+					"the limits on how many issues you can hold at once still apply across the whole event, " +
+					"however you spread them.",
 				"Judging and payout": "Each additional pull request you get accepted is worth progressively less. " +
 					"Your first accepted PR counts in full, your second a little less, and so on down the published " +
 					"curve, with the last value repeating after that. Position is by merge time and counts only PRs " +

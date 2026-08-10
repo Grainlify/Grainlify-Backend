@@ -59,6 +59,7 @@ var SectionOrder = []string{
 	"Draw weights",
 	"Judging and payout",
 	"Maintainer pool",
+	"Chains",
 	"Models",
 }
 
@@ -171,6 +172,10 @@ var Definitions = map[string]SettingDef{
 	"maintainer_activity_full_prs":      {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
 	"maintainer_partial_release_pct":    {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
 	"maintainer_withheld_destination":   {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
+	"unclaimed_sweep_days":              {Key: "unclaimed_sweep_days", Type: "int", Default: "180", Section: "Chains", Description: "Days after settlement before unclaimed on-chain funds may be swept. Sweeping is time-locked and multisig-gated.", ValidRange: ">= 1"},
+	"unclaimed_sweep_destination":       {Key: "unclaimed_sweep_destination", Type: "enum", Default: "next_event_pool_same_chain", Section: "Chains", Description: "Where unclaimed funds go, always on the same chain. Published in advance.", ValidRange: "next_event_pool_same_chain|refund_to_sponsor"},
+	"empty_chain_pool_disposition":      {Key: "empty_chain_pool_disposition", Type: "enum", Default: "refund_to_sponsor", Section: "Chains", Description: "What happens to a chain's pool that ends with no accepted PRs. Refunded to that chain's sponsor via the same multisig, time-locked path as a cancelled event - not a separate mechanism.", ValidRange: "refund_to_sponsor|next_event_pool_same_chain"},
+	"contract_upgrade_policy":           {Key: "contract_upgrade_policy", Type: "enum", Default: "multisig_timelock_exceeding_claim_window", Section: "Chains", Description: "Upgrades require multisig plus a timelock longer than the claim window, so a contributor always has time to exit before any change takes effect.", ValidRange: "multisig_timelock_exceeding_claim_window|immutable"},
 	"maintainer_clarity_min_ratings":    {Key: "maintainer_clarity_min_ratings", Type: "int", Default: "3", Section: "Maintainer pool", Description: "Ratings a repo needs before issue clarity counts toward its score; below this the criterion is dropped and the remaining weights renormalised.", ValidRange: ">= 1", Active: true},
 	"maintainer_first_timers_reference": {Key: "maintainer_first_timers_reference", Type: "int", Default: "200", Section: "Maintainer pool", Description: "Distinct first-time contributors that score full marks. Log-scaled, so smaller repos still separate from each other rather than all saturating at a low cap.", ValidRange: ">= 2", Active: true},
 
