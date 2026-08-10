@@ -68,6 +68,20 @@ type messagesResponse struct {
 	} `json:"error"`
 }
 
+// CallRecord is everything about one model call worth keeping. Returned
+// even when the call fails, because a failed or malformed call is exactly
+// what an appeal needs to see.
+type CallRecord struct {
+	Model       string
+	RawRequest  []byte
+	RawResponse []byte
+	DurationMS  int
+	// SchemaViolation is true when the model answered but not with a valid
+	// tool call matching the schema. Distinct from a transport error: the
+	// caller treats it as low confidence rather than as an outage.
+	SchemaViolation bool
+}
+
 // StructuredCall runs one Messages request that is *forced* to answer by
 // calling toolName with an input matching schema, and unmarshals that input
 // into out.
@@ -82,8 +96,27 @@ func (c *Client) StructuredCall(
 	schema map[string]any,
 	out any,
 ) error {
+	_, err := c.StructuredCallRecorded(ctx, model, system, userContent, toolName, toolDescription, schema, out)
+	return err
+}
+
+// StructuredCallRecorded is StructuredCall plus the raw request and response,
+// for callers that must log every call permanently.
+//
+// The tool is *forced*, and a response that does not match the schema is
+// reported as a SchemaViolation rather than repaired. There is deliberately
+// no free-text fallback: a "repair" of a malformed judging response is a
+// guess about what the model meant, made by code that cannot know, on a
+// decision that moves money. Malformed means low confidence and a human.
+func (c *Client) StructuredCallRecorded(
+	ctx context.Context,
+	model, system, userContent, toolName, toolDescription string,
+	schema map[string]any,
+	out any,
+) (CallRecord, error) {
+	rec := CallRecord{Model: model}
 	if !c.Enabled() {
-		return fmt.Errorf("ai.StructuredCall: no API key configured")
+		return rec, fmt.Errorf("ai.StructuredCall: no API key configured")
 	}
 	body, err := json.Marshal(messagesRequest{
 		Model:     model,
@@ -100,46 +133,53 @@ func (c *Client) StructuredCall(
 		ToolChoice: map[string]any{"type": "tool", "name": toolName},
 	})
 	if err != nil {
-		return fmt.Errorf("ai.StructuredCall: marshal: %w", err)
+		return rec, fmt.Errorf("ai.StructuredCall: marshal: %w", err)
 	}
+	rec.RawRequest = body
 
+	started := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, messagesURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return rec, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.APIKey)
 	req.Header.Set("anthropic-version", anthropicVersion)
 
 	resp, err := c.HTTP.Do(req)
+	rec.DurationMS = int(time.Since(started).Milliseconds())
 	if err != nil {
-		return fmt.Errorf("ai.StructuredCall: %w", err)
+		return rec, fmt.Errorf("ai.StructuredCall: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
+	raw, readErr := io.ReadAll(resp.Body)
+	rec.RawResponse = raw
+	if readErr != nil {
+		return rec, readErr
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ai.StructuredCall: http %d: %s", resp.StatusCode, truncate(string(raw), 400))
+		return rec, fmt.Errorf("ai.StructuredCall: http %d: %s", resp.StatusCode, truncate(string(raw), 400))
 	}
 
 	var mr messagesResponse
 	if err := json.Unmarshal(raw, &mr); err != nil {
-		return fmt.Errorf("ai.StructuredCall: decode: %w", err)
+		rec.SchemaViolation = true
+		return rec, fmt.Errorf("ai.StructuredCall: decode: %w", err)
 	}
 	if mr.Error != nil {
-		return fmt.Errorf("ai.StructuredCall: %s: %s", mr.Error.Type, mr.Error.Message)
+		return rec, fmt.Errorf("ai.StructuredCall: %s: %s", mr.Error.Type, mr.Error.Message)
 	}
 	for _, block := range mr.Content {
 		if block.Type == "tool_use" && block.Name == toolName {
 			if err := json.Unmarshal(block.Input, out); err != nil {
-				return fmt.Errorf("ai.StructuredCall: decode tool input: %w", err)
+				rec.SchemaViolation = true
+				return rec, fmt.Errorf("ai.StructuredCall: tool input did not match the schema: %w", err)
 			}
-			return nil
+			return rec, nil
 		}
 	}
-	return fmt.Errorf("ai.StructuredCall: model returned no %s tool call (stop_reason=%s)", toolName, mr.StopReason)
+	rec.SchemaViolation = true
+	return rec, fmt.Errorf("ai.StructuredCall: model returned no %s tool call (stop_reason=%s)", toolName, mr.StopReason)
 }
 
 func truncate(s string, n int) string {
