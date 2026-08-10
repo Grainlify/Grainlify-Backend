@@ -359,7 +359,15 @@ WHERE user_id = $1
 			})
 		}
 
-		// Calculate date range: last 365 days from today
+		// Calculate date range: last 365 days from today.
+		//
+		// UTC on both sides, explicitly. created_at_github is timestamptz, so
+		// DATE() casts it in the *session* timezone - which meant this query
+		// bucketed by the server's local day while Go bucketed by the UTC day.
+		// On a UTC+5:30 machine those disagree for five and a half hours every
+		// night, and the calendar tests failed deterministically inside that
+		// window and passed outside it. A test that fails at certain hours
+		// trains everyone to ignore it.
 		now := time.Now().UTC()
 		startDate := now.AddDate(0, 0, -365)
 
@@ -367,7 +375,7 @@ WHERE user_id = $1
 		// Use DATE_TRUNC to group by day
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT 
-  DATE(contribution_date) as date,
+  DATE(contribution_date AT TIME ZONE 'UTC') as date,
   COUNT(*) as count
 FROM (
   SELECT created_at_github as contribution_date
@@ -388,7 +396,7 @@ FROM (
     AND pr.created_at_github <= $3
     AND p.status = 'verified'
 ) contributions
-GROUP BY DATE(contribution_date)
+GROUP BY DATE(contribution_date AT TIME ZONE 'UTC')
 ORDER BY date ASC
 `, *githubLogin, startDate, now)
 		if err != nil {

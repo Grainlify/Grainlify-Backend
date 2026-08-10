@@ -232,28 +232,28 @@ WHERE status = 'verified' AND deleted_at IS NULL
 		rows, err := h.db.Pool.Query(c.Context(), `
 WITH weeks AS (
   SELECT generate_series(
-    date_trunc('week', now() - ($2 - 1) * interval '1 week'),
-    date_trunc('week', now()),
+    date_trunc('week', (now() AT TIME ZONE 'UTC') - ($2 - 1) * interval '1 week'),
+    date_trunc('week', (now() AT TIME ZONE 'UTC')),
     interval '1 week'
   )::date AS week_start
 ),
 issues_by_week AS (
-  SELECT date_trunc('week', gi.created_at_github)::date AS week_start, COUNT(*) AS n
+  SELECT date_trunc('week', gi.created_at_github AT TIME ZONE 'UTC')::date AS week_start, COUNT(*) AS n
   FROM github_issues gi
   JOIN projects p ON p.id = gi.project_id
   WHERE LOWER(SPLIT_PART(p.github_full_name, '/', 1)) = LOWER($1)
     AND p.status = 'verified' AND p.deleted_at IS NULL
-    AND gi.created_at_github >= date_trunc('week', now() - ($2 - 1) * interval '1 week')
+    AND gi.created_at_github >= date_trunc('week', (now() AT TIME ZONE 'UTC') - ($2 - 1) * interval '1 week')
   GROUP BY 1
 ),
 prs_by_week AS (
-  SELECT date_trunc('week', gp.merged_at_github)::date AS week_start, COUNT(*) AS n
+  SELECT date_trunc('week', gp.merged_at_github AT TIME ZONE 'UTC')::date AS week_start, COUNT(*) AS n
   FROM github_pull_requests gp
   JOIN projects p ON p.id = gp.project_id
   WHERE LOWER(SPLIT_PART(p.github_full_name, '/', 1)) = LOWER($1)
     AND p.status = 'verified' AND p.deleted_at IS NULL
     AND gp.merged = true
-    AND gp.merged_at_github >= date_trunc('week', now() - ($2 - 1) * interval '1 week')
+    AND gp.merged_at_github >= date_trunc('week', (now() AT TIME ZONE 'UTC') - ($2 - 1) * interval '1 week')
   GROUP BY 1
 )
 SELECT w.week_start, COALESCE(i.n, 0), COALESCE(m.n, 0)
@@ -331,13 +331,13 @@ WHERE status = 'verified' AND deleted_at IS NULL
 		rows, err := h.db.Pool.Query(c.Context(), `
 WITH days AS (
   SELECT generate_series(
-    (now() - ($2 - 1) * interval '1 day')::date,
-    now()::date,
+    ((now() AT TIME ZONE 'UTC') - ($2 - 1) * interval '1 day')::date,
+    (now() AT TIME ZONE 'UTC')::date,
     interval '1 day'
   ) AS day
 ),
 daily_counts AS (
-  SELECT DATE(contribution_date) AS day, COUNT(*) AS n
+  SELECT DATE(contribution_date AT TIME ZONE 'UTC') AS day, COUNT(*) AS n
   FROM (
     SELECT gi.created_at_github AS contribution_date
     FROM github_issues gi
