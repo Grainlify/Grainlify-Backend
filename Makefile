@@ -54,12 +54,11 @@ test-db-drop:
 # added tests. Raising the ceiling buys a few more rounds and then we are
 # back here.
 #
-# Measured cause: two leaderboard tests are 69% of the suite (489s of 712s).
-# They page the whole global leaderboard, whose query is quadratic in a
-# contributor count that grows every run because this database is never
-# truncated. It is NOT the per-test setup cost, which is the ~223s the other
-# 231 tests share between them. See docs/TESTING-DEBT.md. Raise this again
-# only alongside fixing those two tests, not instead of it.
+# Measured cause was two leaderboard tests at 69% of the suite (489s of 712s),
+# paging a global ranking whose query was quadratic in an ever-growing
+# contributor count. Fixed 2026-08-10; the package now runs ~207s and this
+# ceiling is far above it. What remains is the per-test setup baseline
+# (~231 tests x ~1s). See docs/TESTING-DEBT.md before raising this again.
 #
 # Full output is teed to test-output.log because a timeout prints a
 # goroutine dump naming the stuck test, and piping the run through tail

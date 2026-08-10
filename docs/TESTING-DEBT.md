@@ -91,25 +91,40 @@ fixture that permanently outranked a different test's data on every
 subsequent run. Note that the accumulation described in (3) above is that
 same property biting in a different way.
 
-## Related: this is a production problem too, not only a test problem
+## Resolved 2026-08-10
 
-The same query serves the public, uncached `GET /leaderboard`. Measured
-against **production** on 2026-08-10:
+Fixed in its own change (migration 000049 + `leaderboard.go`), because the
+same query served the public, uncached `GET /leaderboard`.
 
-- 531 qualifying contributors
-- **3.47s** for a single page
+Live endpoint, measured against production before and after. `/health` does
+no database work and costs ~0.35s from the measuring machine, so subtracting
+it separates server time from network round trip:
 
-Production is small today (10 projects, ~3.2k issue+PR rows), so this is a
-scaling cliff rather than an outage — but it is a public endpoint taking
-three and a half seconds, and its cost grows quadratically with contributor
-count, which is the number the platform exists to increase.
+| | total | server-side |
+|---|---|---|
+| before | 1.93s | ~1.58s |
+| after | 0.40s | ~0.05s |
 
-Not fixed here — it is a change to a live query serving real users and wants
-its own change and its own verification. Sketch of the fix when it is picked
-up: store `author_login` case-folded (or add
-`CREATE INDEX ... ON github_issues (LOWER(author_login))`), replace the six
-correlated subqueries with a single grouped aggregate CTE, and cache the
-ranking rather than recomputing it per request.
+Roughly 30x less server-side time, and now flat across offsets where it
+previously got *worse* with depth (2.19s at offset 400).
+
+`internal/handlers` went from 712s to 207s as a side effect, since the two
+leaderboard tests were 69% of it. Those tests were also rewritten: bounded
+search, "conclusively absent" distinguished from "gave up looking", and
+fixtures that delete themselves so the ranking they search stops growing
+every run.
+
+Two correctness bugs were found and fixed along the way — a case-sensitive
+`DISTINCT` combined with case-insensitive counting, and a `github_accounts`
+join that fanned out because `login` has no unique constraint. One test-data
+contributor was occupying 134 consecutive ranks. Both have regression tests.
+
+### What is left
+
+Only the per-test setup baseline: ~231 tests at ~0.97s each. Worth revisiting
+if the package creeps back up, via `TestMain`-level migration and a shared
+read-only baseline dataset — subject to the never-truncated constraint above.
+Not urgent at 207s.
 
 ## How this was measured
 
