@@ -315,6 +315,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// contributor/maintainer routes here; admin routes are below with the
 	// rest of adminGroup.
 	hackathonPublic := handlers.NewHackathonPublicHandler(deps.DB)
+	// Public rules page data - renders from live config (or a live event's
+	// frozen snapshot) so it cannot drift from what is actually running.
+	grainhackRules := handlers.NewGrainHackRulesHandler(deps.DB)
+	app.Get("/grainhack/rules", grainhackRules.Rules())
+
 	app.Get("/hackathons", hackathonPublic.List())
 	app.Get("/hackathons/:id", hackathonPublic.GetByID())
 

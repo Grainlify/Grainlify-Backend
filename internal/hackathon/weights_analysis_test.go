@@ -149,7 +149,7 @@ func TestTicketOrdering_AccumulatedWinsNeverOutrankCapability(t *testing.T) {
 		}
 		if f := w["prior_completion"]; f > 2.25 {
 			t.Errorf("prior_completion multiplier at %d completions = %.3f, want it clamped at 1.5^%d = 2.25",
-				completions, f, priorCompletionCap)
+				completions, f, PriorCompletionCap)
 		}
 	}
 
@@ -166,7 +166,7 @@ func TestTicketOrdering_AccumulatedWinsNeverOutrankCapability(t *testing.T) {
 // TestWeightDistribution_PriorCompletionCompounding shows the clamp doing
 // its job. weight_prior_completion is applied *per* completion (§3.9), so
 // uncapped it was the only exponential term in an otherwise linear formula
-// and dominated any mature pool; priorCompletionCap flattens it at 2.
+// and dominated any mature pool; PriorCompletionCap flattens it at 2.
 func TestWeightDistribution_PriorCompletionCompounding(t *testing.T) {
 	cfg := specDefaultWeights()
 	newcomerStrong := ticketsFrom(weightsFor(drawApplicant{fit: "strong", diffMatch: "matched"}, cfg))

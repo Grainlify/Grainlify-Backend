@@ -46,6 +46,22 @@ type SettingDef struct {
 // Definitions is every config key from AI-specs.md §3.1-§3.12, in spec
 // order. Keep in sync with migrations/000039_hackathon_config_settings.up.sql's
 // seed INSERT - every key here must have a seeded row, and vice versa.
+// SectionOrder is the canonical order §3's groups are presented in, shared
+// by the admin settings UI and the public rules page so the two never drift.
+var SectionOrder = []string{
+	"Hackathon setup",
+	"Issue intake",
+	"Contributor slots and caps",
+	"Slot-freeing definition",
+	"Hard gates",
+	"Application window and draw",
+	"Newcomer reservation",
+	"Draw weights",
+	"Judging and payout",
+	"Maintainer pool",
+	"Models",
+}
+
 var Definitions = map[string]SettingDef{
 	// §3.2 hackathon setup - name/dates/prize pools are real hackathons
 	// columns (per-hackathon only, no sensible global default), not
@@ -96,11 +112,16 @@ var Definitions = map[string]SettingDef{
 	"voluntary_release_grace_hours":   {Key: "voluntary_release_grace_hours", Type: "int", Default: "48", Section: "Hard gates", Description: "Releasing inside this window after assignment doesn't count as an abandon.", ValidRange: ">= 0", Active: true},
 
 	// §3.7 application window and draw - inert until the assignment slice
-	"application_window_hours":     {Key: "application_window_hours", Type: "int", Default: "24", Section: "Application window and draw", Description: "How long an issue accepts applications before the draw runs. Shorten for short events.", ValidRange: ">= 1", Active: true},
-	"empty_window_retries":         {Key: "empty_window_retries", Type: "int", Default: "3", Section: "Application window and draw", Description: "Retries before falling back to first-come assignment.", ValidRange: ">= 0", Active: true},
-	"fallback_to_first_come":       {Key: "fallback_to_first_come", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Fall back to first-come after retries are exhausted.", Active: true},
-	"draw_order":                   {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw.", ValidRange: "randomised", Active: true},
-	"sequential_slot_consumption":  {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn.", Active: true},
+	"application_window_hours":    {Key: "application_window_hours", Type: "int", Default: "24", Section: "Application window and draw", Description: "How long an issue accepts applications before the draw runs. Shorten for short events.", ValidRange: ">= 1", Active: true},
+	"empty_window_retries":        {Key: "empty_window_retries", Type: "int", Default: "3", Section: "Application window and draw", Description: "Retries before falling back to first-come assignment.", ValidRange: ">= 0", Active: true},
+	"fallback_to_first_come":      {Key: "fallback_to_first_come", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Fall back to first-come after retries are exhausted.", Active: true},
+	"draw_order":                  {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw.", ValidRange: "randomised", Active: true},
+	"sequential_slot_consumption": {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn.", Active: true},
+	// Not in AI-specs.md §3.7 - added because an exact live applicant count
+	// rewards applying late (see migration 000043). "bucketed" shows a
+	// coarse band instead, keeping the anti-crowding signal without the
+	// precision advantage.
+	"applicant_count_visibility":   {Key: "applicant_count_visibility", Type: "enum", Default: "bucketed", Section: "Application window and draw", Description: "How much of an issue's applicant pool contributors see while the window is open.", ValidRange: "hidden | bucketed | exact", Active: true},
 	"draw_from_weak_pool_if_empty": {Key: "draw_from_weak_pool_if_empty", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Draw from weak-fit applicants rather than leave an issue unassigned.", Active: true},
 
 	// §3.8 newcomer reservation - inert until the assignment slice

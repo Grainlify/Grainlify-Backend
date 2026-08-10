@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -20,6 +21,7 @@ func assignmentSuiteApp(d *db.DB) *fiber.App {
 	app := fiber.New()
 
 	issueApps := handlers.NewHackathonIssueApplicationsHandler(config.Config{TokenEncKeyB64: asmtFxEncKey()}, d)
+	app.Get("/projects/:id/grainhack/:number", auth.RequireAuth(hackathonSuiteJWTSecret), issueApps.GetForContributor())
 	app.Post("/hackathon-issues/:id/apply", auth.RequireAuth(hackathonSuiteJWTSecret), issueApps.Apply())
 	app.Get("/hackathon-issue-applications/me", auth.RequireAuth(hackathonSuiteJWTSecret), issueApps.Mine())
 	app.Get("/hackathon-assignments/me", auth.RequireAuth(hackathonSuiteJWTSecret), issueApps.MyAssignments())
@@ -286,4 +288,97 @@ VALUES ($1,$2,$3,901,$4,'the-assignee',$5,'active',true) RETURNING id
 	if body.AbandonRecorded {
 		t.Error("release immediately after assignment recorded an abandon despite the grace window")
 	}
+}
+
+// TestContributorIssue_ApplicantVisibility covers the bucketing policy: an
+// exact live count across a long window rewards applying late, because the
+// last applicant sees the whole field and picks the least contested issue.
+func TestContributorIssue_ApplicantVisibility(t *testing.T) {
+	d := testDB(t)
+	app := assignmentSuiteApp(d)
+	hackathonID, projectID, issueID := asmtFxLiveIssue(t, d)
+
+	// Five applicants puts the pool in the "many" band.
+	for i := 0; i < 5; i++ {
+		u := asmtFxContributor(t, d, fmt.Sprintf("pool-%d-%s", i, uuid.NewString()[:6]))
+		if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO hackathon_issue_applications
+  (hackathon_id, hackathon_issue_id, user_id, github_login, status, fit, difficulty_match, fit_assessed_at)
+VALUES ($1,$2,$3,$4,'applied','plausible','matched',now())`, hackathonID, issueID, u, "pool"); err != nil {
+			t.Fatalf("insert application: %v", err)
+		}
+	}
+
+	viewer := asmtFxContributor(t, d, "viewer-"+uuid.NewString()[:6])
+	tok := hackathonSuiteToken(t, viewer, "contributor")
+	path := "/projects/" + projectID.String() + "/grainhack/901"
+
+	read := func() (visibility string, count *int, bucket string) {
+		resp, body := notifSuiteDo(t, app, "GET", path, tok, nil)
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, body)
+		}
+		var out struct {
+			ApplicantVisibility string `json:"applicant_visibility"`
+			ApplicantCount      *int   `json:"applicant_count"`
+			ApplicantBucket     string `json:"applicant_bucket"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.ApplicantVisibility, out.ApplicantCount, out.ApplicantBucket
+	}
+
+	setVisibility := func(v string) {
+		if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO hackathon_config_settings (hackathon_id, key, value) VALUES ($1,'applicant_count_visibility',$2)
+ON CONFLICT (hackathon_id, key) WHERE hackathon_id IS NOT NULL
+DO UPDATE SET value = EXCLUDED.value`, hackathonID, v); err != nil {
+			t.Fatalf("set visibility: %v", err)
+		}
+	}
+
+	t.Run("bucketed hides the exact number", func(t *testing.T) {
+		setVisibility("bucketed")
+		vis, count, bucket := read()
+		if vis != "bucketed" {
+			t.Errorf("visibility = %q, want bucketed", vis)
+		}
+		if count != nil {
+			t.Errorf("exact count leaked as %d while bucketing", *count)
+		}
+		if bucket != "many" {
+			t.Errorf("bucket = %q, want many for a 5-applicant pool", bucket)
+		}
+	})
+
+	t.Run("hidden reveals neither", func(t *testing.T) {
+		setVisibility("hidden")
+		_, count, bucket := read()
+		if count != nil || bucket != "" {
+			t.Errorf("hidden still exposed count=%v bucket=%q", count, bucket)
+		}
+	})
+
+	t.Run("exact reveals the number", func(t *testing.T) {
+		setVisibility("exact")
+		_, count, _ := read()
+		if count == nil || *count != 5 {
+			t.Errorf("count = %v, want 5", count)
+		}
+	})
+
+	t.Run("a closed window reveals the exact number regardless", func(t *testing.T) {
+		setVisibility("bucketed")
+		if _, err := d.Pool.Exec(context.Background(),
+			`UPDATE hackathon_issues SET application_window_closes_at = now() - interval '1 minute' WHERE id = $1`, issueID); err != nil {
+			t.Fatalf("close window: %v", err)
+		}
+		// Once the pool is settled, precision can no longer steer anyone's
+		// choice of where to apply.
+		_, count, _ := read()
+		if count == nil || *count != 5 {
+			t.Errorf("after close, count = %v, want the exact 5", count)
+		}
+	})
 }

@@ -428,13 +428,37 @@ LIMIT 1
 		}
 		d.Reserved = reserved != nil && *reserved
 
-		// Pool size is public within the event: it's what tells someone
-		// whether applying here is worth a slot of their attention.
+		// Pool size tells someone whether an issue is already crowded - but
+		// how precisely they see it is deliberately configurable. An exact
+		// live count across a 24h window rewards applying late: the last
+		// applicant sees the whole field and picks the least contested
+		// issue, which concentrates everyone at window close. "bucketed"
+		// (the default) keeps the anti-crowding signal without that.
 		var applicantCount int
 		_ = h.db.Pool.QueryRow(c.Context(), `
 SELECT count(*) FROM hackathon_issue_applications
 WHERE hackathon_issue_id = $1 AND status = 'applied'
 `, d.ID).Scan(&applicantCount)
+
+		visibility, err := hackathon.EffectiveValue(c.Context(), h.db.Pool, &d.HackathonID, "applicant_count_visibility")
+		if err != nil {
+			visibility = "bucketed"
+		}
+		// Once the window has closed the pool is settled, so exactness can
+		// no longer influence anyone's choice of where to apply.
+		windowClosed := d.WindowClosesAt != nil && time.Now().After(*d.WindowClosesAt)
+
+		var exactCount *int
+		var bucket string
+		switch {
+		case visibility == "exact" || windowClosed:
+			n := applicantCount
+			exactCount = &n
+		case visibility == "hidden":
+			// nothing
+		default: // "bucketed"
+			bucket = applicantBucket(applicantCount)
+		}
 
 		var mine *hackathonIssueApplicationDTO
 		var m hackathonIssueApplicationDTO
@@ -453,9 +477,27 @@ WHERE a.hackathon_issue_id = $1 AND a.user_id = $2
 		}
 
 		return c.JSON(fiber.Map{
-			"issue":           d,
-			"applicant_count": applicantCount,
-			"my_application":  mine,
+			"issue": d,
+			// Exactly one of these is set, per applicant_count_visibility.
+			// The frontend owns the wording; the backend owns the policy.
+			"applicant_count":      exactCount,
+			"applicant_bucket":     bucket,
+			"applicant_visibility": visibility,
+			"my_application":       mine,
 		})
+	}
+}
+
+// applicantBucket maps a pool size to a coarse band. Deliberately only three
+// bands: more bands means more precision, which is the thing bucketing
+// exists to remove.
+func applicantBucket(n int) string {
+	switch {
+	case n == 0:
+		return "none"
+	case n < 5:
+		return "few"
+	default:
+		return "many"
 	}
 }

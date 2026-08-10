@@ -15,12 +15,15 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
-// priorCompletionCap bounds how many completions compound into the
+// PriorCompletionCap bounds how many completions compound into the
 // prior_completion draw weight. Structural rather than configurable: it is
 // what keeps accumulated wins from overtaking demonstrated capability, and
 // that ordering must not be something a config edit can silently invert
 // mid-event. See weightsFor for the measurements behind the value.
-const priorCompletionCap = 2
+//
+// Exported because the public rules page publishes it - a structural rule
+// contributors plan around has to be visible, not buried in code.
+const PriorCompletionCap = 2
 
 // Candidate is one applicant in a draw pool, with the ticket arithmetic that
 // produced their odds. Weights is kept broken out per factor (not just the
@@ -116,8 +119,8 @@ func weightsFor(a drawApplicant, cfg map[string]string) map[string]float64 {
 		// the event runs. TestTicketOrdering_AccumulatedWinsNeverOutrankCapability
 		// pins that ordering.
 		n := a.completions
-		if n > priorCompletionCap {
-			n = priorCompletionCap
+		if n > PriorCompletionCap {
+			n = PriorCompletionCap
 		}
 		base := atofOr(cfg["weight_prior_completion"], 1.5)
 		f := 1.0
