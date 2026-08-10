@@ -156,10 +156,20 @@ var Definitions = map[string]SettingDef{
 	"appeal_window_days":              {Key: "appeal_window_days", Type: "int", Default: "7", Section: "Judging and payout", Description: "Days the appeal window stays open after results are published.", ValidRange: ">= 0", Active: true},
 
 	// §3.11 maintainer pool - inert until the payout slice
-	"maintainer_holdback_pct":      {Key: "maintainer_holdback_pct", Type: "int", Default: "30", Section: "Maintainer pool", Description: "% of a maintainer's payout held back.", ValidRange: "0-100"},
-	"maintainer_holdback_days":     {Key: "maintainer_holdback_days", Type: "int", Default: "90", Section: "Maintainer pool", Description: "Days the holdback is held before release."},
+	"maintainer_holdback_pct":      {Key: "maintainer_holdback_pct", Type: "int", Default: "30", Section: "Maintainer pool", Description: "% of a maintainer's payout held back.", ValidRange: "0-100", Active: true},
+	"maintainer_holdback_days":     {Key: "maintainer_holdback_days", Type: "int", Default: "90", Section: "Maintainer pool", Description: "Days the holdback is held before release.", Active: true},
 	"maintainer_min_repo_age_days": {Key: "maintainer_min_repo_age_days", Type: "int", Default: "90", Section: "Maintainer pool", Description: "Minimum repo age to be maintainer-pool eligible."},
 	"maintainer_criteria_weights":  {Key: "maintainer_criteria_weights", Type: "object", Default: "{}", Section: "Maintainer pool", Description: "Weights for each maintainer-pool eligibility criterion."},
+	// §7's holdback is only an anti-farming mechanism if its release is
+	// conditional on the thing it measures - "a maintainer farming an event is
+	// gone the next day; one genuinely growing a project is still there". A
+	// timer alone pays the farmer three months late.
+	"maintainer_activity_window_days":  {Key: "maintainer_activity_window_days", Type: "int", Default: "60", Section: "Maintainer pool", Description: "Days after the event closes over which continued repo activity is measured for holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_activity_full_commits": {Key: "maintainer_activity_full_commits", Type: "int", Default: "5", Section: "Maintainer pool", Description: "Commits in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_activity_full_prs":     {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_partial_release_pct":   {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
+	"maintainer_withheld_destination":  {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
+	"maintainer_clarity_min_ratings":   {Key: "maintainer_clarity_min_ratings", Type: "int", Default: "3", Section: "Maintainer pool", Description: "Ratings a repo needs before issue clarity counts toward its score; below this the criterion is dropped and the remaining weights renormalised.", ValidRange: ">= 1", Active: true},
 
 	// §3.12 models - inert until the AI pipeline slices
 	// Layer 2 (§4.3) is the only non-deterministic step in the assignment
