@@ -612,8 +612,8 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 			}
 
 			_, _ = w.pool.Exec(ctx, `
-INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, merge_commit_sha, last_seen_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, merge_commit_sha, head_sha, last_seen_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   number = EXCLUDED.number,
   state = EXCLUDED.state,
@@ -626,9 +626,10 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   updated_at_github = EXCLUDED.updated_at_github,
   closed_at_github = EXCLUDED.closed_at_github,
   merge_commit_sha = COALESCE(EXCLUDED.merge_commit_sha, github_pull_requests.merge_commit_sha),
+  head_sha = COALESCE(NULLIF(EXCLUDED.head_sha, ''), github_pull_requests.head_sha),
   merged_at_github = EXCLUDED.merged_at_github,
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA)
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA, it.Head.SHA)
 		}
 	}
 

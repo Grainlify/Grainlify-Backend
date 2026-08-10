@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
+	"strings"
 )
 
 // pullsAPIBase is a var so tests can point it at an httptest.Server,
@@ -138,6 +138,148 @@ func (c *Client) IsRepoCollaboratorAdmin(ctx context.Context, accessToken, fullN
 	return payload.Permission == "admin", nil
 }
 
-// prNumberString is a tiny helper kept so callers building log fields don't
-// reach for strconv at every site.
-func prNumberString(n int) string { return strconv.Itoa(n) }
+// RepoAdmins returns the set of logins with admin permission on a repo,
+// lowercased for case-insensitive comparison.
+//
+// Fetched once per repo per judging run rather than per PR: §2.4's "not a
+// repo admin or org owner" condition applies to every PR in the repo, and a
+// per-PR permission check would be one round trip per submission for an
+// answer that doesn't change between them.
+//
+// Returns an error rather than an empty set when the list can't be read. An
+// unreadable permission list must never be mistaken for "nobody is an
+// admin" - that is the direction that lets a maintainer's second account
+// collect on their own org's issues, which is the collusion path §2.3
+// exists to close.
+func (c *Client) RepoAdmins(ctx context.Context, accessToken, fullName string) (map[string]bool, error) {
+	owner, repo, err := splitFullName(fullName)
+	if err != nil {
+		return nil, err
+	}
+	admins := map[string]bool{}
+
+	for page := 1; page <= 5; page++ {
+		u := fmt.Sprintf("%s%s/%s/collaborators?permission=admin&per_page=100&page=%d",
+			pullsAPIBase, url.PathEscape(owner), url.PathEscape(repo), page)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		if accessToken != "" {
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if c.UserAgent != "" {
+			req.Header.Set("User-Agent", c.UserAgent)
+		}
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			apiErr := parseGitHubAPIError(resp)
+			resp.Body.Close()
+			return nil, apiErr
+		}
+		var batch []struct {
+			Login string `json:"login"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&batch)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("github.RepoAdmins: decode: %w", decodeErr)
+		}
+		for _, u := range batch {
+			admins[strings.ToLower(u.Login)] = true
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	return admins, nil
+}
+
+// CommitCIStatus reports whether CI passed for a commit.
+//
+// Returns nil for "unknown", deliberately distinct from false: a repo with
+// no CI configured, or one whose checks this token cannot see, must not have
+// its contributors rejected for a failure that was never observed (see
+// hackathon.Prefilter, which treats nil as not-failing).
+//
+// Consults both APIs because repos use either - Check Runs is what GitHub
+// Actions reports to, while the older commit-status API is still what many
+// external CI services use. A failure on either is a failure; success
+// requires at least one of them to have actually run.
+func (c *Client) CommitCIStatus(ctx context.Context, accessToken, fullName, sha string) (*bool, error) {
+	if strings.TrimSpace(sha) == "" {
+		return nil, nil
+	}
+	owner, repo, err := splitFullName(fullName)
+	if err != nil {
+		return nil, err
+	}
+	base := pullsAPIBase + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/commits/" + url.PathEscape(sha)
+
+	get := func(path string, out any) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+		if err != nil {
+			return err
+		}
+		if accessToken != "" {
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if c.UserAgent != "" {
+			req.Header.Set("User-Agent", c.UserAgent)
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return parseGitHubAPIError(resp)
+		}
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+
+	sawSuccess := false
+	failed := false
+	passed := true
+
+	var checks struct {
+		CheckRuns []struct {
+			Conclusion string `json:"conclusion"`
+		} `json:"check_runs"`
+	}
+	if err := get("/check-runs?per_page=100", &checks); err == nil {
+		for _, r := range checks.CheckRuns {
+			switch r.Conclusion {
+			case "failure", "timed_out", "cancelled", "action_required", "startup_failure":
+				return &failed, nil
+			case "success", "neutral", "skipped":
+				sawSuccess = true
+			}
+		}
+	}
+
+	var combined struct {
+		State string `json:"state"`
+	}
+	if err := get("/status", &combined); err == nil {
+		switch combined.State {
+		case "failure", "error":
+			return &failed, nil
+		case "success":
+			sawSuccess = true
+		}
+	}
+
+	if sawSuccess {
+		return &passed, nil
+	}
+	// Nothing ran, or nothing we could see. Unknown, not failing.
+	return nil, nil
+}

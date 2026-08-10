@@ -228,3 +228,64 @@ WHERE project_id = $1 AND pr_number = 930`, projectID, admin); err != nil {
 		t.Errorf("final_bucket = %q, want the overridden accepted", finalBucket)
 	}
 }
+
+// TestSyncOneVerdict_RepoAdminCondition covers §2.4 condition 6's repo-admin
+// half - the collusion path §2.3 exists to close: a maintainer's second
+// account is assigned legitimately through the platform, submits, and would
+// otherwise be paid.
+func TestSyncOneVerdict_RepoAdminCondition(t *testing.T) {
+	d := dbtest.DB(t)
+	pool := d.Pool
+	ctx := context.Background()
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+	issueID := fxPublishedIssue(t, pool, hackathonID, projectID, 540, "standard")
+	jxFxGitHubIssue(t, pool, projectID, 540, "someone-else")
+
+	u := fxUser(t, pool)
+	fxGitHubAccount(t, pool, u, "maintainer-alt")
+	fxAssignment(t, pool, hackathonID, issueID, projectID, u, 540, "maintainer-alt", nil)
+	jxFxMergedPR(t, pool, projectID, 940, 540, "maintainer-alt", time.Now())
+
+	candidates, err := loadCandidatePRs(ctx, pool, projectID)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("loadCandidatePRs: %d candidates, err %v", len(candidates), err)
+	}
+	c := candidates[0]
+
+	t.Run("an admin author is rejected even though they were assigned", func(t *testing.T) {
+		admins := map[string]bool{"maintainer-alt": true}
+		if err := syncOneVerdict(ctx, pool, nil, "", projectID, "acme/widgets", c, admins); err != nil {
+			t.Fatalf("syncOneVerdict: %v", err)
+		}
+		status, reason := jxVerdict(t, pool, projectID, 940)
+		if status != "rejected" {
+			t.Errorf("status = %q, want rejected", status)
+		}
+		if !strings.Contains(reason, "admin permission") {
+			t.Errorf("reason = %q, want it to name the admin condition", reason)
+		}
+	})
+
+	t.Run("a non-admin author is not rejected by this condition", func(t *testing.T) {
+		admins := map[string]bool{"someone-entirely-different": true}
+		if err := syncOneVerdict(ctx, pool, nil, "", projectID, "acme/widgets", c, admins); err != nil {
+			t.Fatalf("syncOneVerdict: %v", err)
+		}
+		status, _ := jxVerdict(t, pool, projectID, 940)
+		if status != "pending" {
+			t.Errorf("status = %q, want pending (it passed §2.4; no diff fetched yet)", status)
+		}
+	})
+
+	// The direction that matters: not knowing must never read as "not an
+	// admin", or an unreadable permission list quietly re-opens the hole.
+	t.Run("an unreadable admin list leaves the PR unjudged rather than passed", func(t *testing.T) {
+		if err := syncOneVerdict(ctx, pool, nil, "", projectID, "acme/widgets", c, nil); err != nil {
+			t.Fatalf("syncOneVerdict: %v", err)
+		}
+		status, _ := jxVerdict(t, pool, projectID, 940)
+		if status == "passed" {
+			t.Error("a PR was marked passed while the admin condition could not be checked")
+		}
+	})
+}

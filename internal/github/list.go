@@ -51,9 +51,14 @@ type PRListItem struct {
 	// the diff as merged, so a link to "file.go:44-61" still points at the
 	// right lines after the branch moves on.
 	MergeCommitSHA *string `json:"merge_commit_sha"`
-	CreatedAt      *string `json:"created_at"`
-	UpdatedAt      *string `json:"updated_at"`
-	ClosedAt       *string `json:"closed_at"`
+	// Head is the branch the PR was opened from. CI reports against this
+	// commit, so it is the ref §5.1's CI check has to ask about.
+	Head struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
+	CreatedAt *string `json:"created_at"`
+	UpdatedAt *string `json:"updated_at"`
+	ClosedAt  *string `json:"closed_at"`
 }
 
 func (c *Client) ListIssuesPage(ctx context.Context, accessToken string, fullName string, page int) ([]IssueListItem, error) {

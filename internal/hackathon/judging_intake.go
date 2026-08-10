@@ -40,6 +40,7 @@ type candidatePR struct {
 	GraceHours  int
 	AssignedTo  *string
 	IssueIsDocs bool
+	HeadSHA     string
 }
 
 // SyncVerdicts creates or refreshes hackathon_verdicts rows for a project's
@@ -71,8 +72,27 @@ func SyncVerdicts(
 	if err != nil {
 		return err
 	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// §2.4 condition 6's repo-admin half. One call per repo, not per PR:
+	// the admin set is the same for every submission in the repo.
+	//
+	// nil means "couldn't determine", which is deliberately different from
+	// an empty set. A PR is left pending rather than passed when we can't
+	// check, because reading an unreadable permission list as "nobody is an
+	// admin" is what would let a maintainer's second account be assigned
+	// legitimately and then paid - the §2.3 collusion path.
+	var admins map[string]bool
+	if gh != nil {
+		if a, aerr := gh.RepoAdmins(ctx, accessToken, fullName); aerr == nil {
+			admins = a
+		}
+	}
+
 	for _, c := range candidates {
-		if err := syncOneVerdict(ctx, pool, gh, accessToken, projectID, fullName, c); err != nil {
+		if err := syncOneVerdict(ctx, pool, gh, accessToken, projectID, fullName, c, admins); err != nil {
 			// One bad PR must not stop the rest of the project's PRs.
 			return fmt.Errorf("verdict for PR #%d: %w", c.PRNumber, err)
 		}
@@ -87,7 +107,8 @@ SELECT pr.number, COALESCE(pr.author_login, ''), pr.merged_at_github,
        COALESCE(gi.author_login, ''),
        h.starts_at, h.ends_at, COALESCE(h.merge_grace_period_hours, 48),
        a.github_login,
-       COALESCE(hi.difficulty_tier, '') = 'docs'
+       COALESCE(hi.difficulty_tier, '') = 'docs',
+       COALESCE(pr.head_sha, '')
 FROM github_pull_requests pr
 JOIN hackathon_issues hi ON hi.project_id = pr.project_id
 JOIN hackathons h ON h.id = hi.hackathon_id
@@ -116,7 +137,7 @@ ORDER BY pr.number
 		var c candidatePR
 		if err := rows.Scan(&c.PRNumber, &c.AuthorLogin, &c.MergedAt, &c.IssueID, &c.IssueNumber,
 			&c.HackathonID, &c.IssueAuthor, &c.StartsAt, &c.EndsAt, &c.GraceHours,
-			&c.AssignedTo, &c.IssueIsDocs); err != nil {
+			&c.AssignedTo, &c.IssueIsDocs, &c.HeadSHA); err != nil {
 			return nil, fmt.Errorf("hackathon.loadCandidatePRs: scan: %w", err)
 		}
 		out = append(out, c)
@@ -185,6 +206,7 @@ func syncOneVerdict(
 	projectID uuid.UUID,
 	fullName string,
 	c candidatePR,
+	admins map[string]bool,
 ) error {
 	// Never re-derive a verdict a human has already settled.
 	var overriddenAt *time.Time
@@ -207,13 +229,18 @@ WHERE hackathon_id = $1 AND project_id = $2 AND pr_number = $3
 	reason := qualificationFailure(c)
 	if reason != "" {
 		status = "rejected"
+	} else if admins != nil && admins[strings.ToLower(strings.TrimSpace(c.AuthorLogin))] {
+		// §2.4 condition 6: a repo admin cannot collect on their own repo's
+		// issues, even when they were assigned through the platform.
+		status = "rejected"
+		reason = "The PR author has admin permission on this repository, so it doesn't qualify for a reward."
 	}
 
 	// Diff stats are only worth fetching for PRs still in contention -
 	// they cost a GitHub call each, and a PR that already failed §2.4
 	// isn't going to be judged.
 	var statsJSON []byte
-	if status == "pending" && gh != nil {
+	if status == "pending" && gh != nil && admins != nil {
 		files, truncated, ferr := gh.ListPRFiles(ctx, accessToken, fullName, c.PRNumber)
 		if ferr != nil {
 			// A diff we can't read is not a PR we can reject: the row stays
@@ -230,12 +257,17 @@ WHERE hackathon_id = $1 AND project_id = $2 AND pr_number = $3
 			stats := ComputeDiffStats(changes)
 			minLines, _ := EffectiveValue(ctx, pool, &c.HackathonID, "qualifying_pr_min_meaningful_lines")
 
+			// Checks report against the PR head, not the merge commit. A
+			// nil result means no CI we could see, which Prefilter treats as
+			// "not failing" rather than inventing a rejection.
+			var ciPassed *bool
+			if p, cerr := gh.CommitCIStatus(ctx, accessToken, fullName, c.HeadSHA); cerr == nil {
+				ciPassed = p
+			}
+
 			res := Prefilter(PrefilterInput{
-				Stats: stats,
-				// CI status isn't synced today, so it stays unknown - which
-				// Prefilter deliberately treats as "not failing" rather than
-				// inventing a rejection.
-				CIPassed:                    nil,
+				Stats:                       stats,
+				CIPassed:                    ciPassed,
 				LinkedToGrainHackIssue:      true,
 				AuthorIsAssignedContributor: true,
 				IssueWasDocsIssue:           c.IssueIsDocs,
