@@ -109,6 +109,53 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 			})
 		}
 
+		// §2.3: publish each chain's pool size from Phase 3, with issue and
+		// applicant counts, so a contributor choosing between chains does so
+		// with the same information we have. Separate pools mean rates differ
+		// between chains, and that is only a problem if it is a surprise.
+		chainPools := []fiber.Map{}
+		if hackathonID != nil {
+			rows, cerr := h.db.Pool.Query(c.Context(), `
+SELECT p.chain_id,
+       (p.contributor_pool / (10 ^ p.asset_decimals))::float8,
+       (p.maintainer_pool  / (10 ^ p.asset_decimals))::float8,
+       p.state,
+       (SELECT count(*) FROM hackathon_issues hi
+          WHERE hi.hackathon_id = p.hackathon_id AND hi.chain_id = p.chain_id
+            AND hi.status = 'published')::int
+FROM hackathon_chain_pools p
+WHERE p.hackathon_id = $1
+ORDER BY p.chain_id`, *hackathonID)
+			if cerr != nil {
+				slog.Warn("rules: chain pools", "error", cerr)
+			} else {
+				defer rows.Close()
+				for rows.Next() {
+					var chainID, state string
+					var contributor, maintainer float64
+					var issues int
+					if err := rows.Scan(&chainID, &contributor, &maintainer, &state, &issues); err != nil {
+						continue
+					}
+					chainPools = append(chainPools, fiber.Map{
+						"chain_id":         chainID,
+						"contributor_pool": contributor,
+						"maintainer_pool":  maintainer,
+						"escrow_state":     state,
+						"published_issues": issues,
+						// Bucketed, exactly as applicant counts are (§2.3), so
+						// nobody can time an application against an exact number.
+						"issue_volume": func() string {
+							if issues >= 20 {
+								return "many"
+							}
+							return "few"
+						}(),
+					})
+				}
+			}
+		}
+
 		return c.JSON(fiber.Map{
 			"source":         source,
 			"hackathon_id":   hackathonID,
@@ -120,6 +167,7 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 			// note exists because the pool split looks narrower than the
 			// underlying contributor counts and that difference is easy to
 			// misread as the scoring not working.
+			"chain_pools": chainPools,
 			"section_notes": fiber.Map{
 				"Chains": "Each chain in this event has its own prize pool, funded by its own sponsor. " +
 					"That money pays that chain's contributors and nobody else's, and it never moves between " +

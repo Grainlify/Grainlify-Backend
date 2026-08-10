@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -123,3 +124,98 @@ ORDER BY chain_id
 	}
 	return out, rows.Err()
 }
+
+// SettleMaintainerPoolPerChain scores and allocates the maintainer pool
+// independently for each chain (§2.2: "the maintainer pool is likewise scored
+// and split per chain, over the repos whose issues were tagged with that
+// chain").
+//
+// A repo that tagged issues on two chains is scored in both, from each
+// chain's own budget. That is the same separate-pool logic as the contributor
+// side: a sponsor's maintainer budget rewards the repos that brought work to
+// *their* chain, not to someone else's.
+//
+// Falls through to the single-pool path when the event runs no chains, so
+// every existing event settles exactly as before.
+func SettleMaintainerPoolPerChain(
+	ctx context.Context,
+	pool db.DBPool,
+	hackathonID uuid.UUID,
+	medianFn ReviewMedianFn,
+) (map[string][]MaintainerPayout, error) {
+	chains, err := EventChains(ctx, pool, hackathonID)
+	if err != nil {
+		return nil, err
+	}
+	if len(chains) == 0 {
+		payouts, err := SettleMaintainerPool(ctx, pool, hackathonID, medianFn)
+		if err != nil {
+			return nil, err
+		}
+		return map[string][]MaintainerPayout{"": payouts}, nil
+	}
+
+	cfg, err := EffectiveValues(ctx, pool, &hackathonID)
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.SettleMaintainerPoolPerChain: config: %w", err)
+	}
+
+	out := map[string][]MaintainerPayout{}
+	for _, chainID := range chains {
+		var maintainerPool float64
+		if err := pool.QueryRow(ctx, `
+SELECT (maintainer_pool / (10 ^ asset_decimals))::float8
+FROM hackathon_chain_pools WHERE hackathon_id = $1 AND chain_id = $2
+`, hackathonID, chainID).Scan(&maintainerPool); err != nil {
+			return nil, fmt.Errorf("hackathon.SettleMaintainerPoolPerChain: %s pool: %w", chainID, err)
+		}
+
+		// Only repos that tagged issues onto this chain compete for it.
+		rows, err := pool.Query(ctx, `
+SELECT DISTINCT p.id, p.github_full_name
+FROM hackathon_issues hi
+JOIN projects p ON p.id = hi.project_id
+WHERE hi.hackathon_id = $1 AND hi.chain_id = $2
+ORDER BY p.id
+`, hackathonID, chainID)
+		if err != nil {
+			return nil, fmt.Errorf("hackathon.SettleMaintainerPoolPerChain: %s repos: %w", chainID, err)
+		}
+		type repo struct {
+			id       uuid.UUID
+			fullName string
+		}
+		var repos []repo
+		for rows.Next() {
+			var r repo
+			if err := rows.Scan(&r.id, &r.fullName); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			repos = append(repos, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		scores := make([]MaintainerScore, 0, len(repos))
+		for _, r := range repos {
+			var median *float64
+			if medianFn != nil {
+				median = medianFn(r.id, r.fullName)
+			}
+			s, err := ComputeMaintainerScore(ctx, pool, hackathonID, r.id, median, cfg)
+			if err != nil {
+				return nil, err
+			}
+			scores = append(scores, s)
+		}
+		out[chainID] = AllocateMaintainerPool(scores, maintainerPool, cfg, timeNow())
+	}
+	return out, nil
+}
+
+// timeNow is a seam so a settle time can be pinned in a test without
+// threading a clock through every caller.
+var timeNow = func() time.Time { return time.Now() }

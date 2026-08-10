@@ -166,3 +166,37 @@ from stored rows so it is a function of recorded history rather than of when
 you asked. Failing that, snapshot the computed value onto the maintainer's
 score row at settle time, so at least the number that was used is preserved
 even if it cannot be re-derived.
+
+---
+
+# Future task: pin the database session timezone to UTC
+
+The contribution-calendar timezone bug was fixed at each query site
+(`AT TIME ZONE 'UTC'` on every timestamptz-to-day/week bucket in
+`user_profile.go` and `org_ratings.go`, verified across UTC, IST, UTC-8 and
+UTC+14).
+
+The broader fix was deliberately **not** folded in: setting the connection
+pool's session timezone to UTC would eliminate this entire bug class in one
+line, because every `timestamptz`-to-`date` cast in the codebase currently
+resolves in whatever timezone the session happens to have.
+
+It was left out because it silently changes every other such cast — not just
+the two calendars — and that is a larger change than a calendar fix should
+carry. It needs its own change and its own testing.
+
+What it would involve:
+
+- Set `TimeZone=UTC` in the pgx pool's runtime params (or `SET TIME ZONE 'UTC'`
+  on connection acquire), so dev machines match production instead of
+  differing by their operator's location.
+- Audit every remaining bare `::date`, `DATE(...)`, `date_trunc(...)` and
+  `now()` comparison against a `timestamptz` column — the explicit
+  `AT TIME ZONE 'UTC'` sites added for the calendars are already safe and
+  would become no-ops, which is the intended belt-and-braces.
+- Run the suite under at least `Asia/Kolkata` and `Pacific/Kiritimati`, since
+  those are the offsets that expose a day-boundary disagreement.
+
+Worth doing before an event runs across timezones, because "which day did this
+contribution land on" becomes a payout-adjacent question once windows open and
+close on dates.

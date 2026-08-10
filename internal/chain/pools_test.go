@@ -330,3 +330,135 @@ func TestAmount_PrecisionMismatchIsAnError(t *testing.T) {
 // The mock must implement the whole interface, or stage 1 cannot prove the
 // abstraction.
 var _ ChainAdapter = (*MockAdapter)(nil)
+
+// Address validation is the one uncovered gap that fails silently and
+// permanently.
+//
+// Everything else in this package fails loudly and recoverably: an escrow
+// that will not confirm blocks a transition, a draw without a commit refuses
+// to run. A bad claim address does none of that. The leaf builds, the root
+// publishes on-chain, and the root is immutable - so the error is only
+// discovered when a contributor cannot claim, at which point it cannot be
+// corrected without a new root the contract will not accept.
+//
+// The realistic hazard is not a typo but a *valid* address for the wrong
+// chain: a contributor with one wallet who pastes their Stellar address
+// against a Flare pool. It looks like an address, it passes any "is this
+// non-empty" check, and it is unspendable there.
+func TestValidateAddress_RejectsWrongChainAndMalformed(t *testing.T) {
+	stellar := NewMockAdapter("soroban", dec)
+	stellar.AddressPrefix, stellar.AddressMinLen = "G", 56
+
+	evm := NewMockAdapter("flare", dec)
+	evm.AddressPrefix, evm.AddressMinLen = "0x", 42
+
+	const (
+		goodStellar = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		goodEVM     = "0x0000000000000000000000000000000000000001"
+	)
+
+	if err := stellar.ValidateAddress(goodStellar); err != nil {
+		t.Fatalf("a valid Stellar address was rejected by the Stellar adapter: %v", err)
+	}
+	if err := evm.ValidateAddress(goodEVM); err != nil {
+		t.Fatalf("a valid EVM address was rejected by the EVM adapter: %v", err)
+	}
+
+	// The case that matters: each adapter must reject the other chain's
+	// perfectly valid address.
+	if err := evm.ValidateAddress(goodStellar); !errors.Is(err, ErrInvalidAddress) {
+		t.Errorf("a valid Stellar address was accepted against the Flare pool: err = %v", err)
+	}
+	if err := stellar.ValidateAddress(goodEVM); !errors.Is(err, ErrInvalidAddress) {
+		t.Errorf("a valid EVM address was accepted against the Stellar pool: err = %v", err)
+	}
+
+	// Malformed shapes, each of which would otherwise reach a Merkle leaf.
+	for _, bad := range []string{
+		"",     // empty
+		"   ",  // whitespace only
+		"G",    // right prefix, far too short
+		"GAAA", // right prefix, still too short
+		"gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // wrong case prefix
+		"0x1", // right prefix for the other chain, too short anyway
+	} {
+		if err := stellar.ValidateAddress(bad); !errors.Is(err, ErrInvalidAddress) {
+			t.Errorf("Stellar adapter accepted %q: err = %v", bad, err)
+		}
+	}
+
+	// The format hint has to be usable by a UI, or contributors are guessing.
+	f := stellar.AddressFormat()
+	if f.Example == "" || f.Description == "" {
+		t.Errorf("AddressFormat is not usable for a UI hint: %+v", f)
+	}
+	if !strings.HasPrefix(f.Example, "G") {
+		t.Errorf("AddressFormat example %q does not match the chain's own prefix", f.Example)
+	}
+}
+
+// §5.1 requires it to be structurally impossible for a maintainer claim to
+// draw on contributor funds - separate balances, enforced separately.
+//
+// A short contributor pool was already tested and a short maintainer pool was
+// not, which is exactly the asymmetry that requirement exists to prevent: an
+// escrow underfunded on the maintainer side would have verified as ready and
+// gone live owing money it did not hold.
+func TestVerifyAllEscrowsFunded_MaintainerPoolShortAlsoBlocks(t *testing.T) {
+	ctx := context.Background()
+	a := NewMockAdapter("soroban", dec)
+	reg := NewRegistry()
+	reg.Register(a)
+
+	ref := EscrowRef{ChainID: "soroban", HackathonID: "hack-short"}
+	// Fund the contributor pool in full but the maintainer pool short.
+	if _, err := a.BuildFundEscrow(ctx, EscrowParams{
+		Ref:             ref,
+		ContributorPool: NewAmount(30_000_000000, dec),
+		MaintainerPool:  NewAmount(4_999_000000, dec),
+	}); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	a.ConfirmAll(5)
+
+	pools := []Pool{{
+		HackathonID: "hack-short", ChainID: "soroban",
+		ContributorPool: NewAmount(30_000_000000, dec),
+		MaintainerPool:  NewAmount(5_000_000000, dec), // owes more than escrowed
+		EscrowRef:       ref, MinConfirmations: 1,
+	}}
+
+	readiness, err := VerifyAllEscrowsFunded(ctx, reg, pools)
+	if err == nil {
+		t.Fatal("an escrow short on the maintainer pool verified as fully funded")
+	}
+	if !strings.Contains(err.Error(), "maintainer") {
+		t.Errorf("the error does not identify which pool is short: %v", err)
+	}
+	if readiness[0].Ready {
+		t.Error("readiness reported ready with the maintainer pool underfunded")
+	}
+}
+
+// An adapter that cannot read the chain must block, not pass. "We could not
+// check" is not "it is funded".
+func TestVerifyAllEscrowsFunded_UnreadableChainBlocks(t *testing.T) {
+	ctx := context.Background()
+	a := NewMockAdapter("soroban", dec)
+	a.FailVerify = errors.New("rpc timeout")
+	reg := NewRegistry()
+	reg.Register(a)
+
+	pools := []Pool{{
+		HackathonID: "h", ChainID: "soroban",
+		ContributorPool: NewAmount(1, dec), MaintainerPool: NewAmount(0, dec),
+		EscrowRef: EscrowRef{ChainID: "soroban", HackathonID: "h"}, MinConfirmations: 1,
+	}}
+	readiness, err := VerifyAllEscrowsFunded(ctx, reg, pools)
+	if err == nil {
+		t.Fatal("an unreadable chain verified as funded")
+	}
+	if readiness[0].Ready || !strings.Contains(readiness[0].Reason, "rpc timeout") {
+		t.Errorf("readiness does not carry the read failure: %+v", readiness[0])
+	}
+}

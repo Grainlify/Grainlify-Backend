@@ -42,6 +42,14 @@ type MockAdapter struct {
 	// FailVerify forces VerifyEscrowFunded to error.
 	FailVerify error
 
+	// AddressPrefix lets a test give this mock a realistic per-chain address
+	// shape ("G" for Stellar, "0x" for an EVM chain) so cross-chain
+	// rejection can be exercised as it will actually occur. Empty falls back
+	// to the generic "<chain-id>:" scheme.
+	AddressPrefix string
+	// AddressMinLen is the shortest address this chain accepts.
+	AddressMinLen int
+
 	// built records every UnsignedTx produced, so tests can assert what
 	// would have been signed without anything signing it.
 	built []UnsignedTx
@@ -265,6 +273,20 @@ func (m *MockAdapter) ValidateAddress(addr string) error {
 }
 
 func (m *MockAdapter) validate(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("%w: empty address for %s", ErrInvalidAddress, m.chainID)
+	}
+	if m.AddressPrefix != "" {
+		if !strings.HasPrefix(addr, m.AddressPrefix) {
+			return fmt.Errorf("%w: %q is not a %s address (expected prefix %q)",
+				ErrInvalidAddress, addr, m.chainID, m.AddressPrefix)
+		}
+		if m.AddressMinLen > 0 && len(addr) < m.AddressMinLen {
+			return fmt.Errorf("%w: %q is too short for %s (want at least %d characters)",
+				ErrInvalidAddress, addr, m.chainID, m.AddressMinLen)
+		}
+		return nil
+	}
 	if !strings.HasPrefix(addr, m.chainID+":") || len(addr) <= len(m.chainID)+1 {
 		return fmt.Errorf("%w: %q is not a %s address", ErrInvalidAddress, addr, m.chainID)
 	}
@@ -272,6 +294,13 @@ func (m *MockAdapter) validate(addr string) error {
 }
 
 func (m *MockAdapter) AddressFormat() AddressFormatSpec {
+	if m.AddressPrefix != "" {
+		return AddressFormatSpec{
+			Description: m.chainID + " address beginning " + m.AddressPrefix,
+			Example:     m.AddressPrefix + strings.Repeat("X", 8),
+			Pattern:     "^" + m.AddressPrefix,
+		}
+	}
 	return AddressFormatSpec{
 		Description: "mock address for " + m.chainID,
 		Example:     m.chainID + ":ADDRESS",
