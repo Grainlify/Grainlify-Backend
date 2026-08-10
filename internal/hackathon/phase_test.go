@@ -198,6 +198,70 @@ func TestTransition_UnknownPhaseRejected(t *testing.T) {
 	}
 }
 
+// TestTransition_ShadowModeBlocksGoingLive pins the guard on the one
+// misconfiguration that fails silently: an event that goes live with judging
+// in shadow mode runs the whole pipeline and shows contributors nothing.
+//
+// The default is deliberately true, so this blocks by default and turning it
+// off is an explicit, audited act rather than something an admin has to
+// remember unprompted.
+func TestTransition_ShadowModeBlocksGoingLive(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	actor := fxUser(t, d.Pool)
+	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "issue_prep"})
+
+	now := time.Now()
+	if _, err := d.Pool.Exec(ctx, `UPDATE hackathons SET starts_at = $1, ends_at = $2 WHERE id = $3`,
+		now, now.Add(48*time.Hour), hackathonID); err != nil {
+		t.Fatalf("update hackathon: %v", err)
+	}
+
+	// Defaults only: shadow mode is on, so Readiness must say so by name.
+	blocking, nextPhase, err := Readiness(ctx, d.Pool, hackathonID)
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if nextPhase != "live" {
+		t.Fatalf("nextPhase = %q, want live", nextPhase)
+	}
+	var found bool
+	for _, b := range blocking {
+		if b.Field == "judging_shadow_mode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no judging_shadow_mode blocker reported, got %+v", blocking)
+	}
+
+	if err := Transition(ctx, d.Pool, hackathonID, "live", actor); err == nil {
+		t.Fatal("Transition to live succeeded with judging in shadow mode; it must be refused")
+	}
+	var phase string
+	if err := d.Pool.QueryRow(ctx, `SELECT phase FROM hackathons WHERE id = $1`, hackathonID).Scan(&phase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phase != "issue_prep" {
+		t.Errorf("phase = %q after a refused transition, want it unchanged at issue_prep", phase)
+	}
+
+	// Turning it off clears the blocker and lets the event go live.
+	if err := SetValue(ctx, d.Pool, &hackathonID, "judging_shadow_mode", "false", actor); err != nil {
+		t.Fatalf("SetValue: %v", err)
+	}
+	blocking, _, err = Readiness(ctx, d.Pool, hackathonID)
+	if err != nil {
+		t.Fatalf("Readiness (after disabling shadow mode): %v", err)
+	}
+	if len(blocking) != 0 {
+		t.Errorf("expected no blockers once shadow mode is off, got %+v", blocking)
+	}
+	if err := Transition(ctx, d.Pool, hackathonID, "live", actor); err != nil {
+		t.Fatalf("Transition to live after disabling shadow mode: %v", err)
+	}
+}
+
 func TestTransition_IssuePrepToLive_SnapshotsConfig(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
@@ -213,6 +277,12 @@ func TestTransition_IssuePrepToLive_SnapshotsConfig(t *testing.T) {
 	now := time.Now()
 	if _, err := d.Pool.Exec(ctx, `UPDATE hackathons SET starts_at = $1, ends_at = $2 WHERE id = $3`, now, now.Add(48*time.Hour), hackathonID); err != nil {
 		t.Fatalf("update hackathon: %v", err)
+	}
+	// Shadow mode blocks the live transition, so an event that is genuinely
+	// going live has to turn it off first. Doing that here rather than
+	// weakening the guard keeps this test about the snapshot.
+	if err := SetValue(ctx, d.Pool, &hackathonID, "judging_shadow_mode", "false", actor); err != nil {
+		t.Fatalf("SetValue judging_shadow_mode: %v", err)
 	}
 
 	if err := Transition(ctx, d.Pool, hackathonID, "live", actor); err != nil {

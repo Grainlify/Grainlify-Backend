@@ -40,28 +40,44 @@ func TestWeightsFor_Section39(t *testing.T) {
 			want: 3.0,
 		},
 		{
-			name: "weak fit, has applied before",
-			a:    drawApplicant{fit: "weak", diffMatch: "matched", priorApps: 3},
+			name: "weak fit, has been assigned before",
+			a:    drawApplicant{fit: "weak", diffMatch: "matched", priorAssignments: 3},
 			want: 0.25,
 		},
 		{
 			name: "difficulty above demonstrated level halves the tickets",
-			a:    drawApplicant{fit: "plausible", diffMatch: "above", priorApps: 1},
+			a:    drawApplicant{fit: "plausible", diffMatch: "above", priorAssignments: 1},
 			want: 0.5,
 		},
 		{
 			name: "prior completions compound",
-			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, completions: 2},
+			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 5, completions: 2},
 			want: 2.25, // 1.5^2
 		},
 		{
 			name: "abandons compound as a penalty",
-			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, abandons: 2},
+			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 5, abandons: 2},
 			want: 0.25, // 0.5^2
 		},
 		{
 			name: "difficulty 'below' is deliberately not penalised",
-			a:    drawApplicant{fit: "plausible", diffMatch: "below", priorApps: 1},
+			a:    drawApplicant{fit: "plausible", diffMatch: "below", priorAssignments: 1},
+			want: 1.0,
+		},
+		{
+			// The bonus is about never having *won*, not about never having
+			// applied. Someone holding several open applications and no
+			// assignment is still a newcomer.
+			name: "newcomer keeps the bonus while holding several applications",
+			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 0},
+			want: 1.5,
+		},
+		{
+			// One assignment ends it, even if that issue was never completed.
+			// Winning is the event that stops someone being a newcomer;
+			// finishing is what `completions` measures separately.
+			name: "one assignment ends the bonus even with zero completions",
+			a:    drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 1, completions: 0},
 			want: 1.0,
 		},
 	}
@@ -312,6 +328,69 @@ func TestRunDraw_NewcomerReservation(t *testing.T) {
 	}
 	if len(res.Pool) != 1 {
 		t.Errorf("reserved pool size = %d, want 1 (newcomer only)", len(res.Pool))
+	}
+}
+
+// TestRunDraw_FirstEverBonusUnaffectedByApplyingElsewhere is the regression
+// test for the inverted newcomer bonus.
+//
+// The bonus used to key off the applicant's prior *application* count, so a
+// genuine first-timer who applied to a second issue lost the 1.5x on both -
+// each application counted as the other's prior. The bonus meant to widen a
+// newcomer's way in punished them for using more than one door, and nothing
+// in the product said so.
+//
+// The property asserted here is the one the published rule depends on: a
+// contributor's ticket count on issue A does not move when they apply to
+// issue B. Assert it end to end through loadDrawApplicants rather than on
+// weightsFor alone, because the bug was in the query, not the arithmetic.
+func TestRunDraw_FirstEverBonusUnaffectedByApplyingElsewhere(t *testing.T) {
+	d := dbtest.DB(t)
+	pool := d.Pool
+	ctx := context.Background()
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+
+	issueA := fxPublishedIssue(t, pool, hackathonID, projectID, 40, "standard")
+	issueB := fxPublishedIssue(t, pool, hackathonID, projectID, 41, "standard")
+
+	newcomer := fxUser(t, pool)
+	fxGitHubAccount(t, pool, newcomer, "newcomer")
+	fxApplication(t, pool, hackathonID, issueA, newcomer, "newcomer", "plausible")
+
+	// Simulated draws so nothing is assigned and no slot is consumed - the
+	// contributor must still be a newcomer when the second draw runs.
+	ticketsOnA := func(when string) float64 {
+		res, err := RunDraw(ctx, pool, hackathonID, issueA, 7, true)
+		if err != nil {
+			t.Fatalf("draw on issue A (%s): %v", when, err)
+		}
+		for _, c := range res.Pool {
+			if c.UserID == newcomer {
+				return c.Tickets
+			}
+		}
+		t.Fatalf("newcomer missing from issue A's draw pool (%s)", when)
+		return 0
+	}
+
+	before := ticketsOnA("holding one application")
+	fxApplication(t, pool, hackathonID, issueB, newcomer, "newcomer", "plausible")
+	after := ticketsOnA("holding two applications")
+
+	if before != after {
+		t.Errorf("tickets on issue A changed after applying to issue B: %v -> %v; "+
+			"applying to another issue must not alter the odds on this one", before, after)
+	}
+	// Pin the value too: equal-but-both-wrong would pass the check above.
+	// 1.0 base x 1.0 plausible x 1.5 first-ever.
+	if before != 1.5 {
+		t.Errorf("newcomer tickets = %v, want 1.5 (the first-ever bonus should apply)", before)
+	}
+
+	// And the bonus ends on the first win, not on the first application.
+	fxAssignment(t, pool, hackathonID, issueB, projectID, newcomer, 41, "newcomer", nil)
+	if got := ticketsOnA("after being assigned issue B"); got != 1.0 {
+		t.Errorf("tickets after a first assignment = %v, want 1.0 (bonus should be gone)", got)
 	}
 }
 

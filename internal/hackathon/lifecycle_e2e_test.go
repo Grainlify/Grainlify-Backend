@@ -61,8 +61,15 @@ WHERE id = $1`, hackathonID); err != nil {
 	fxAcceptedApplication(t, pool, hackathonID, projectID, owner)
 	advance("issue_prep")
 
-	// Phase 2 -> 3. The config snapshot is taken here and is what the event
-	// reads from now on.
+	// Phase 2 -> 3. An event that publishes results to contributors has to
+	// leave shadow mode first, and going live is where that is enforced -
+	// this walkthrough is the real path, so it does what a real admin does.
+	if err := SetValue(ctx, pool, &hackathonID, "judging_shadow_mode", "false", admin); err != nil {
+		t.Fatalf("leave shadow mode: %v", err)
+	}
+
+	// The config snapshot is taken here and is what the event reads from now
+	// on.
 	advance("live")
 	var snapshotTaken *string
 	if err := pool.QueryRow(ctx,
@@ -211,11 +218,21 @@ FROM hackathon_maintainer_payouts WHERE hackathon_id = $1 AND project_id = $2`,
 		t.Error("no holdback due date set, so the release job would never select it")
 	}
 
-	// Money cannot move: still in shadow mode.
+	// Money cannot move while in shadow mode. This event left shadow mode to
+	// go live, so put it back deliberately for the assertion: an admin can
+	// still edit config on a live event (§1.1), and the guard reads the live
+	// value rather than the frozen snapshot, so re-entering it mid-event is
+	// a state the system can genuinely be in.
+	if err := SetValue(ctx, pool, &hackathonID, "judging_shadow_mode", "true", admin); err != nil {
+		t.Fatalf("re-enter shadow mode: %v", err)
+	}
 	if err := GuardPayoutRelease(ctx, pool, PayoutReleaseRequest{
 		HackathonID: hackathonID, PayoutRunID: uuid.New(), ActorID: admin, Confirm: true,
 	}); err == nil {
 		t.Error("payout released while in shadow mode")
+	}
+	if err := SetValue(ctx, pool, &hackathonID, "judging_shadow_mode", "false", admin); err != nil {
+		t.Fatalf("leave shadow mode again: %v", err)
 	}
 
 	// The holdback resolves once due, conditional on activity.

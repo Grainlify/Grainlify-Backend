@@ -128,6 +128,33 @@ func dynamicBlockers(ctx context.Context, pool db.DBPool, h *Hackathon, toPhase 
 	var reasons []BlockingReason
 
 	switch toPhase {
+	case "live":
+		// judging_shadow_mode computes verdicts and payouts and publishes
+		// nothing to contributors. It defaults to true, which is the right
+		// default - a misconfigured or half-built event should stay silent
+		// rather than tell people they lost.
+		//
+		// But it is the wrong state to *go live* in, and it fails silently:
+		// contributors apply, are drawn, do the work and are judged, and the
+		// first thing anyone notices is that no result ever appears. Nothing
+		// else in the pipeline errors, so there is no moment at which the
+		// mistake surfaces on its own.
+		//
+		// So this blocks the transition, the same way unfunded escrow does.
+		// The default stays safe and turning it off becomes a deliberate act
+		// with a timestamp against it, rather than something an admin has to
+		// remember unprompted.
+		shadow, err := EffectiveValue(ctx, pool, &h.ID, "judging_shadow_mode")
+		if err != nil {
+			return nil, fmt.Errorf("hackathon.dynamicBlockers: read judging_shadow_mode: %w", err)
+		}
+		if shadow == "true" {
+			reasons = append(reasons, BlockingReason{
+				"judging_shadow_mode",
+				"Judging is in shadow mode, so verdicts and payouts would be computed but never shown to contributors. Turn it off before going live, or contributors will do the work and never see a result.",
+			})
+		}
+
 	case "results_published":
 		// §6 exists so a contributor can contest a verdict. Publishing while
 		// some PRs have not been judged would start that clock for people

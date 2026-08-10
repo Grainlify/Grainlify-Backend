@@ -24,6 +24,18 @@ type cohort struct {
 // realisticPool is a deliberately ordinary mid-event pool: mostly newcomers
 // and returning applicants, a few veterans who have already completed
 // issues, one contributor carrying an abandon.
+//
+// The cohorts are keyed on priorAssignments, because that is what the
+// first-ever bonus now tests. Note what that does to the old "returning, no
+// wins" cohort: someone who has applied repeatedly and never won is a
+// newcomer by this measure and keeps the bonus, which is the whole point of
+// the fix. The middle tier is now "has won before but finished nothing",
+// which is a genuinely different contributor from one who has never been
+// picked at all.
+//
+// completions and abandons both imply an assignment happened, so every
+// cohort carrying either has priorAssignments >= 1. A row with completions
+// and no assignments would describe a contributor who cannot exist.
 func realisticPool() []cohort {
 	return []cohort{
 		{"newcomer (plausible)", drawApplicant{fit: "plausible", diffMatch: "matched"}},
@@ -32,15 +44,18 @@ func realisticPool() []cohort {
 		{"newcomer (strong)", drawApplicant{fit: "strong", diffMatch: "matched"}},
 		{"newcomer (weak)", drawApplicant{fit: "weak", diffMatch: "matched"}},
 
-		{"returning, no wins (plausible)", drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 3}},
-		{"returning, no wins (plausible)", drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 6}},
-		{"returning, no wins (strong)", drawApplicant{fit: "strong", diffMatch: "matched", priorApps: 2}},
+		// Applied before, never won: still a newcomer for bonus purposes.
+		{"applied before, never won (plausible)", drawApplicant{fit: "plausible", diffMatch: "matched"}},
+		{"applied before, never won (strong)", drawApplicant{fit: "strong", diffMatch: "matched"}},
 
-		{"veteran, 1 completion", drawApplicant{fit: "strong", diffMatch: "matched", priorApps: 4, completions: 1}},
-		{"veteran, 2 completions", drawApplicant{fit: "strong", diffMatch: "matched", priorApps: 8, completions: 2}},
-		{"veteran, 3 completions", drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 11, completions: 3}},
+		// Won before, finished nothing yet.
+		{"assigned once, no completion", drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 1}},
 
-		{"has one abandon", drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, abandons: 1}},
+		{"veteran, 1 completion", drawApplicant{fit: "strong", diffMatch: "matched", priorAssignments: 2, completions: 1}},
+		{"veteran, 2 completions", drawApplicant{fit: "strong", diffMatch: "matched", priorAssignments: 3, completions: 2}},
+		{"veteran, 3 completions", drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 4, completions: 3}},
+
+		{"has one abandon", drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 2, abandons: 1}},
 	}
 }
 
@@ -140,7 +155,7 @@ func TestTicketOrdering_AccumulatedWinsNeverOutrankCapability(t *testing.T) {
 	// Far past any plausible event length, to prove the bound is structural
 	// and not just "large enough for now".
 	for _, completions := range []int{1, 2, 3, 5, 10, 50, 1000} {
-		veteran := drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 20, completions: completions}
+		veteran := drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: completions + 1, completions: completions}
 		w := weightsFor(veteran, cfg)
 
 		if got := ticketsFrom(w); got >= strongNewcomer {
@@ -155,9 +170,9 @@ func TestTicketOrdering_AccumulatedWinsNeverOutrankCapability(t *testing.T) {
 
 	// The clamp must not erase the incentive entirely: one and two
 	// completions still count for something.
-	one := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, completions: 1}, cfg))
-	two := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, completions: 2}, cfg))
-	none := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5}, cfg))
+	one := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 2, completions: 1}, cfg))
+	two := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 3, completions: 2}, cfg))
+	none := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 1}, cfg))
 	if !(none < one && one < two) {
 		t.Errorf("completions should still be rewarded up to the clamp: 0=%.3f 1=%.3f 2=%.3f", none, one, two)
 	}
@@ -175,7 +190,7 @@ func TestWeightDistribution_PriorCompletionCompounding(t *testing.T) {
 	t.Logf("%-24s %10s %14s", "veteran completions", "tickets", "vs newcomer")
 	for _, completions := range []int{0, 1, 2, 3, 4, 5} {
 		v := ticketsFrom(weightsFor(drawApplicant{
-			fit: "plausible", diffMatch: "matched", priorApps: 5, completions: completions,
+			fit: "plausible", diffMatch: "matched", priorAssignments: completions + 1, completions: completions,
 		}, cfg))
 		t.Logf("%-24d %10.3f %13.2fx", completions, v, v/newcomerStrong)
 	}
@@ -183,8 +198,8 @@ func TestWeightDistribution_PriorCompletionCompounding(t *testing.T) {
 	// With the clamp in place the table flattens at 2 completions and stays
 	// under the strong-fit newcomer forever. Uncapped it crossed over at 3
 	// and kept climbing.
-	v3 := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, completions: 3}, cfg))
-	v50 := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorApps: 5, completions: 50}, cfg))
+	v3 := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 4, completions: 3}, cfg))
+	v50 := ticketsFrom(weightsFor(drawApplicant{fit: "plausible", diffMatch: "matched", priorAssignments: 51, completions: 50}, cfg))
 	if v3 != v50 {
 		t.Errorf("tickets still grow past the clamp: 3 completions = %.3f, 50 = %.3f", v3, v50)
 	}

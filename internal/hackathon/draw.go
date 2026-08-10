@@ -67,7 +67,10 @@ type drawApplicant struct {
 	appliedAt     time.Time
 	completions   int
 	abandons      int
-	priorApps     int
+	// priorAssignments is how many GrainHack issues this contributor has ever
+	// been assigned, across every event. Zero is what "newcomer" means for
+	// the first-ever bonus - see weightsFor.
+	priorAssignments int
 }
 
 // weightsFor computes a candidate's ticket count from §3.9. Base 1.0,
@@ -130,7 +133,34 @@ func weightsFor(a drawApplicant, cfg map[string]string) map[string]float64 {
 		w["prior_completion"] = f
 	}
 
-	if a.priorApps == 0 {
+	// The newcomer bonus, anchored to never having been *assigned* an issue -
+	// not to having no other application on record.
+	//
+	// It was originally keyed off the applicant's prior application count,
+	// which inverted the whole point of the bonus: a genuine first-timer who
+	// applied to a second issue immediately lost the 1.5x on *both*, because
+	// each application counted as the other's prior. The bonus meant to widen
+	// a newcomer's way in instead punished them for using more than one door,
+	// and nothing in the product surfaced that - applications are free, the
+	// cap allows five, and nothing warned that the second one devalued the
+	// first.
+	//
+	// Anchoring on assignments makes the term mean what it says: a newcomer
+	// keeps it across every application they hold until they actually win
+	// one, which is the moment they stop being a newcomer. It also makes the
+	// weight independent of how many issues someone applied to, which is what
+	// lets the published rule "applying to more issues does not change your
+	// odds on any one issue" be true.
+	//
+	// Assignments are counted across every event, not just this one, for the
+	// same reason completions are: "first ever" is a claim about the
+	// contributor, not about their conduct in one hackathon.
+	//
+	// The config key and the weight label both keep their original names.
+	// The key is snapshotted into live events (§1.1) and the label is stored
+	// in every past hackathon_draws row, so renaming either would break
+	// replay of draws that have already happened.
+	if a.priorAssignments == 0 {
 		w["first_ever_application"] = atofOr(cfg["weight_first_ever_application"], 1.5)
 	}
 
@@ -174,8 +204,8 @@ SELECT
      WHERE x.user_id = a.user_id AND x.status = 'completed') AS completions,
   (SELECT count(*) FROM hackathon_assignments x
      WHERE x.user_id = a.user_id AND x.hackathon_id = a.hackathon_id AND x.abandon_recorded) AS abandons,
-  (SELECT count(*) FROM hackathon_issue_applications y
-     WHERE y.user_id = a.user_id AND y.id <> a.id) AS prior_apps
+  (SELECT count(*) FROM hackathon_assignments x
+     WHERE x.user_id = a.user_id) AS prior_assignments
 FROM hackathon_issue_applications a
 WHERE a.hackathon_id = $1 AND a.hackathon_issue_id = $2 AND a.status = 'applied'
 ORDER BY a.created_at ASC, a.id ASC
@@ -189,7 +219,7 @@ ORDER BY a.created_at ASC, a.id ASC
 	for rows.Next() {
 		var a drawApplicant
 		if err := rows.Scan(&a.applicationID, &a.userID, &a.login, &a.fit, &a.diffMatch, &a.appliedAt,
-			&a.completions, &a.abandons, &a.priorApps); err != nil {
+			&a.completions, &a.abandons, &a.priorAssignments); err != nil {
 			return nil, fmt.Errorf("hackathon.loadDrawApplicants: scan: %w", err)
 		}
 		out = append(out, a)

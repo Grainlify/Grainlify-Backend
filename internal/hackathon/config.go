@@ -139,7 +139,7 @@ var Definitions = map[string]SettingDef{
 	"weight_fit_weak":               {Key: "weight_fit_weak", Type: "float", Default: "0.25", Section: "Draw weights", Description: "Ticket multiplier for a 'weak' AI fit assessment.", Active: true},
 	"weight_difficulty_above":       {Key: "weight_difficulty_above", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier when demonstrated skill is below the issue's difficulty tier.", Active: true},
 	"weight_prior_completion":       {Key: "weight_prior_completion", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier per prior completed GrainHack issue.", Active: true},
-	"weight_first_ever_application": {Key: "weight_first_ever_application", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier for a contributor's first-ever GrainHack application.", Active: true},
+	"weight_first_ever_application": {Key: "weight_first_ever_application", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier for a contributor who has never been assigned a GrainHack issue. Held on every application until they win one, so applying to more issues never costs them the bonus.", Active: true},
 	"weight_per_abandon":            {Key: "weight_per_abandon", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier per prior abandon (< 1.0, i.e. a penalty).", Active: true},
 
 	// §3.10 judging and payout - inert until the judging slice
