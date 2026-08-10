@@ -54,17 +54,65 @@ UPDATE hackathons SET announced_at = $1, application_period_start = $1, applicat
 
 func TestReadiness_AtFinalPhaseReturnsNoNextPhase(t *testing.T) {
 	d := dbtest.DB(t)
-	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "closed"})
+	// settled is the last phase in AI-specs.md §1 - payouts have released and
+	// the maintainer holdback timer is running. There is nothing after it.
+	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "settled"})
 
 	blocking, nextPhase, err := Readiness(context.Background(), d.Pool, hackathonID)
 	if err != nil {
 		t.Fatalf("Readiness: %v", err)
 	}
 	if nextPhase != "" {
-		t.Errorf("nextPhase = %q, want empty (already at the final phase implemented so far)", nextPhase)
+		t.Errorf("nextPhase = %q, want empty (settled is the final phase)", nextPhase)
 	}
 	if blocking != nil {
 		t.Errorf("blocking = %+v, want nil", blocking)
+	}
+}
+
+// A closed hackathon still has somewhere to go: publishing results is what
+// opens the appeal window, and it is blocked until every qualifying PR has a
+// bucket, so nobody is invited to appeal a result that does not exist yet.
+func TestReadiness_ClosedAdvancesToResultsPublishedOnceJudgingIsComplete(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+	if _, err := pool.Exec(ctx, `UPDATE hackathons SET phase = 'closed' WHERE id = $1`, hackathonID); err != nil {
+		t.Fatalf("close hackathon: %v", err)
+	}
+
+	// An unjudged verdict blocks publication.
+	if _, err := pool.Exec(ctx, `
+INSERT INTO hackathon_verdicts (hackathon_id, project_id, pr_number, github_login, prefilter_status)
+VALUES ($1, $2, 4242, 'octocat', 'passed')
+`, hackathonID, projectID); err != nil {
+		t.Fatalf("insert unjudged verdict: %v", err)
+	}
+
+	blocking, nextPhase, err := Readiness(ctx, pool, hackathonID)
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if nextPhase != "results_published" {
+		t.Fatalf("nextPhase = %q, want results_published", nextPhase)
+	}
+	if len(blocking) == 0 {
+		t.Fatal("expected publication to be blocked while a PR has no final bucket")
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE hackathon_verdicts SET final_bucket = 'accepted', final_source = 'auto_confirmed'
+WHERE hackathon_id = $1 AND pr_number = 4242
+`, hackathonID); err != nil {
+		t.Fatalf("judge verdict: %v", err)
+	}
+	blocking, _, err = Readiness(ctx, pool, hackathonID)
+	if err != nil {
+		t.Fatalf("Readiness (after judging): %v", err)
+	}
+	if len(blocking) != 0 {
+		t.Errorf("expected no blockers once every PR is judged, got %+v", blocking)
 	}
 }
 

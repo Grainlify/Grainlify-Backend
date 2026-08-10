@@ -342,6 +342,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/hackathon-assignments/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.MyAssignments())
 	app.Post("/hackathon-assignments/:id/release", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Release())
 
+	// §6 appeals, contributor side. my-verdicts returns nothing until results
+	// are published - the verdict view and the appeal window open together.
+	hackathonAppeals := handlers.NewHackathonAppealsHandler(deps.DB)
+	app.Get("/grainhack/my-verdicts", auth.RequireAuth(cfg.JWTSecret), hackathonAppeals.MyVerdicts())
+	app.Get("/grainhack/verdicts/:id/appeal-window", auth.RequireAuth(cfg.JWTSecret), hackathonAppeals.AppealWindowForVerdict())
+	app.Post("/grainhack/verdicts/:id/appeal", auth.RequireAuth(cfg.JWTSecret), hackathonAppeals.Appeal())
+
 	admin := handlers.NewAdminHandler(cfg, deps.DB)
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
@@ -399,6 +406,12 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/hackathons/:id/verdicts", auth.RequireRole("admin"), adminVerdicts.List())
 	adminGroup.Get("/hackathon-verdicts/:id", auth.RequireRole("admin"), adminVerdicts.Get())
 	adminGroup.Post("/hackathon-verdicts/:id/override", auth.RequireRole("admin"), adminVerdicts.Override())
+
+	// §6 appeals. The admin queue carries the full verdict with each appeal so
+	// a reviewer answers it with both model verdicts and the diff in front of
+	// them, as the spec requires.
+	adminGroup.Get("/hackathons/:id/appeals", auth.RequireRole("admin"), hackathonAppeals.AdminList())
+	adminGroup.Post("/hackathon-appeals/:id/decide", auth.RequireRole("admin"), hackathonAppeals.AdminDecide())
 
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
 	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())

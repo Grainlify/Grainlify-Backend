@@ -104,8 +104,29 @@ func TestGuardPayoutRelease(t *testing.T) {
 		})
 	}
 
-	// Only the fully explicit request passes.
+	// Outside shadow mode and fully explicit is still not enough: §6 puts
+	// payout release at Phase 6, after the appeal window closes. A hackathon
+	// that has not settled has not finished deciding what anyone is owed.
+	if err := GuardPayoutRelease(ctx, pool, full); !errors.Is(err, ErrPayoutNotReleasable) {
+		t.Errorf("released before the hackathon settled: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE hackathons SET phase = 'settled' WHERE id = $1`, hackathonID); err != nil {
+		t.Fatalf("force settled: %v", err)
+	}
+
+	// Settled but with no appeals_closed_at means the §13-#4 recompute never
+	// ran, so any stored unit_value predates the appeal decisions.
+	if err := GuardPayoutRelease(ctx, pool, full); !errors.Is(err, ErrPayoutNotReleasable) {
+		t.Errorf("released with the appeal window still un-closed: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE hackathons SET appeals_closed_at = now() WHERE id = $1`, hackathonID); err != nil {
+		t.Fatalf("close the appeal window: %v", err)
+	}
+
+	// Only now: explicit, out of shadow mode, settled, and recomputed.
 	if err := GuardPayoutRelease(ctx, pool, full); err != nil {
-		t.Errorf("a fully confirmed admin release outside shadow mode was blocked: %v", err)
+		t.Errorf("a fully confirmed admin release on a settled, recomputed hackathon was blocked: %v", err)
 	}
 }

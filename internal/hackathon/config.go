@@ -153,7 +153,7 @@ var Definitions = map[string]SettingDef{
 	"cross_check_provider":            {Key: "cross_check_provider", Type: "enum", Default: "openai", Section: "Judging and payout", Description: "The second provider used for cross-checking."},
 	"escalate_on_low_confidence":      {Key: "escalate_on_low_confidence", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Route low-confidence verdicts to human escalation."},
 	"maintainer_nominations_per_repo": {Key: "maintainer_nominations_per_repo", Type: "int", Default: "2", Section: "Judging and payout", Description: "Cap on maintainer 'exceptional' nominations per repo.", ValidRange: ">= 0"},
-	"appeal_window_days":              {Key: "appeal_window_days", Type: "int", Default: "7", Section: "Judging and payout", Description: "Days the appeal window stays open after results are published.", ValidRange: ">= 0"},
+	"appeal_window_days":              {Key: "appeal_window_days", Type: "int", Default: "7", Section: "Judging and payout", Description: "Days the appeal window stays open after results are published.", ValidRange: ">= 0", Active: true},
 
 	// §3.11 maintainer pool - inert until the payout slice
 	"maintainer_holdback_pct":      {Key: "maintainer_holdback_pct", Type: "int", Default: "30", Section: "Maintainer pool", Description: "% of a maintainer's payout held back.", ValidRange: "0-100"},

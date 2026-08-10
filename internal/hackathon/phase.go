@@ -14,9 +14,17 @@ import (
 
 // PhaseOrder is the sequence Transition enforces - a hackathon may only move
 // forward one step at a time, never skip ahead or move backward.
-// results_published/settled (AI-specs.md §1's Phase 5-6) belong to the
-// judging/payout slice and will extend this list, not replace it.
-var PhaseOrder = []string{"draft", "application_period", "issue_prep", "live", "closed"}
+var PhaseOrder = []string{
+	"draft",
+	"application_period",
+	"issue_prep",
+	"live",
+	"closed",
+	// AI-specs.md §1 Phase 5: buckets published, appeal window opens.
+	"results_published",
+	// Phase 6: contributor payouts release, maintainer holdback timer starts.
+	"settled",
+}
 
 func phaseIndex(phase string) int {
 	for i, p := range PhaseOrder {
@@ -37,14 +45,18 @@ type Hackathon struct {
 	IssuePrepStart         *time.Time
 	StartsAt               *time.Time
 	EndsAt                 *time.Time
+	ResultsPublishedAt     *time.Time
+	AppealsClosedAt        *time.Time
 }
 
 func loadHackathon(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID) (*Hackathon, error) {
 	var h Hackathon
 	err := pool.QueryRow(ctx, `
-SELECT id, phase, announced_at, application_period_start, application_period_end, issue_prep_start, starts_at, ends_at
+SELECT id, phase, announced_at, application_period_start, application_period_end, issue_prep_start, starts_at, ends_at,
+       results_published_at, appeals_closed_at
 FROM hackathons WHERE id = $1
-`, hackathonID).Scan(&h.ID, &h.Phase, &h.AnnouncedAt, &h.ApplicationPeriodStart, &h.ApplicationPeriodEnd, &h.IssuePrepStart, &h.StartsAt, &h.EndsAt)
+`, hackathonID).Scan(&h.ID, &h.Phase, &h.AnnouncedAt, &h.ApplicationPeriodStart, &h.ApplicationPeriodEnd, &h.IssuePrepStart, &h.StartsAt, &h.EndsAt,
+		&h.ResultsPublishedAt, &h.AppealsClosedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("hackathon.loadHackathon: hackathon %s not found", hackathonID)
@@ -95,8 +107,75 @@ func requiredForTransition(h *Hackathon, toPhase string) []BlockingReason {
 		// requiring in-flight assignments to be resolved first would make
 		// the phase that RELEASES them impossible to reach. CloseEvent
 		// handles the outstanding work on the way through.
+	case "settled":
+		// The appeal window is anchored to when results were actually
+		// published, which is a stored fact rather than a planned date.
+		if h.ResultsPublishedAt == nil {
+			reasons = append(reasons, BlockingReason{"results_published_at", "Results have not been published, so no appeal window has opened."})
+		}
 	}
 	return reasons
+}
+
+// dynamicBlockers are the requirements that need to look at other tables -
+// whether judging finished, whether appeals are still open - rather than at
+// the hackathon row alone.
+//
+// Kept separate from requiredForTransition so that one stays a pure function
+// over a loaded row, which is what makes the date/field rules trivially
+// testable without a database.
+func dynamicBlockers(ctx context.Context, pool db.DBPool, h *Hackathon, toPhase string) ([]BlockingReason, error) {
+	var reasons []BlockingReason
+
+	switch toPhase {
+	case "results_published":
+		// §6 exists so a contributor can contest a verdict. Publishing while
+		// some PRs have not been judged would start that clock for people
+		// whose result does not exist yet.
+		var unjudged int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM hackathon_verdicts
+WHERE hackathon_id = $1
+  AND prefilter_status <> 'rejected'
+  AND final_bucket IS NULL
+`, h.ID).Scan(&unjudged); err != nil {
+			return nil, fmt.Errorf("hackathon.dynamicBlockers: count unjudged: %w", err)
+		}
+		if unjudged > 0 {
+			reasons = append(reasons, BlockingReason{
+				"verdicts",
+				fmt.Sprintf("%d submission(s) still have no final bucket. Publish results only once every qualifying PR has been judged.", unjudged),
+			})
+		}
+
+	case "settled":
+		if h.ResultsPublishedAt == nil {
+			break // already reported by requiredForTransition
+		}
+		window, err := GetAppealWindow(ctx, pool, h)
+		if err != nil {
+			return nil, err
+		}
+		if window.Open {
+			reasons = append(reasons, BlockingReason{
+				"appeal_window",
+				fmt.Sprintf("The appeal window is still open until %s. Payouts release at Phase 6, after it closes.", window.ClosesAt.Format(time.RFC3339)),
+			})
+		}
+		var pending int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM hackathon_appeals WHERE hackathon_id = $1 AND status = 'pending'
+`, h.ID).Scan(&pending); err != nil {
+			return nil, fmt.Errorf("hackathon.dynamicBlockers: count pending appeals: %w", err)
+		}
+		if pending > 0 {
+			reasons = append(reasons, BlockingReason{
+				"appeals",
+				fmt.Sprintf("%d appeal(s) are still awaiting a decision. Every appeal gets a human answer before anyone is paid.", pending),
+			})
+		}
+	}
+	return reasons, nil
 }
 
 // Readiness reports what's blocking hackathonID's next phase transition. The
@@ -112,7 +191,12 @@ func Readiness(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID) (bloc
 		return nil, "", nil
 	}
 	next := PhaseOrder[idx+1]
-	return requiredForTransition(h, next), next, nil
+	blocking = requiredForTransition(h, next)
+	dyn, err := dynamicBlockers(ctx, pool, h, next)
+	if err != nil {
+		return nil, "", err
+	}
+	return append(blocking, dyn...), next, nil
 }
 
 // Transition moves hackathonID to toPhase, enforcing sequential-only
@@ -137,7 +221,14 @@ func Transition(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID, toPh
 		return fmt.Errorf("hackathon.Transition: cannot move from %q to %q - phases must advance one step at a time", h.Phase, toPhase)
 	}
 	if blocking := requiredForTransition(h, toPhase); len(blocking) > 0 {
-		return fmt.Errorf("hackathon.Transition: %d requirement(s) not met for %q", len(blocking), toPhase)
+		return fmt.Errorf("hackathon.Transition: %s", blocking[0].Message)
+	}
+	dyn, err := dynamicBlockers(ctx, pool, h, toPhase)
+	if err != nil {
+		return err
+	}
+	if len(dyn) > 0 {
+		return fmt.Errorf("hackathon.Transition: %s", dyn[0].Message)
 	}
 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
@@ -156,6 +247,15 @@ INSERT INTO config_audit (hackathon_id, key, old_value, new_value, actor_user_id
 VALUES ($1, 'phase', $2, $3, $4)
 `, hid, h.Phase, toPhase, actorID); err != nil {
 		return fmt.Errorf("hackathon.Transition: write audit: %w", err)
+	}
+
+	// The appeal window is anchored to the moment a human published results.
+	if toPhase == "results_published" {
+		if _, err := tx.Exec(ctx, `
+UPDATE hackathons SET results_published_at = now() WHERE id = $1 AND results_published_at IS NULL
+`, hackathonID); err != nil {
+			return fmt.Errorf("hackathon.Transition: stamp results_published_at: %w", err)
+		}
 	}
 
 	if h.Phase == "issue_prep" && toPhase == "live" {
@@ -187,6 +287,18 @@ UPDATE hackathons SET config_snapshot = $1, config_snapshot_taken_at = now() WHE
 	if toPhase == "closed" {
 		if _, err := CloseEventAssignments(ctx, pool, hackathonID); err != nil {
 			return fmt.Errorf("hackathon.Transition: phase committed, but releasing in-flight assignments failed: %w", err)
+		}
+	}
+
+	// §13-#4: a successful appeal recomputes unit_value for everyone, once at
+	// appeal-window close rather than per appeal - otherwise the payouts stop
+	// summing to the advertised pool. Settling is that close. Deliberately
+	// after the commit and idempotent on appeals_closed_at, for the same
+	// reason as CloseEventAssignments above: the admin's phase change must
+	// land, and a failure here is retryable without paying anyone twice.
+	if toPhase == "settled" {
+		if _, err := CloseAppealsAndRecompute(ctx, pool, hackathonID, actorID); err != nil {
+			return fmt.Errorf("hackathon.Transition: phase committed, but the post-appeal payout recompute failed: %w", err)
 		}
 	}
 	return nil

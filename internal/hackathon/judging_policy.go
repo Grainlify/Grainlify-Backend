@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -57,13 +58,25 @@ type PayoutReleaseRequest struct {
 
 // GuardPayoutRelease is the single chokepoint every payout release must pass.
 //
-// Two independent conditions, both required:
+// Four independent conditions, all required:
 //
 //  1. An admin explicitly asked for it. A verdict row existing - even a
 //     complete, confident, cross-checked one - never releases money by
 //     itself. Judging decides *what* a contribution was worth; a human
 //     decides *when* to pay it.
 //  2. The event is not in shadow mode.
+//  3. The hackathon has reached Phase 6 (settled). §6: "Payouts release at
+//     Phase 6, after the appeal window closes."
+//  4. The appeal window has actually been closed out, which is also what
+//     guarantees the §13-#4 recompute has run. Paying from a pre-appeal
+//     payout run would pay the old unit_value - correct for nobody if any
+//     appeal was upheld, since an upheld appeal changes total_units and
+//     therefore everyone's share.
+//
+// Conditions 3 and 4 are separate on purpose. The phase is an admin's stated
+// intent; appeals_closed_at is the record that the arithmetic was redone.
+// A hackathon can be moved to settled while the recompute fails, and that
+// combination must not pay anyone.
 //
 // Kept as a guard rather than folded into the release function so that any
 // future release path has to call it, and so the rule is testable on its own.
@@ -79,6 +92,23 @@ func GuardPayoutRelease(ctx context.Context, pool db.DBPool, req PayoutReleaseRe
 	}
 	if ShadowMode(ctx, pool, req.HackathonID) {
 		return fmt.Errorf("%w: this hackathon is in shadow mode, which computes payouts but pays nothing", ErrPayoutNotReleasable)
+	}
+
+	var phase string
+	var appealsClosedAt *time.Time
+	err := pool.QueryRow(ctx, `
+SELECT phase, appeals_closed_at FROM hackathons WHERE id = $1
+`, req.HackathonID).Scan(&phase, &appealsClosedAt)
+	if err != nil {
+		// Fails closed: if we cannot establish that the appeal window is
+		// closed, we have not established that it is safe to pay.
+		return fmt.Errorf("%w: could not confirm the hackathon has settled: %v", ErrPayoutNotReleasable, err)
+	}
+	if phase != "settled" {
+		return fmt.Errorf("%w: payouts release at Phase 6 (settled), after the appeal window closes - this hackathon is %q", ErrPayoutNotReleasable, phase)
+	}
+	if appealsClosedAt == nil {
+		return fmt.Errorf("%w: the appeal window has not been closed out, so the post-appeal recompute has not run", ErrPayoutNotReleasable)
 	}
 	return nil
 }
