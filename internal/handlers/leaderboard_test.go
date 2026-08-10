@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -61,6 +62,26 @@ func leaderboardSuiteNextGHUserID() int64 {
 // required per-project, but a single global counter trivially satisfies that.
 var leaderboardSuiteItemSeq int64
 
+// leaderboardSuiteCleanup registers a best-effort DELETE to run at test end.
+//
+// This suite used to leave every row it created behind, because
+// grainlify_test is deliberately never truncated. That is fine for fixtures
+// nobody else ranks against, but Leaderboard() ranks every contributor in the
+// database globally, so each run permanently enlarged the very result set
+// these tests then had to search - the tests were making themselves slower,
+// forever, roughly three contributors per run.
+//
+// Failures are logged rather than fatal: cleanup runs after the assertions
+// that matter, and a cleanup error must not turn a passing test red.
+func leaderboardSuiteCleanup(t *testing.T, pool db.DBPool, sql string, args ...any) {
+	t.Helper()
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), sql, args...); err != nil {
+			t.Logf("leaderboardSuite cleanup (%s): %v", sql, err)
+		}
+	})
+}
+
 // leaderboardSuiteUser inserts a minimal row into users and returns its id.
 func leaderboardSuiteUser(t *testing.T, pool db.DBPool) uuid.UUID {
 	t.Helper()
@@ -73,6 +94,7 @@ RETURNING id
 	if err != nil {
 		t.Fatalf("leaderboardSuiteUser: insert user: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM users WHERE id = $1`, id)
 	return id
 }
 
@@ -90,6 +112,7 @@ INSERT INTO ecosystems (slug, name, status) VALUES ($1, $2, 'active') RETURNING 
 	if err != nil {
 		t.Fatalf("leaderboardSuiteEcosystem: insert ecosystem: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM ecosystems WHERE id = $1`, id)
 	return id, name
 }
 
@@ -110,6 +133,7 @@ RETURNING id
 	if err != nil {
 		t.Fatalf("leaderboardSuiteProject: insert project: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM projects WHERE id = $1`, id)
 	return id
 }
 
@@ -125,6 +149,7 @@ VALUES ($1, $2, $3, 'open', $4)
 	if err != nil {
 		t.Fatalf("leaderboardSuiteIssue: insert issue: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_issues WHERE project_id = $1 AND github_issue_id = $2`, projectID, n)
 }
 
 // leaderboardSuitePR inserts an open github_pull_requests row authored by
@@ -139,6 +164,7 @@ VALUES ($1, $2, $3, 'open', $4)
 	if err != nil {
 		t.Fatalf("leaderboardSuitePR: insert PR: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_pull_requests WHERE project_id = $1 AND github_pr_id = $2`, projectID, n)
 }
 
 // leaderboardSuiteLinkedAccount inserts a github_accounts row so the
@@ -154,6 +180,7 @@ VALUES ($1, $2, $3, $4, $5, 'bearer', 'repo')
 	if err != nil {
 		t.Fatalf("leaderboardSuiteLinkedAccount: insert github_accounts: %v", err)
 	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_accounts WHERE user_id = $1`, userID)
 }
 
 // newLeaderboardSuiteApp wires a fiber app exposing exactly the route
@@ -198,33 +225,59 @@ func leaderboardSuiteFind(entries []map[string]any, username string) map[string]
 	return nil
 }
 
-// leaderboardSuiteFindAcrossPages searches successive limit=100 pages of GET
-// /leaderboard for username, returning its entry (or nil if it isn't found
-// before a page comes back short, meaning results are exhausted, or
-// maxRows is reached). This suite's test database is long-lived and shared
-// with every other concurrently-developed test file plus prior runs of
-// these very tests (nothing here ever truncates rows), so a contributor
-// with a realistic, modest contribution count is not guaranteed to land on
-// the single largest page (limit is capped at 100 by the handler) - it has
-// to be searched for.
-func leaderboardSuiteFindAcrossPages(t *testing.T, app *fiber.App, username string, maxRows int) map[string]any {
+// leaderboardSuiteMaxSearchPages bounds the page walk below.
+//
+// Sized against how the ranking is actually distributed rather than against
+// the total row count: results are ordered by contribution_count DESC, and
+// the overwhelming majority of accumulated contributors in the shared test
+// database have exactly one contribution (3071 of 3230 when this was last
+// measured). Anything scoring 2 or more is therefore within the first page or
+// two, no matter how much single-contribution history piles up.
+const leaderboardSuiteMaxSearchPages = 6
+
+// leaderboardSuiteFindRanked searches GET /leaderboard for username, which
+// must be seeded with at least minScore contributions.
+//
+// Returning nil means "conclusively not in the ranking", never "gave up
+// looking". The previous version of this helper could not tell those apart -
+// it walked up to 200 pages and returned nil on exhaustion *and* on running
+// out of budget, so the absence test it backed would have passed just as
+// happily if the walk had been truncated. Here the two outcomes are distinct:
+// nil is only returned once absence is proven, and an inconclusive walk is a
+// hard failure.
+//
+// Proof of absence comes from the ordering. Entries are sorted by
+// contribution_count DESC, so once a page's final entry scores below
+// minScore, every subsequent entry does too, and a contributor with at least
+// minScore contributions must already have appeared.
+func leaderboardSuiteFindRanked(t *testing.T, app *fiber.App, username string, minScore int) map[string]any {
 	t.Helper()
-	for offset := 0; offset < maxRows; offset += 100 {
+	for page := 0; page < leaderboardSuiteMaxSearchPages; page++ {
+		offset := page * 100
 		status, body := leaderboardSuiteDoJSON(t, app, fmt.Sprintf("/leaderboard?limit=100&offset=%d", offset))
 		if status != fiber.StatusOK {
 			t.Fatalf("GET /leaderboard?limit=100&offset=%d: status = %d, want 200, body=%s", offset, status, body)
 		}
-		var page []map[string]any
-		if err := json.Unmarshal(body, &page); err != nil {
+		var entries []map[string]any
+		if err := json.Unmarshal(body, &entries); err != nil {
 			t.Fatalf("decode page at offset %d: %v", offset, err)
 		}
-		if e := leaderboardSuiteFind(page, username); e != nil {
+		if e := leaderboardSuiteFind(entries, username); e != nil {
 			return e
 		}
-		if len(page) < 100 {
-			return nil // short page: results are exhausted, nothing further to scan
+		if len(entries) < 100 {
+			return nil // exhausted the whole ranking: conclusively absent
+		}
+		last, ok := entries[len(entries)-1]["contributions"].(float64)
+		if ok && int(last) < minScore {
+			return nil // past the score band: conclusively absent
 		}
 	}
+	t.Fatalf("inconclusive: scanned %d pages of /leaderboard without reaching "+
+		"contributors scoring below %d, so %q being missing proves nothing. "+
+		"Either the seeded score is too low to be found quickly, or the "+
+		"ranking now has an implausible number of high-scoring contributors.",
+		leaderboardSuiteMaxSearchPages, minScore, username)
 	return nil
 }
 
@@ -250,36 +303,44 @@ func TestLeaderboardSuite_RanksByContributionCountAndReportsExpectedFields(t *te
 	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
 	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
 
-	// bob: never signed up (no github_accounts row), 1 contribution.
+	// bob: never signed up (no github_accounts row). Seeded with one issue
+	// and one PR rather than a single issue - partly so the issues+PRs sum is
+	// exercised for an unlinked contributor too, and partly because a
+	// 1-contribution contributor is indistinguishable from the ~3000 accumulated
+	// 1-contribution contributors this shared database has piled up, which is
+	// what used to force a scan of the entire ranking to locate him.
 	bobLogin := "lbsuite-bob-" + uuid.New().String()[:8]
 	leaderboardSuiteIssue(t, d.Pool, project, bobLogin)
+	leaderboardSuitePR(t, d.Pool, project, bobLogin)
 
 	// Leaderboard() ranks every qualifying contributor globally with no
-	// per-test scoping, and this database accumulates rows across every
-	// test run (nothing truncates it), so alice/bob - with a modest 4 and 1
-	// contributions respectively - aren't guaranteed to land on the very
-	// first 100-row page. Search successive pages instead of assuming page 1.
-	const maxSearchRows = 20000
-	aliceEntry := leaderboardSuiteFindAcrossPages(t, app, aliceLogin, maxSearchRows)
-	bobEntry := leaderboardSuiteFindAcrossPages(t, app, bobLogin, maxSearchRows)
+	// per-test scoping, so alice and bob have to be located within the
+	// ranking rather than assumed to be on page 1. Both are seeded above the
+	// single-contribution floor, which bounds that search to a page or two.
+	const (
+		aliceScore = 4
+		bobScore   = 2
+	)
+	aliceEntry := leaderboardSuiteFindRanked(t, app, aliceLogin, aliceScore)
+	bobEntry := leaderboardSuiteFindRanked(t, app, bobLogin, bobScore)
 	if aliceEntry == nil {
-		t.Fatalf("alice (%s) not found among the first %d leaderboard entries", aliceLogin, maxSearchRows)
+		t.Fatalf("alice (%s) is missing from the leaderboard despite %d contributions in a verified project", aliceLogin, aliceScore)
 	}
 	if bobEntry == nil {
-		t.Fatalf("bob (%s) not found among the first %d leaderboard entries", bobLogin, maxSearchRows)
+		t.Fatalf("bob (%s) is missing from the leaderboard despite %d contributions in a verified project", bobLogin, bobScore)
 	}
 
 	if c, _ := aliceEntry["contributions"].(float64); c != 4 {
 		t.Errorf("alice contributions = %v, want 4 (2 issues + 2 PRs)", aliceEntry["contributions"])
 	}
-	if c, _ := bobEntry["contributions"].(float64); c != 1 {
-		t.Errorf("bob contributions = %v, want 1", bobEntry["contributions"])
+	if c, _ := bobEntry["contributions"].(float64); c != 2 {
+		t.Errorf("bob contributions = %v, want 2 (1 issue + 1 PR)", bobEntry["contributions"])
 	}
 
 	aliceRank, _ := aliceEntry["rank"].(float64)
 	bobRank, _ := bobEntry["rank"].(float64)
 	if !(aliceRank < bobRank) {
-		t.Errorf("alice rank %v should be numerically less than (better than) bob rank %v, since alice has more contributions (4 vs 1)", aliceRank, bobRank)
+		t.Errorf("alice rank %v should be numerically less than (better than) bob rank %v, since alice has more contributions (4 vs 2)", aliceRank, bobRank)
 	}
 
 	// rank_tier/rank_tier_name must be self-consistent with the exported
@@ -330,16 +391,20 @@ func TestLeaderboardSuite_ExcludesContributorsFromNonVerifiedProjects(t *testing
 	owner := leaderboardSuiteUser(t, d.Pool)
 	pendingProject := leaderboardSuiteProject(t, d.Pool, owner, ecoID, "pending_verification")
 
+	// Seeded with three contributions, not one. The point of this test is
+	// that a regression which stopped filtering by project status would be
+	// caught - and a leaked 1-contribution contributor would land in the
+	// ~3000-strong tail of other 1-contribution contributors, where proving
+	// absence means scanning the entire ranking. At three, a leak would rank
+	// within the first page or two, so a short bounded search is enough to
+	// prove it did not happen.
+	const leakScore = 3
 	login := "lbsuite-pending-" + uuid.New().String()[:8]
 	leaderboardSuiteIssue(t, d.Pool, pendingProject, login)
+	leaderboardSuiteIssue(t, d.Pool, pendingProject, login)
+	leaderboardSuitePR(t, d.Pool, pendingProject, login)
 
-	// This contributor has only 1 (structurally-excluded) contribution, so -
-	// same reasoning as the ranking test above - a single page isn't a
-	// rigorous enough check for absence; a real regression that stopped
-	// filtering non-verified projects could still leave this login off page
-	// 1 by rank alone, producing a false pass. Search across pages instead.
-	const maxSearchRows = 20000
-	if e := leaderboardSuiteFindAcrossPages(t, app, login, maxSearchRows); e != nil {
+	if e := leaderboardSuiteFindRanked(t, app, login, leakScore); e != nil {
 		t.Errorf("contributor %q from a pending_verification project leaked into the leaderboard: %v", login, e)
 	}
 }
@@ -432,5 +497,110 @@ func TestLeaderboardSuite_NilDBPool_ReturnsServiceUnavailable(t *testing.T) {
 	status, body := leaderboardSuiteDoJSON(t, app, "/leaderboard")
 	if status != fiber.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503, body=%s", status, body)
+	}
+}
+
+// leaderboardSuiteCountMatching returns how many ranked entries have a
+// username matching lowerLogin case-insensitively, scanning only as far as the
+// score band requires (same bound and same proof-of-exhaustion reasoning as
+// leaderboardSuiteFindRanked).
+func leaderboardSuiteCountMatching(t *testing.T, app *fiber.App, lowerLogin string, minScore int) []map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for page := 0; page < leaderboardSuiteMaxSearchPages; page++ {
+		offset := page * 100
+		status, body := leaderboardSuiteDoJSON(t, app, fmt.Sprintf("/leaderboard?limit=100&offset=%d", offset))
+		if status != fiber.StatusOK {
+			t.Fatalf("GET /leaderboard?limit=100&offset=%d: status = %d, want 200, body=%s", offset, status, body)
+		}
+		var entries []map[string]any
+		if err := json.Unmarshal(body, &entries); err != nil {
+			t.Fatalf("decode page at offset %d: %v", offset, err)
+		}
+		for _, e := range entries {
+			if u, ok := e["username"].(string); ok && strings.EqualFold(u, lowerLogin) {
+				found = append(found, e)
+			}
+		}
+		if len(entries) < 100 {
+			return found
+		}
+		if last, ok := entries[len(entries)-1]["contributions"].(float64); ok && int(last) < minScore {
+			return found
+		}
+	}
+	t.Fatalf("inconclusive: scanned %d pages without reaching contributors scoring below %d",
+		leaderboardSuiteMaxSearchPages, minScore)
+	return nil
+}
+
+// A contributor whose login is recorded with inconsistent capitalisation must
+// appear once, with their contributions summed - not once per spelling.
+//
+// Regression test. The original query took a case-SENSITIVE DISTINCT over
+// author_login to build the contributor list, then counted each one
+// case-INSENSITIVELY, so "Alice" and "alice" produced two rows that each
+// reported the combined total - inflating the apparent number of contributors
+// and showing the same person twice with a double-counted score.
+func TestLeaderboardSuite_CaseVariantLoginsCollapseIntoOneRankedContributor(t *testing.T) {
+	d := testDB(t)
+	app := newLeaderboardSuiteApp(d)
+
+	ecoID, _ := leaderboardSuiteEcosystem(t, d.Pool)
+	owner := leaderboardSuiteUser(t, d.Pool)
+	project := leaderboardSuiteProject(t, d.Pool, owner, ecoID, "verified")
+
+	const wantContributions = 3
+	suffix := uuid.New().String()[:8]
+	lower := "lbsuite-case-" + suffix
+	upper := "LBSuite-Case-" + suffix
+
+	leaderboardSuiteIssue(t, d.Pool, project, upper)
+	leaderboardSuiteIssue(t, d.Pool, project, lower)
+	leaderboardSuitePR(t, d.Pool, project, upper)
+
+	matches := leaderboardSuiteCountMatching(t, app, lower, wantContributions)
+	if len(matches) != 1 {
+		t.Fatalf("got %d leaderboard entries for %q spelled two ways, want exactly 1: %v", len(matches), lower, matches)
+	}
+	if c, _ := matches[0]["contributions"].(float64); int(c) != wantContributions {
+		t.Errorf("contributions = %v, want %d (2 issues + 1 PR across both spellings)", matches[0]["contributions"], wantContributions)
+	}
+}
+
+// Two github_accounts rows sharing a login must not duplicate the contributor.
+//
+// Regression test. github_accounts has no unique constraint on login (only on
+// github_user_id and user_id), and the original query LEFT JOINed it on
+// LOWER(login) = LOWER(author_login), so every extra account row fanned the
+// contributor out into an extra leaderboard entry.
+func TestLeaderboardSuite_DuplicateLinkedAccountsDoNotDuplicateContributor(t *testing.T) {
+	d := testDB(t)
+	app := newLeaderboardSuiteApp(d)
+
+	ecoID, _ := leaderboardSuiteEcosystem(t, d.Pool)
+	owner := leaderboardSuiteUser(t, d.Pool)
+	project := leaderboardSuiteProject(t, d.Pool, owner, ecoID, "verified")
+
+	const wantContributions = 3
+	login := "lbsuite-dupacct-" + uuid.New().String()[:8]
+
+	// Two distinct users both claiming the same GitHub login. The schema
+	// permits this; the leaderboard must still rank one contributor.
+	firstUser := leaderboardSuiteUser(t, d.Pool)
+	secondUser := leaderboardSuiteUser(t, d.Pool)
+	leaderboardSuiteLinkedAccount(t, d.Pool, firstUser, login, "https://cdn.example/first.png")
+	leaderboardSuiteLinkedAccount(t, d.Pool, secondUser, login, "https://cdn.example/second.png")
+
+	leaderboardSuiteIssue(t, d.Pool, project, login)
+	leaderboardSuiteIssue(t, d.Pool, project, login)
+	leaderboardSuitePR(t, d.Pool, project, login)
+
+	matches := leaderboardSuiteCountMatching(t, app, login, wantContributions)
+	if len(matches) != 1 {
+		t.Fatalf("got %d leaderboard entries for %q with two linked accounts, want exactly 1: %v", len(matches), login, matches)
+	}
+	if c, _ := matches[0]["contributions"].(float64); int(c) != wantContributions {
+		t.Errorf("contributions = %v, want %d", matches[0]["contributions"], wantContributions)
 	}
 }
