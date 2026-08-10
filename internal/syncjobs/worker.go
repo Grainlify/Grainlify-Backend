@@ -334,7 +334,8 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 			// Counting these against oob_assignment_flag_threshold (§2.3) is
 			// still to come; until it lands, switching this off means the
 			// out-of-band assignment leaves no record beyond this log line.
-			if len(ineligible) > 0 && !hackathon.AutoRevertOOBAssignment(ctx, w.pool, projectID) {
+			mayRevert := len(ineligible) > 0 && hackathon.AutoRevertOOBAssignment(ctx, w.pool, projectID)
+			if len(ineligible) > 0 && !mayRevert {
 				slog.Info("out-of-band assignees left in place: auto_revert_oob_assignment is off",
 					"project_id", projectID, "issue_number", it.Number, "logins", ineligible)
 			} else if len(ineligible) > 0 {
@@ -360,6 +361,27 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 						}
 						commentPosted = true
 					}
+				}
+			}
+
+			// §2.3 step 3: record the event against the maintainer and org.
+			// Runs on both paths - whether or not the revert fired, and
+			// whether or not it succeeded. auto_revert_oob_assignment decides
+			// whether Grainlify writes to someone else's repository; it does
+			// not decide whether Grainlify notices. Since this count feeds
+			// maintainer-pool eligibility (§7), a switch that also erased the
+			// evidence would be the first thing a maintainer gaming the event
+			// would turn off.
+			//
+			// `removed` is consulted rather than `mayRevert` so the stored
+			// flag reflects what actually happened on GitHub: an attempted
+			// revert that failed is recorded as not reverted.
+			for _, login := range ineligible {
+				if err := hackathon.RecordOOBAssignment(ctx, w.pool, projectID,
+					it.Number, login, removed[strings.ToLower(login)],
+				); err != nil {
+					slog.Warn("failed to record out-of-band assignment",
+						"project_id", projectID, "issue_number", it.Number, "login", login, "error", err)
 				}
 			}
 

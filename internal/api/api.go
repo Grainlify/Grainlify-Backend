@@ -413,6 +413,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/hackathons/:id/appeals", auth.RequireRole("admin"), hackathonAppeals.AdminList())
 	adminGroup.Post("/hackathon-appeals/:id/decide", auth.RequireRole("admin"), hackathonAppeals.AdminDecide())
 
+	// §2.3 step 4 - out-of-band assignments surfaced for review. Advisory:
+	// crossing the threshold flags an org, it does not penalise one.
+	adminOOB := handlers.NewAdminHackathonOOBHandler(deps.DB)
+	adminGroup.Get("/hackathons/:id/oob-assignments", auth.RequireRole("admin"), adminOOB.List())
+
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
 	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())
 	adminGroup.Put("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.Update())
