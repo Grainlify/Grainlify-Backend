@@ -135,3 +135,34 @@ Not urgent at 207s.
 
 If one or two tests dominate, fix those first; a broad shared-fixture
 refactor may not be needed yet. That is exactly what happened here.
+
+---
+
+# Known non-reproducible input: median time to first review
+
+`MedianTimeToFirstReviewHours` (`internal/github/signals.go`) is one of §7's
+four maintainer-pool criteria. It is computed by sampling the GitHub API at
+scoring time — there is no `github_pr_reviews` table and nothing about reviews
+is synced.
+
+**This means the number is not reproducible.** Re-score the same maintainer six
+weeks later during an appeal and you may get a different answer, because the
+sample window has moved and the underlying PRs have accumulated more reviews.
+Every other input to a maintainer's score is reproducible from stored rows;
+this one is not.
+
+That matters specifically because §6 appeals are answerable only if the record
+can be reconstructed — the whole reason verdicts store the model version,
+prompt version, raw request and raw response. A maintainer appealing their
+pool score on this criterion is appealing a number nobody can recompute.
+
+Accepted deliberately for now: building a review-sync table is real work, the
+criterion is one of four, and no real event has run. Worth knowing before
+someone appeals on it.
+
+The fix when it is picked up: sync PR reviews into a table on the existing
+syncjobs path (same shape as `github_pull_requests`), and compute the median
+from stored rows so it is a function of recorded history rather than of when
+you asked. Failing that, snapshot the computed value onto the maintainer's
+score row at settle time, so at least the number that was used is preserved
+even if it cannot be re-derived.

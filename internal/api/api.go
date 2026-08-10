@@ -342,6 +342,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/hackathon-assignments/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.MyAssignments())
 	app.Post("/hackathon-assignments/:id/release", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Release())
 
+	// §7 issue-clarity rating. Optional and skippable: nothing here sits on
+	// the path to submitting a PR. Maintainers see aggregates only, and only
+	// once the event has closed.
+	hackathonClarity := handlers.NewHackathonClarityHandler(deps.DB)
+	app.Post("/hackathon-assignments/:id/clarity-rating", auth.RequireAuth(cfg.JWTSecret), hackathonClarity.Submit())
+	app.Get("/projects/:id/grainhack/clarity", auth.RequireAuth(cfg.JWTSecret), hackathonClarity.ForMaintainer())
+
 	// §6 appeals, contributor side. my-verdicts returns nothing until results
 	// are published - the verdict view and the appeal window open together.
 	hackathonAppeals := handlers.NewHackathonAppealsHandler(deps.DB)
