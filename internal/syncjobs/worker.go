@@ -631,6 +631,18 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 `, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA)
 		}
 	}
+
+	// GrainHack judging intake (AI-specs.md §5). Reuses this sync path
+	// rather than adding a webhook parser, same as §2.2's issue intake.
+	// Runs after the PR rows are written, since it reads them back to find
+	// merged PRs that name a GrainHack issue.
+	//
+	// Swallowed on failure: judging is downstream of the sync, and a
+	// GrainHack problem must not fail a project's ordinary PR sync.
+	if err := hackathon.SyncVerdicts(ctx, w.pool, w.gh, token, projectID, fullName); err != nil {
+		slog.Warn("hackathon: verdict intake failed",
+			"project_id", projectID, "repo", fullName, "error", err)
+	}
 	return nil
 }
 
