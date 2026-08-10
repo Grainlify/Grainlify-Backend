@@ -327,6 +327,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/projects/:id/hackathon-issues/:number", auth.RequireAuth(cfg.JWTSecret), hackathonIssues.Get())
 	app.Put("/projects/:id/hackathon-issues/:number", auth.RequireAuth(cfg.JWTSecret), hackathonIssues.UpdateFields())
 
+	// §4 assignment pipeline, contributor-facing.
+	hackathonIssueApps := handlers.NewHackathonIssueApplicationsHandler(cfg, deps.DB)
+	app.Post("/hackathon-issues/:id/apply", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Apply())
+	app.Get("/hackathon-issue-applications/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Mine())
+	app.Get("/hackathon-assignments/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.MyAssignments())
+	app.Post("/hackathon-assignments/:id/release", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Release())
+
 	admin := handlers.NewAdminHandler(cfg, deps.DB)
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
@@ -370,6 +377,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/hackathons/applications/:appId/request-more-info", auth.RequireRole("admin"), adminHackathonApps.RequestMoreInfo())
 
 	adminGroup.Get("/hackathons/:id/issues", auth.RequireRole("admin"), hackathonIssues.ListForHackathon())
+
+	// §4 assignment pipeline, admin-facing. simulate-draw runs the full
+	// pipeline against real applicants and writes no assignment.
+	adminDraws := handlers.NewAdminHackathonDrawsHandler(deps.DB)
+	adminGroup.Post("/hackathon-issues/:id/simulate-draw", auth.RequireRole("admin"), adminDraws.Simulate())
+	adminGroup.Get("/hackathons/:id/draws", auth.RequireRole("admin"), adminDraws.ListDraws())
+	adminGroup.Get("/hackathons/:id/assignments", auth.RequireRole("admin"), adminDraws.ListAssignments())
 
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
 	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())

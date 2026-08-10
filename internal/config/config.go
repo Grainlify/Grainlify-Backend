@@ -57,7 +57,13 @@ type Config struct {
 	AdminBootstrapToken string
 
 	// Didit KYC verification
-	DiditAPIKey        string
+	DiditAPIKey string
+
+	// Anthropic API key for GrainHack's AI fit assessment (AI-specs.md
+	// §4.3) and, later, judging. Empty disables the model call: the
+	// assignment pipeline then scores every applicant "plausible" and runs
+	// entirely deterministically.
+	AnthropicAPIKey    string
 	DiditWorkflowID    string
 	DiditWebhookSecret string
 
@@ -125,7 +131,9 @@ func Load() Config {
 
 		AdminBootstrapToken: strings.TrimSpace(getEnv("ADMIN_BOOTSTRAP_TOKEN", "")),
 
-		DiditAPIKey:        getEnv("DIDIT_API_KEY", ""),
+		DiditAPIKey: getEnv("DIDIT_API_KEY", ""),
+
+		AnthropicAPIKey:    getEnv("ANTHROPIC_API_KEY", ""),
 		DiditWorkflowID:    getEnv("DIDIT_WORKFLOW_ID", ""),
 		DiditWebhookSecret: getEnv("DIDIT_WEBHOOK_SECRET", ""),
 

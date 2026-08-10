@@ -161,6 +161,17 @@ func main() {
 			_ = reconciler.Run(context.Background())
 		}()
 
+		// GrainHack's assignment pipeline (AI-specs.md §4): closes
+		// application windows and runs their weighted draws, releases
+		// stale assignments, and warns contributors before an event ends.
+		// Separate from the reconciler above because this one writes
+		// assignments and calls GitHub, rather than only enqueueing jobs.
+		assignmentRunner := hackathon.NewAssignmentRunnerFromConfig(cfg, database.Pool)
+		go func() {
+			slog.Info("hackathon assignment runner started")
+			_ = assignmentRunner.Run(context.Background())
+		}()
+
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)
 		// No need for periodic polling
 	} else {

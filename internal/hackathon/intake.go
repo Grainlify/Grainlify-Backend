@@ -23,14 +23,24 @@ type hackathonIssueRow struct {
 }
 
 // isAssigned reports whether issueNumber currently has a real Grainlify
-// assignment - always false in this slice (no assignments table exists
-// yet). AI-specs.md §2.2: "Label removed: if the issue is unassigned, it
-// leaves the hackathon. If already assigned, it stays in the hackathon...
-// Flag it for admin visibility." Once the assignment slice adds real
-// assignment tracking, this is the one function to fill in - SyncIssueLabel
-// itself does not need to change.
+// assignment. AI-specs.md §2.2: "Label removed: if the issue is unassigned,
+// it leaves the hackathon. If already assigned, it stays in the hackathon...
+// Flag it for admin visibility."
+//
+// Until the assignment pipeline existed this was a hard-false stub, which
+// meant pulling the label off an actively-assigned issue silently dropped
+// that contributor's in-flight work. It now consults the real assignment
+// record, so that case flags for admin instead.
+//
+// A read failure returns true (assume assigned): flagging an unassigned
+// issue for admin review is a harmless false positive, whereas the other
+// direction discards someone's work.
 func isAssigned(ctx context.Context, pool db.DBPool, hackathonID, projectID uuid.UUID, issueNumber int) bool {
-	return false
+	login, err := ActiveAssignee(ctx, pool, projectID, issueNumber)
+	if err != nil {
+		return true
+	}
+	return login != ""
 }
 
 // SyncIssueLabel is called once per (project, issue) from
@@ -205,7 +215,24 @@ SELECT status, COALESCE(acceptance_criteria, ''), COALESCE(difficulty_tier, '') 
 		return nil
 	}
 
-	_, err = pool.Exec(ctx, `UPDATE hackathon_issues SET status = 'published', published_at = now(), updated_at = now() WHERE id = $1`, issueID)
+	// Newcomer reservation (§3.8) and the application window (§3.7) are
+	// stamped here, at the moment of publication, and never recomputed -
+	// §3.8 requires reserved status to be fixed before anyone can see who
+	// applied, so it "cannot be steered by who happens to apply".
+	plan, err := planPublication(ctx, pool, hackathonID, issueID, difficultyTier)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, `
+UPDATE hackathon_issues
+SET status = 'published',
+    published_at = now(),
+    reserved = $2,
+    application_window_opens_at = $3,
+    application_window_closes_at = $4,
+    updated_at = now()
+WHERE id = $1
+`, issueID, plan.reserved, plan.windowOpens, plan.windowCloses)
 	return err
 }
 

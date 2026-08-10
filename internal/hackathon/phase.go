@@ -13,10 +13,10 @@ import (
 )
 
 // PhaseOrder is the sequence Transition enforces - a hackathon may only move
-// forward one step at a time, never skip ahead or move backward. Judging/
-// results/settled phases (AI-specs.md §1's Phase 4-6) belong to future
-// slices and will extend this slice, not replace it.
-var PhaseOrder = []string{"draft", "application_period", "issue_prep", "live"}
+// forward one step at a time, never skip ahead or move backward.
+// results_published/settled (AI-specs.md §1's Phase 5-6) belong to the
+// judging/payout slice and will extend this list, not replace it.
+var PhaseOrder = []string{"draft", "application_period", "issue_prep", "live", "closed"}
 
 func phaseIndex(phase string) int {
 	for i, p := range PhaseOrder {
@@ -90,13 +90,18 @@ func requiredForTransition(h *Hackathon, toPhase string) []BlockingReason {
 		if h.EndsAt == nil {
 			reasons = append(reasons, BlockingReason{"ends_at", "Set when the hackathon ends."})
 		}
+	case "closed":
+		// Deliberately unblocked. Closing is how an admin stops the event -
+		// requiring in-flight assignments to be resolved first would make
+		// the phase that RELEASES them impossible to reach. CloseEvent
+		// handles the outstanding work on the way through.
 	}
 	return reasons
 }
 
 // Readiness reports what's blocking hackathonID's next phase transition. The
 // returned nextPhase is "" if the hackathon is already at the final phase
-// this slice implements ("live").
+// implemented so far ("closed").
 func Readiness(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID) (blocking []BlockingReason, nextPhase string, err error) {
 	h, err := loadHackathon(ctx, pool, hackathonID)
 	if err != nil {
@@ -171,6 +176,18 @@ UPDATE hackathons SET config_snapshot = $1, config_snapshot_taken_at = now() WHE
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("hackathon.Transition: commit: %w", err)
+	}
+
+	// Closing releases every in-flight assignment (AI-specs.md §13 #2).
+	// Deliberately after the commit, not inside the transaction: the phase
+	// change is the admin's action and must land even if releasing a
+	// hundred assignments hits a problem. A failure here is logged by the
+	// caller and re-converges on the next reconciler tick, which re-checks
+	// closed hackathons for stragglers.
+	if toPhase == "closed" {
+		if _, err := CloseEventAssignments(ctx, pool, hackathonID); err != nil {
+			return fmt.Errorf("hackathon.Transition: phase committed, but releasing in-flight assignments failed: %w", err)
+		}
 	}
 	return nil
 }

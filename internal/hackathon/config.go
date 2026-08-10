@@ -65,55 +65,60 @@ var Definitions = map[string]SettingDef{
 	"oob_assignment_flag_threshold": {Key: "oob_assignment_flag_threshold", Type: "int", Default: "3", Section: "Issue intake", Description: "Repeated out-of-band assignments from an org before it's flagged for admin review.", ValidRange: ">= 1"},
 
 	// §3.4 contributor slots and caps - inert until the assignment slice
-	"slots_per_contributor":              {Key: "slots_per_contributor", Type: "int", Default: "2", Section: "Contributor slots and caps", Description: "Concurrent open assignments allowed per contributor."},
-	"slot_freed_on":                      {Key: "slot_freed_on", Type: "enum", Default: "pr_submission", Section: "Contributor slots and caps", Description: "When an assignment's slot is freed.", ValidRange: "pr_submission | pr_merge"},
-	"max_issues_per_contributor_per_org": {Key: "max_issues_per_contributor_per_org", Type: "int", Default: "4", Section: "Contributor slots and caps", Description: "Cap on issues one contributor can win from a single org, across the whole event."},
-	"max_issues_per_contributor_total":   {Key: "max_issues_per_contributor_total", Type: "int", Default: "", Section: "Contributor slots and caps", Description: "Cap on issues one contributor can win across the whole event. Empty = unlimited."},
-	"earned_slots_enabled":               {Key: "earned_slots_enabled", Type: "bool", Default: "false", Section: "Contributor slots and caps", Description: "Whether a 3rd slot can be earned after completing enough issues."},
-	"earned_slots_threshold":             {Key: "earned_slots_threshold", Type: "int", Default: "2", Section: "Contributor slots and caps", Description: "Completions needed to earn an extra slot."},
-	"earned_slots_max":                   {Key: "earned_slots_max", Type: "int", Default: "3", Section: "Contributor slots and caps", Description: "Ceiling on earned slots."},
+	"slots_per_contributor":              {Key: "slots_per_contributor", Type: "int", Default: "2", Section: "Contributor slots and caps", Description: "Concurrent open assignments allowed per contributor.", Active: true},
+	"slot_freed_on":                      {Key: "slot_freed_on", Type: "enum", Default: "pr_submission", Section: "Contributor slots and caps", Description: "When an assignment's slot is freed.", ValidRange: "pr_submission | pr_merge", Active: true},
+	"max_issues_per_contributor_per_org": {Key: "max_issues_per_contributor_per_org", Type: "int", Default: "4", Section: "Contributor slots and caps", Description: "Cap on issues one contributor can win from a single org, across the whole event.", Active: true},
+	"max_issues_per_contributor_total":   {Key: "max_issues_per_contributor_total", Type: "int", Default: "", Section: "Contributor slots and caps", Description: "Cap on issues one contributor can win across the whole event. Empty = unlimited.", Active: true},
+	"earned_slots_enabled":               {Key: "earned_slots_enabled", Type: "bool", Default: "false", Section: "Contributor slots and caps", Description: "Whether a 3rd slot can be earned after completing enough issues.", Active: true},
+	"earned_slots_threshold":             {Key: "earned_slots_threshold", Type: "int", Default: "2", Section: "Contributor slots and caps", Description: "Completions needed to earn an extra slot.", Active: true},
+	"earned_slots_max":                   {Key: "earned_slots_max", Type: "int", Default: "3", Section: "Contributor slots and caps", Description: "Ceiling on earned slots.", Active: true},
+	// Not in AI-specs.md §3.4 - added as the answer to its own §13 open
+	// question 1. Applications are free and slots are consumed only on
+	// winning, so without a cap one farmer applies to every open issue and
+	// dominates every draw pool at zero cost.
+	"max_concurrent_applications": {Key: "max_concurrent_applications", Type: "int", Default: "5", Section: "Contributor slots and caps", Description: "Cap on a contributor's simultaneously-open applications. Applications are free; only a win consumes a slot.", ValidRange: ">= 1", Active: true},
 
 	// §3.5 slot-freeing definition - inert until the assignment slice
-	"qualifying_pr_requires_non_draft":   {Key: "qualifying_pr_requires_non_draft", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "A draft PR does not free the contributor's slot."},
-	"qualifying_pr_requires_ci_pass":     {Key: "qualifying_pr_requires_ci_pass", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "CI must pass for a PR to free the slot."},
-	"qualifying_pr_requires_issue_link":  {Key: "qualifying_pr_requires_issue_link", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "The PR must link the GrainHack issue to free the slot."},
-	"qualifying_pr_min_meaningful_lines": {Key: "qualifying_pr_min_meaningful_lines", Type: "int", Default: "10", Section: "Slot-freeing definition", Description: "Minimum meaningful lines changed (excludes generated/lockfile/formatting) for a PR to count.", ValidRange: ">= 0"},
+	"qualifying_pr_requires_non_draft":   {Key: "qualifying_pr_requires_non_draft", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "A draft PR does not free the contributor's slot.", Active: true},
+	"qualifying_pr_requires_ci_pass":     {Key: "qualifying_pr_requires_ci_pass", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "CI must pass for a PR to free the slot.", Active: true},
+	"qualifying_pr_requires_issue_link":  {Key: "qualifying_pr_requires_issue_link", Type: "bool", Default: "true", Section: "Slot-freeing definition", Description: "The PR must link the GrainHack issue to free the slot.", Active: true},
+	"qualifying_pr_min_meaningful_lines": {Key: "qualifying_pr_min_meaningful_lines", Type: "int", Default: "10", Section: "Slot-freeing definition", Description: "Minimum meaningful lines changed (excludes generated/lockfile/formatting) for a PR to count.", ValidRange: ">= 0", Active: true},
 
 	// §3.6 hard gates - inert until the assignment slice
-	"min_account_age_days":            {Key: "min_account_age_days", Type: "int", Default: "90", Section: "Hard gates", Description: "Minimum GitHub account age, measured before announced_at.", ValidRange: ">= 0"},
-	"require_pre_announcement_commit": {Key: "require_pre_announcement_commit", Type: "bool", Default: "true", Section: "Hard gates", Description: "Require at least one commit before announced_at."},
-	"min_pre_announcement_commits":    {Key: "min_pre_announcement_commits", Type: "int", Default: "1", Section: "Hard gates", Description: "Existence check, not a volume check.", ValidRange: ">= 0"},
-	"block_bot_accounts":              {Key: "block_bot_accounts", Type: "bool", Default: "true", Section: "Hard gates", Description: "Reject applications from GitHub accounts of type Bot."},
-	"block_issue_author":              {Key: "block_issue_author", Type: "bool", Default: "true", Section: "Hard gates", Description: "The issue's own author cannot win it."},
-	"block_org_members":               {Key: "block_org_members", Type: "bool", Default: "true", Section: "Hard gates", Description: "Members of the issue's own org cannot win it."},
-	"stale_assignment_days":           {Key: "stale_assignment_days", Type: "int", Default: "5", Section: "Hard gates", Description: "Days with no qualifying PR before an assignment auto-releases.", ValidRange: ">= 1"},
-	"abandons_before_lockout":         {Key: "abandons_before_lockout", Type: "int", Default: "2", Section: "Hard gates", Description: "Abandons in one event before a contributor is locked out of new assignments.", ValidRange: ">= 1"},
-	"voluntary_release_grace_hours":   {Key: "voluntary_release_grace_hours", Type: "int", Default: "48", Section: "Hard gates", Description: "Releasing inside this window after assignment doesn't count as an abandon.", ValidRange: ">= 0"},
+	"min_account_age_days":            {Key: "min_account_age_days", Type: "int", Default: "90", Section: "Hard gates", Description: "Minimum GitHub account age, measured before announced_at.", ValidRange: ">= 0", Active: true},
+	"require_pre_announcement_commit": {Key: "require_pre_announcement_commit", Type: "bool", Default: "true", Section: "Hard gates", Description: "Require at least one commit before announced_at.", Active: true},
+	"min_pre_announcement_commits":    {Key: "min_pre_announcement_commits", Type: "int", Default: "1", Section: "Hard gates", Description: "Existence check, not a volume check.", ValidRange: ">= 0", Active: true},
+	"block_bot_accounts":              {Key: "block_bot_accounts", Type: "bool", Default: "true", Section: "Hard gates", Description: "Reject applications from GitHub accounts of type Bot.", Active: true},
+	"block_issue_author":              {Key: "block_issue_author", Type: "bool", Default: "true", Section: "Hard gates", Description: "The issue's own author cannot win it.", Active: true},
+	"block_org_members":               {Key: "block_org_members", Type: "bool", Default: "true", Section: "Hard gates", Description: "Members of the issue's own org cannot win it.", Active: true},
+	"stale_assignment_days":           {Key: "stale_assignment_days", Type: "int", Default: "5", Section: "Hard gates", Description: "Days with no qualifying PR before an assignment auto-releases.", ValidRange: ">= 1", Active: true},
+	"abandons_before_lockout":         {Key: "abandons_before_lockout", Type: "int", Default: "2", Section: "Hard gates", Description: "Abandons in one event before a contributor is locked out of new assignments.", ValidRange: ">= 1", Active: true},
+	"voluntary_release_grace_hours":   {Key: "voluntary_release_grace_hours", Type: "int", Default: "48", Section: "Hard gates", Description: "Releasing inside this window after assignment doesn't count as an abandon.", ValidRange: ">= 0", Active: true},
 
 	// §3.7 application window and draw - inert until the assignment slice
-	"application_window_hours":     {Key: "application_window_hours", Type: "int", Default: "24", Section: "Application window and draw", Description: "How long an issue accepts applications before the draw runs. Shorten for short events.", ValidRange: ">= 1"},
-	"empty_window_retries":         {Key: "empty_window_retries", Type: "int", Default: "3", Section: "Application window and draw", Description: "Retries before falling back to first-come assignment.", ValidRange: ">= 0"},
-	"fallback_to_first_come":       {Key: "fallback_to_first_come", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Fall back to first-come after retries are exhausted."},
-	"draw_order":                   {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw.", ValidRange: "randomised"},
-	"sequential_slot_consumption":  {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn."},
-	"draw_from_weak_pool_if_empty": {Key: "draw_from_weak_pool_if_empty", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Draw from weak-fit applicants rather than leave an issue unassigned."},
+	"application_window_hours":     {Key: "application_window_hours", Type: "int", Default: "24", Section: "Application window and draw", Description: "How long an issue accepts applications before the draw runs. Shorten for short events.", ValidRange: ">= 1", Active: true},
+	"empty_window_retries":         {Key: "empty_window_retries", Type: "int", Default: "3", Section: "Application window and draw", Description: "Retries before falling back to first-come assignment.", ValidRange: ">= 0", Active: true},
+	"fallback_to_first_come":       {Key: "fallback_to_first_come", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Fall back to first-come after retries are exhausted.", Active: true},
+	"draw_order":                   {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw.", ValidRange: "randomised", Active: true},
+	"sequential_slot_consumption":  {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn.", Active: true},
+	"draw_from_weak_pool_if_empty": {Key: "draw_from_weak_pool_if_empty", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Draw from weak-fit applicants rather than leave an issue unassigned.", Active: true},
 
 	// §3.8 newcomer reservation - inert until the assignment slice
-	"newcomer_reservation_enabled":      {Key: "newcomer_reservation_enabled", Type: "bool", Default: "true", Section: "Newcomer reservation", Description: "Reserve a share of issues for newcomers."},
-	"reserved_pct_easy":                 {Key: "reserved_pct_easy", Type: "int", Default: "50", Section: "Newcomer reservation", Description: "% of easy issues reserved for newcomers.", ValidRange: "0-100"},
-	"reserved_pct_standard":             {Key: "reserved_pct_standard", Type: "int", Default: "30", Section: "Newcomer reservation", Description: "% of standard issues reserved for newcomers.", ValidRange: "0-100"},
-	"reserved_pct_advanced":             {Key: "reserved_pct_advanced", Type: "int", Default: "0", Section: "Newcomer reservation", Description: "% of advanced issues reserved for newcomers.", ValidRange: "0-100"},
-	"newcomer_definition":               {Key: "newcomer_definition", Type: "enum", Default: "zero_completed_grainhack_issues", Section: "Newcomer reservation", Description: "What counts as a newcomer.", ValidRange: "zero_completed_grainhack_issues"},
-	"reservation_fallback_to_open_pool": {Key: "reservation_fallback_to_open_pool", Type: "bool", Default: "true", Section: "Newcomer reservation", Description: "Fall back to the open pool if no newcomers applied to a reserved issue."},
+	"newcomer_reservation_enabled":      {Key: "newcomer_reservation_enabled", Type: "bool", Default: "true", Section: "Newcomer reservation", Description: "Reserve a share of issues for newcomers.", Active: true},
+	"reserved_pct_easy":                 {Key: "reserved_pct_easy", Type: "int", Default: "50", Section: "Newcomer reservation", Description: "% of easy issues reserved for newcomers.", ValidRange: "0-100", Active: true},
+	"reserved_pct_standard":             {Key: "reserved_pct_standard", Type: "int", Default: "30", Section: "Newcomer reservation", Description: "% of standard issues reserved for newcomers.", ValidRange: "0-100", Active: true},
+	"reserved_pct_advanced":             {Key: "reserved_pct_advanced", Type: "int", Default: "0", Section: "Newcomer reservation", Description: "% of advanced issues reserved for newcomers.", ValidRange: "0-100", Active: true},
+	"newcomer_definition":               {Key: "newcomer_definition", Type: "enum", Default: "zero_completed_grainhack_issues", Section: "Newcomer reservation", Description: "What counts as a newcomer.", ValidRange: "zero_completed_grainhack_issues", Active: true},
+	"reservation_fallback_to_open_pool": {Key: "reservation_fallback_to_open_pool", Type: "bool", Default: "true", Section: "Newcomer reservation", Description: "Fall back to the open pool if no newcomers applied to a reserved issue.", Active: true},
 
 	// §3.9 draw weights - inert until the assignment slice
-	"weight_fit_strong":             {Key: "weight_fit_strong", Type: "float", Default: "2.0", Section: "Draw weights", Description: "Ticket multiplier for a 'strong' AI fit assessment."},
-	"weight_fit_plausible":          {Key: "weight_fit_plausible", Type: "float", Default: "1.0", Section: "Draw weights", Description: "Ticket multiplier for a 'plausible' AI fit assessment (the expected default for most newcomers)."},
-	"weight_fit_weak":               {Key: "weight_fit_weak", Type: "float", Default: "0.25", Section: "Draw weights", Description: "Ticket multiplier for a 'weak' AI fit assessment."},
-	"weight_difficulty_above":       {Key: "weight_difficulty_above", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier when demonstrated skill is below the issue's difficulty tier."},
-	"weight_prior_completion":       {Key: "weight_prior_completion", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier per prior completed GrainHack issue."},
-	"weight_first_ever_application": {Key: "weight_first_ever_application", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier for a contributor's first-ever GrainHack application."},
-	"weight_per_abandon":            {Key: "weight_per_abandon", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier per prior abandon (< 1.0, i.e. a penalty)."},
+	"weight_fit_strong":             {Key: "weight_fit_strong", Type: "float", Default: "2.0", Section: "Draw weights", Description: "Ticket multiplier for a 'strong' AI fit assessment.", Active: true},
+	"weight_fit_plausible":          {Key: "weight_fit_plausible", Type: "float", Default: "1.0", Section: "Draw weights", Description: "Ticket multiplier for a 'plausible' AI fit assessment (the expected default for most newcomers).", Active: true},
+	"weight_fit_weak":               {Key: "weight_fit_weak", Type: "float", Default: "0.25", Section: "Draw weights", Description: "Ticket multiplier for a 'weak' AI fit assessment.", Active: true},
+	"weight_difficulty_above":       {Key: "weight_difficulty_above", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier when demonstrated skill is below the issue's difficulty tier.", Active: true},
+	"weight_prior_completion":       {Key: "weight_prior_completion", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier per prior completed GrainHack issue.", Active: true},
+	"weight_first_ever_application": {Key: "weight_first_ever_application", Type: "float", Default: "1.5", Section: "Draw weights", Description: "Ticket multiplier for a contributor's first-ever GrainHack application.", Active: true},
+	"weight_per_abandon":            {Key: "weight_per_abandon", Type: "float", Default: "0.5", Section: "Draw weights", Description: "Ticket multiplier per prior abandon (< 1.0, i.e. a penalty).", Active: true},
 
 	// §3.10 judging and payout - inert until the judging slice
 	"units_rejected":                  {Key: "units_rejected", Type: "int", Default: "0", Section: "Judging and payout", Description: "Payout units for a 'rejected' PR bucket."},
@@ -136,6 +141,11 @@ var Definitions = map[string]SettingDef{
 	"maintainer_criteria_weights":  {Key: "maintainer_criteria_weights", Type: "object", Default: "{}", Section: "Maintainer pool", Description: "Weights for each maintainer-pool eligibility criterion."},
 
 	// §3.12 models - inert until the AI pipeline slices
+	// Layer 2 (§4.3) is the only non-deterministic step in the assignment
+	// pipeline. Off by default: every applicant is assessed "plausible",
+	// which is a valid §4.4 outcome, so gates/tickets/draws stay fully
+	// exercisable with zero model calls.
+	"ai_fit_assessment_enabled": {Key: "ai_fit_assessment_enabled", Type: "bool", Default: "false", Section: "Models", Description: "Run the AI fit assessment (§4.3). When off, every applicant that passes the hard gates is assessed 'plausible'.", Active: true},
 	"model_assignment":          {Key: "model_assignment", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-applicant AI fit assessment."},
 	"model_judging":             {Key: "model_judging", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-PR judging call."},
 	"model_cross_check":         {Key: "model_cross_check", Type: "string", Default: "", Section: "Models", Description: "Model used by the cross-check provider."},

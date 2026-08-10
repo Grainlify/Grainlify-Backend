@@ -46,6 +46,17 @@ const (
 	// TypeGrainHackApplicationReviewed fires when an admin rejects a
 	// project's GrainHack application or requests more info on it.
 	TypeGrainHackApplicationReviewed Type = "grainhack_application_reviewed"
+	// TypeGrainHackAssigned fires when a contributor wins the weighted draw
+	// for a GrainHack issue (internal/hackathon/runner.go).
+	TypeGrainHackAssigned Type = "grainhack_assigned"
+	// TypeGrainHackAssignmentReleased fires when an assignment is
+	// auto-released for going stale, which also records an abandon
+	// (AI-specs.md §4.6).
+	TypeGrainHackAssignmentReleased Type = "grainhack_assignment_released"
+	// TypeGrainHackEventEnding warns a contributor still holding an open
+	// assignment that the event ends soon - sent *before* ends_at, per
+	// AI-specs.md §13's second open question.
+	TypeGrainHackEventEnding Type = "grainhack_event_ending"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -63,6 +74,9 @@ var AllTypes = []Type{
 	TypeGrainHackIssueCapExceeded,
 	TypeGrainHackApplicationAccepted,
 	TypeGrainHackApplicationReviewed,
+	TypeGrainHackAssigned,
+	TypeGrainHackAssignmentReleased,
+	TypeGrainHackEventEnding,
 }
 
 func (t Type) Valid() bool {

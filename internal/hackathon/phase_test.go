@@ -54,17 +54,37 @@ UPDATE hackathons SET announced_at = $1, application_period_start = $1, applicat
 
 func TestReadiness_AtFinalPhaseReturnsNoNextPhase(t *testing.T) {
 	d := dbtest.DB(t)
-	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "live"})
+	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "closed"})
 
 	blocking, nextPhase, err := Readiness(context.Background(), d.Pool, hackathonID)
 	if err != nil {
 		t.Fatalf("Readiness: %v", err)
 	}
 	if nextPhase != "" {
-		t.Errorf("nextPhase = %q, want empty (already at the final phase this slice implements)", nextPhase)
+		t.Errorf("nextPhase = %q, want empty (already at the final phase implemented so far)", nextPhase)
 	}
 	if blocking != nil {
 		t.Errorf("blocking = %+v, want nil", blocking)
+	}
+}
+
+// 'live' is no longer terminal now that the assignment pipeline needs a
+// state that closes windows and releases in-flight work. Closing is also
+// deliberately unblocked: requiring open assignments to be resolved first
+// would make the phase that releases them unreachable.
+func TestReadiness_LiveOffersClosedWithNoBlockers(t *testing.T) {
+	d := dbtest.DB(t)
+	hackathonID := fxHackathon(t, d.Pool, fxHackathonSpec{Phase: "live"})
+
+	blocking, nextPhase, err := Readiness(context.Background(), d.Pool, hackathonID)
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if nextPhase != "closed" {
+		t.Errorf("nextPhase = %q, want closed", nextPhase)
+	}
+	if len(blocking) != 0 {
+		t.Errorf("blocking = %+v, want none", blocking)
 	}
 }
 
