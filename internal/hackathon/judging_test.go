@@ -385,3 +385,66 @@ func TestComputePayout_ZeroPoolPaysNothingButStillRanks(t *testing.T) {
 		}
 	}
 }
+
+// A zero-value PrefilterInput must enforce every §2.4 gate.
+//
+// Regression test for a design error caught by the existing suite: the
+// toggles were first written as positives (RequireCIPass), so any caller that
+// omitted them disabled every qualification gate. On the path that decides
+// who gets paid, a forgotten field must fail toward rejecting, never toward
+// paying.
+func TestPrefilter_ZeroValueEnforcesEveryGate(t *testing.T) {
+	failing := false
+
+	// Unlinked PR, zero-value toggles.
+	if res := Prefilter(PrefilterInput{
+		AuthorIsAssignedContributor: true,
+		Stats:                       DiffStats{MeaningfulLines: 50},
+	}); !res.Rejected {
+		t.Error("an unlinked PR passed with zero-value toggles; the gate defaulted to off")
+	}
+
+	// Failing CI, zero-value toggles.
+	if res := Prefilter(PrefilterInput{
+		AuthorIsAssignedContributor: true,
+		LinkedToGrainHackIssue:      true,
+		CIPassed:                    &failing,
+		Stats:                       DiffStats{MeaningfulLines: 50},
+	}); !res.Rejected {
+		t.Error("a failing-CI PR passed with zero-value toggles")
+	}
+
+	// Draft, zero-value toggles.
+	if res := Prefilter(PrefilterInput{
+		AuthorIsAssignedContributor: true,
+		LinkedToGrainHackIssue:      true,
+		IsDraft:                     true,
+		Stats:                       DiffStats{MeaningfulLines: 50},
+	}); !res.Rejected {
+		t.Error("a draft PR passed with zero-value toggles")
+	}
+}
+
+// Only an explicit "false" relaxes a §2.4 requirement. A missing, empty or
+// malformed value keeps it enforced - the direction that cannot widen who
+// qualifies for money by accident.
+func TestPrefilterConfig_OnlyExplicitFalseRelaxes(t *testing.T) {
+	for _, cfg := range []map[string]string{
+		nil,
+		{},
+		{"qualifying_pr_requires_ci_pass": ""},
+		{"qualifying_pr_requires_ci_pass": "no"},
+		{"qualifying_pr_requires_ci_pass": "0"},
+		{"qualifying_pr_requires_ci_pass": "true"},
+	} {
+		allowCI, allowUnlinked, allowDraft := PrefilterConfig(cfg)
+		if allowCI || allowUnlinked || allowDraft {
+			t.Errorf("cfg %v relaxed a requirement without an explicit false", cfg)
+		}
+	}
+
+	allowCI, _, _ := PrefilterConfig(map[string]string{"qualifying_pr_requires_ci_pass": "false"})
+	if !allowCI {
+		t.Error(`an explicit "false" did not relax the CI requirement`)
+	}
+}

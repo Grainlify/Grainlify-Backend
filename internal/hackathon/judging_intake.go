@@ -265,6 +265,14 @@ WHERE hackathon_id = $1 AND project_id = $2 AND pr_number = $3
 				ciPassed = p
 			}
 
+			// §2.4's toggles, read per hackathon. Default to enforced, so a
+			// missing value never widens who qualifies for money.
+			prefilterCfg, cfgErr := EffectiveValues(ctx, pool, &c.HackathonID)
+			if cfgErr != nil {
+				prefilterCfg = nil
+			}
+			allowFailingCI, allowUnlinked, allowDraft := PrefilterConfig(prefilterCfg)
+
 			res := Prefilter(PrefilterInput{
 				Stats:                       stats,
 				CIPassed:                    ciPassed,
@@ -272,6 +280,9 @@ WHERE hackathon_id = $1 AND project_id = $2 AND pr_number = $3
 				AuthorIsAssignedContributor: true,
 				IssueWasDocsIssue:           c.IssueIsDocs,
 				MinMeaningfulLines:          atoiOr(minLines, 0),
+				AllowFailingCI:              allowFailingCI,
+				AllowUnlinked:               allowUnlinked,
+				AllowDraft:                  allowDraft,
 			})
 			if res.Rejected {
 				status, reason = "rejected", res.Reason

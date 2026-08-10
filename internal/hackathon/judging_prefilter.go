@@ -195,6 +195,38 @@ type PrefilterInput struct {
 	// per §5.1's own parenthetical.
 	IssueWasDocsIssue  bool
 	MinMeaningfulLines int
+	// IsDraft is §2.4's non-draft requirement.
+	IsDraft bool
+
+	// The §2.4 conditions an admin can turn off, expressed as negatives on
+	// purpose: a bool's zero value is false, so a caller that forgets these
+	// fields gets every gate ENFORCED rather than every gate disabled.
+	//
+	// Written the positive way first (RequireCIPass etc.) and the existing
+	// tests immediately caught it - a struct literal that omitted them
+	// silently stopped rejecting unqualified PRs. On a code path that decides
+	// who gets paid, the direction a mistake fails in is the whole design.
+	//
+	// These were previously enforced unconditionally while the config keys
+	// were advertised as active, so an admin could disable a requirement, see
+	// it disabled, and have it still reject people's work.
+	AllowFailingCI bool
+	AllowUnlinked  bool
+	AllowDraft     bool
+}
+
+// PrefilterConfig reads the §2.4 toggles for a hackathon. Every one defaults
+// to enforced: a missing or unreadable value must not quietly widen who
+// qualifies for money.
+func PrefilterConfig(cfg map[string]string) (allowFailingCI, allowUnlinked, allowDraft bool) {
+	relaxed := func(key string) bool {
+		// Only an explicit "false" relaxes a requirement. A missing or
+		// unparseable value keeps it enforced.
+		return cfg[key] == "false"
+	}
+	return relaxed("qualifying_pr_requires_ci_pass"),
+		relaxed("qualifying_pr_requires_issue_link"),
+		relaxed("qualifying_pr_requires_non_draft")
 }
 
 // PrefilterResult is stage 1's verdict.
@@ -213,7 +245,7 @@ func Prefilter(in PrefilterInput) PrefilterResult {
 	if !in.AuthorIsAssignedContributor {
 		return PrefilterResult{true, "The PR author was not the contributor assigned this issue through Grainlify."}
 	}
-	if !in.LinkedToGrainHackIssue {
+	if !in.AllowUnlinked && !in.LinkedToGrainHackIssue {
 		return PrefilterResult{true, "The PR is not linked to a GrainHack issue."}
 	}
 	if in.AuthorIsIssueAuthor {
@@ -222,9 +254,12 @@ func Prefilter(in PrefilterInput) PrefilterResult {
 	if in.AuthorIsRepoAdmin {
 		return PrefilterResult{true, "The PR author is an admin of the repository."}
 	}
+	if !in.AllowDraft && in.IsDraft {
+		return PrefilterResult{true, "The PR was still a draft."}
+	}
 	// Explicitly false, not merely unknown: an unknown CI state is not a
 	// failing one, and rejecting on it would punish repos with no CI.
-	if in.CIPassed != nil && !*in.CIPassed {
+	if !in.AllowFailingCI && in.CIPassed != nil && !*in.CIPassed {
 		return PrefilterResult{true, "CI was failing at merge."}
 	}
 	if in.Stats.DocsOnly && !in.IssueWasDocsIssue {

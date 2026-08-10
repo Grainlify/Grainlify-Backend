@@ -78,7 +78,7 @@ var Definitions = map[string]SettingDef{
 	"allow_late_issue_entry":        {Key: "allow_late_issue_entry", Type: "bool", Default: "true", Section: "Issue intake", Description: "Whether the GrainHack label can still be applied after the hackathon goes live.", Active: true},
 	"late_entry_cutoff_hours":       {Key: "late_entry_cutoff_hours", Type: "int", Default: "48", Section: "Issue intake", Description: "Hours before the hackathon ends after which late issue entry is no longer allowed.", ValidRange: ">= 0", Active: true},
 	"auto_revert_oob_assignment":    {Key: "auto_revert_oob_assignment", Type: "bool", Default: "true", Section: "Issue intake", Description: "Automatically remove and comment on GitHub-direct (out-of-band) assignments to GrainHack issues.", Active: true},
-	"oob_assignment_flag_threshold": {Key: "oob_assignment_flag_threshold", Type: "int", Default: "3", Section: "Issue intake", Description: "Repeated out-of-band assignments from an org before it's flagged for admin review.", ValidRange: ">= 1"},
+	"oob_assignment_flag_threshold": {Key: "oob_assignment_flag_threshold", Type: "int", Default: "3", Section: "Issue intake", Description: "Repeated out-of-band assignments from an org before it's flagged for admin review.", ValidRange: ">= 1", Active: true},
 
 	// §3.4 contributor slots and caps - inert until the assignment slice
 	"slots_per_contributor":              {Key: "slots_per_contributor", Type: "int", Default: "2", Section: "Contributor slots and caps", Description: "Concurrent open assignments allowed per contributor.", Active: true},
@@ -115,8 +115,8 @@ var Definitions = map[string]SettingDef{
 	"application_window_hours":    {Key: "application_window_hours", Type: "int", Default: "24", Section: "Application window and draw", Description: "How long an issue accepts applications before the draw runs. Shorten for short events.", ValidRange: ">= 1", Active: true},
 	"empty_window_retries":        {Key: "empty_window_retries", Type: "int", Default: "3", Section: "Application window and draw", Description: "Retries before falling back to first-come assignment.", ValidRange: ">= 0", Active: true},
 	"fallback_to_first_come":      {Key: "fallback_to_first_come", Type: "bool", Default: "true", Section: "Application window and draw", Description: "Fall back to first-come after retries are exhausted.", Active: true},
-	"draw_order":                  {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw.", ValidRange: "randomised", Active: true},
-	"sequential_slot_consumption": {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn.", Active: true},
+	"draw_order":                  {Key: "draw_order", Type: "enum", Default: "randomised", Section: "Application window and draw", Description: "Order issues are processed in during the draw. Declared, not yet consumed - the draw currently runs issues in a fixed order.", ValidRange: "randomised"},
+	"sequential_slot_consumption": {Key: "sequential_slot_consumption", Type: "bool", Default: "true", Section: "Application window and draw", Description: "A win consumes a slot before the next issue is drawn. Declared, not yet consumed - slot freeing currently always uses the same rule."},
 	// Not in AI-specs.md §3.7 - added because an exact live applicant count
 	// rewards applying late (see migration 000043). "bucketed" shows a
 	// coarse band instead, keeping the anti-crowding signal without the
@@ -129,7 +129,7 @@ var Definitions = map[string]SettingDef{
 	"reserved_pct_easy":                 {Key: "reserved_pct_easy", Type: "int", Default: "50", Section: "Newcomer reservation", Description: "% of easy issues reserved for newcomers.", ValidRange: "0-100", Active: true},
 	"reserved_pct_standard":             {Key: "reserved_pct_standard", Type: "int", Default: "30", Section: "Newcomer reservation", Description: "% of standard issues reserved for newcomers.", ValidRange: "0-100", Active: true},
 	"reserved_pct_advanced":             {Key: "reserved_pct_advanced", Type: "int", Default: "0", Section: "Newcomer reservation", Description: "% of advanced issues reserved for newcomers.", ValidRange: "0-100", Active: true},
-	"newcomer_definition":               {Key: "newcomer_definition", Type: "enum", Default: "zero_completed_grainhack_issues", Section: "Newcomer reservation", Description: "What counts as a newcomer.", ValidRange: "zero_completed_grainhack_issues", Active: true},
+	"newcomer_definition":               {Key: "newcomer_definition", Type: "enum", Default: "zero_completed_grainhack_issues", Section: "Newcomer reservation", Description: "What counts as a newcomer. Declared, not yet consumed - the reservation logic uses its own newcomer test.", ValidRange: "zero_completed_grainhack_issues"},
 	"reservation_fallback_to_open_pool": {Key: "reservation_fallback_to_open_pool", Type: "bool", Default: "true", Section: "Newcomer reservation", Description: "Fall back to the open pool if no newcomers applied to a reserved issue.", Active: true},
 
 	// §3.9 draw weights - inert until the assignment slice
@@ -148,7 +148,7 @@ var Definitions = map[string]SettingDef{
 	"units_exceptional":               {Key: "units_exceptional", Type: "int", Default: "5", Section: "Judging and payout", Description: "Payout units for an 'exceptional' PR bucket.", Active: true},
 	"payout_floor":                    {Key: "payout_floor", Type: "money", Default: "50", Section: "Judging and payout", Description: "Minimum payout; below this, payout_floor_strategy decides how the pool is allocated.", Active: true},
 	"payout_floor_strategy":           {Key: "payout_floor_strategy", Type: "enum", Default: "fund_highest_buckets_first", Section: "Judging and payout", Description: "How the pool is allocated when unit_value would fall below the floor.", ValidRange: "fund_highest_buckets_first", Active: true},
-	"duplicate_similarity_threshold":  {Key: "duplicate_similarity_threshold", Type: "float", Default: "0.92", Section: "Judging and payout", Description: "Embedding cosine-similarity threshold for flagging duplicate PRs.", ValidRange: "0-1", Active: true},
+	"duplicate_similarity_threshold":  {Key: "duplicate_similarity_threshold", Type: "float", Default: "0.92", Section: "Judging and payout", Description: "Embedding cosine-similarity threshold for flagging duplicate PRs. Declared, not yet consumed - FindDuplicates takes a threshold but stage 2 is not driven yet.", ValidRange: "0-1"},
 	"cross_check_enabled":             {Key: "cross_check_enabled", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Run every judged PR through a second AI provider."},
 	"cross_check_provider":            {Key: "cross_check_provider", Type: "enum", Default: "openai", Section: "Judging and payout", Description: "The second provider used for cross-checking."},
 	"escalate_on_low_confidence":      {Key: "escalate_on_low_confidence", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Route low-confidence verdicts to human escalation."},
@@ -186,11 +186,11 @@ var Definitions = map[string]SettingDef{
 	// by hand." On by default so that is what happens unless someone
 	// deliberately turns it off.
 	"judging_shadow_mode":       {Key: "judging_shadow_mode", Type: "bool", Default: "true", Section: "Judging and payout", Description: "Compute verdicts and payouts but publish nothing to contributors. The rollout's first event is meant to run this way.", Active: true},
-	"model_assignment":          {Key: "model_assignment", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-applicant AI fit assessment."},
-	"model_judging":             {Key: "model_judging", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-PR judging call."},
-	"model_cross_check":         {Key: "model_cross_check", Type: "string", Default: "", Section: "Models", Description: "Model used by the cross-check provider."},
-	"model_escalation":          {Key: "model_escalation", Type: "string", Default: "", Section: "Models", Description: "Model used for escalated (disagreement) verdicts."},
-	"prompt_version_assignment": {Key: "prompt_version_assignment", Type: "string", Default: "", Section: "Models", Description: "Assignment prompt version, tracked and logged per call."},
+	"model_assignment":          {Key: "model_assignment", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-applicant AI fit assessment.", Active: true},
+	"model_judging":             {Key: "model_judging", Type: "string", Default: "claude-sonnet-4-6", Section: "Models", Description: "Model used for the per-PR judging call.", Active: true},
+	"model_cross_check":         {Key: "model_cross_check", Type: "string", Default: "", Section: "Models", Description: "Model used by the cross-check provider.", Active: true},
+	"model_escalation":          {Key: "model_escalation", Type: "string", Default: "", Section: "Models", Description: "Model used for escalated (disagreement) verdicts.", Active: true},
+	"prompt_version_assignment": {Key: "prompt_version_assignment", Type: "string", Default: "", Section: "Models", Description: "Assignment prompt version, tracked and logged per call.", Active: true},
 	"prompt_version_judging":    {Key: "prompt_version_judging", Type: "string", Default: "", Section: "Models", Description: "Judging prompt version, tracked and logged per call."},
 }
 
