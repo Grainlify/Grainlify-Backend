@@ -69,6 +69,13 @@ func (h *AdminHackathonOOBHandler) List() fiber.Handler {
 			// rule itself, and so it stays true if the UI is rewritten.
 			// §7 makes eligibility reductions admin-reviewable, not automatic.
 			"flagging_is_advisory": true,
+			// Stated because absence here is not evidence of absence. Someone
+			// reading "shared_org: 0" should not conclude no applicant shares
+			// an org with the maintainer.
+			"shared_org_is_a_proxy": "shared_org means the applicant owns a project under the same org on " +
+				"Grainlify, not that GitHub org membership was verified. Verifying real membership needs an " +
+				"authenticated call per applicant. A zero here means no applicant owned a repo in that org - " +
+				"it does not mean nobody shares one.",
 			"note": "Crossing either threshold flags an org for review. It applies no penalty and " +
 				"withholds no payment on its own - repeated out-of-band assignment can be a " +
 				"maintainer who has not read the rules or one routing issues to an alt account, " +

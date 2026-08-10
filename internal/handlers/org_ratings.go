@@ -85,7 +85,7 @@ func orgRankPosition(ctx context.Context, pool db.DBPool, orgLogin string) (*int
 	err := pool.QueryRow(ctx, `
 WITH org_contributors AS (
   SELECT SPLIT_PART(p.github_full_name, '/', 1) AS org_login,
-         COUNT(DISTINCT contributions.author_login) AS contributors
+         COUNT(DISTINCT LOWER(contributions.author_login)) AS contributors
   FROM (
     SELECT project_id, author_login FROM github_issues WHERE author_login IS NOT NULL AND author_login != ''
     UNION
@@ -137,7 +137,7 @@ WHERE status = 'verified' AND deleted_at IS NULL
 
 		var contributorCount int
 		_ = h.db.Pool.QueryRow(c.Context(), `
-SELECT COUNT(DISTINCT contributions.author_login)
+SELECT COUNT(DISTINCT LOWER(contributions.author_login))
 FROM (
   SELECT project_id, author_login FROM github_issues WHERE author_login IS NOT NULL AND author_login != ''
   UNION

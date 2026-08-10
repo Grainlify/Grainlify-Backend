@@ -1047,12 +1047,16 @@ WITH ranked_contributors AS (
       WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified'
     ) as contribution_count
   FROM (
-    SELECT DISTINCT i.author_login as login
+    -- LOWER() here, not just in the counts below. A case-sensitive DISTINCT
+    -- feeding case-insensitive counting is what let one contributor occupy
+    -- several rows on the leaderboard, each reporting the combined total -
+    -- here it would inflate the rank position of everyone below them.
+    SELECT DISTINCT LOWER(i.author_login) as login
     FROM github_issues i
     INNER JOIN projects p ON i.project_id = p.id
     WHERE i.author_login IS NOT NULL AND i.author_login != '' AND p.status = 'verified'
     UNION
-    SELECT DISTINCT pr.author_login as login
+    SELECT DISTINCT LOWER(pr.author_login) as login
     FROM github_pull_requests pr
     INNER JOIN projects p ON pr.project_id = p.id
     WHERE pr.author_login IS NOT NULL AND pr.author_login != '' AND p.status = 'verified'
