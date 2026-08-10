@@ -1,3 +1,6 @@
+# bash rather than sh, for `set -o pipefail` in the test target.
+SHELL := /bin/bash
+
 .PHONY: run dev install-air test test-db-create test-db-drop
 
 # Install air for live reload
@@ -45,8 +48,30 @@ test-db-drop:
 # (schema_migrations version/dirty flags, broad TRUNCATEs between tests), so
 # Go's default concurrent-per-package test execution would race on that
 # shared state without -p 1 serializing it.
+#
+# -timeout: STOPGAP, not a fix. internal/handlers crossed Go's default 600s
+# on 2026-08-10 having climbed 438 -> 494 -> 552 -> 600+ over a few rounds of
+# added tests. Raising the ceiling buys a few more rounds and then we are
+# back here.
+#
+# Measured cause: two leaderboard tests are 69% of the suite (489s of 712s).
+# They page the whole global leaderboard, whose query is quadratic in a
+# contributor count that grows every run because this database is never
+# truncated. It is NOT the per-test setup cost, which is the ~223s the other
+# 231 tests share between them. See docs/TESTING-DEBT.md. Raise this again
+# only alongside fixing those two tests, not instead of it.
+#
+# Full output is teed to test-output.log because a timeout prints a
+# goroutine dump naming the stuck test, and piping the run through tail
+# truncates exactly the part worth reading.
+TEST_TIMEOUT ?= 30m
+TEST_LOG ?= test-output.log
+
+# pipefail is load-bearing: without it the recipe's exit status comes from
+# tee, which always succeeds, and a failing suite would report as passing.
 test:
-	@TEST_DB_URL=$(TEST_DB_URL) go test -count=1 -p 1 -cover ./...
+	@set -o pipefail; TEST_DB_URL=$(TEST_DB_URL) go test -count=1 -p 1 -cover -timeout $(TEST_TIMEOUT) ./... 2>&1 | tee $(TEST_LOG)
+	@echo "full output: $(TEST_LOG)"
 
 
 
