@@ -2,6 +2,7 @@ package hackathon
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,10 +18,17 @@ import (
 // explicit about why: "Blocking would punish legitimate repeat contributors
 // - exactly the relationship the platform wants to grow."
 type PriorAssociation struct {
-	// SharedOrg is true when the applicant is a member of the issue's org.
-	// The org-member hard gate (§4.1) already blocks that case, so this
-	// stays false in practice - it exists so the signal is still complete
-	// if an admin ever disables block_org_members.
+	// SharedOrg is true when the applicant already holds a project under the
+	// issue's org on Grainlify - the strongest shared-org evidence available
+	// without a GitHub call.
+	//
+	// A deliberate proxy for §4.2's "shared org membership, current or past".
+	// True membership needs an authenticated org call per applicant, and the
+	// org-member hard gate (§4.1) already blocks members outright, so this
+	// only matters when an admin has disabled block_org_members - at which
+	// point a proxy computed from data we hold beats a signal that is never
+	// populated at all. It was previously declared, scored, and never
+	// assigned, which made it dead weight in the score.
 	SharedOrg bool `json:"shared_org"`
 	// MergedPRsByMaintainer counts this applicant's PRs already merged into
 	// the org's repos. §4.2's threshold is 3.
@@ -54,6 +62,15 @@ WHERE pr.merged
   AND lower(SPLIT_PART(p.github_full_name, '/', 1)) = lower($2)
 `, githubLogin, orgLogin).Scan(&pa.MergedPRsByMaintainer)
 	pa.FrequentMergeRelation = pa.MergedPRsByMaintainer >= 3
+
+	// Shared org: does this applicant own a project under the same org?
+	_ = pool.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM projects
+  WHERE owner_user_id = $1
+    AND lower(SPLIT_PART(github_full_name, '/', 1)) = lower($2)
+)
+`, userID, orgLogin).Scan(&pa.SharedOrg)
 
 	// Assignments this applicant already won from the same org in *earlier*
 	// hackathons - repeated co-occurrence across events.
@@ -99,4 +116,69 @@ LIMIT 1
 		pa.Score += 2
 	}
 	return pa
+}
+
+// OrgAssociationSummary aggregates §4.2 evidence for one org, for the
+// maintainer-pool eligibility review §7 calls for.
+type OrgAssociationSummary struct {
+	OrgLogin string `json:"org_login"`
+	// Assignments with any association evidence at all, and the subset with
+	// enough to be worth a human look.
+	Assignments      int `json:"assignments"`
+	WithEvidence     int `json:"with_evidence"`
+	SharedOrg        int `json:"shared_org"`
+	FrequentMerge    int `json:"frequent_merge_relation"`
+	RepeatCoOccurred int `json:"repeat_co_occurrence"`
+	CloseAccountAges int `json:"accounts_created_within_7_days"`
+	// Flagged is advisory. §4.2 is explicit that this never blocks, and §7
+	// makes eligibility reductions "admin-reviewable, not automatic" - the
+	// same reasoning as the out-of-band assignment threshold. A maintainer
+	// whose repeat contributors keep winning issues is describing the
+	// relationship the platform exists to grow; the same numbers also
+	// describe collusion, and only a human can tell those apart.
+	Flagged   bool `json:"flagged"`
+	Threshold int  `json:"threshold"`
+}
+
+// OrgAssociationSummaries rolls up the prior_association evidence already
+// stored on each assignment.
+//
+// Reads the snapshot written at draw time rather than recomputing. The
+// evidence that mattered is what was true when the assignment was made, and
+// recomputing months later against a repo that has moved on would answer a
+// different question than the one being reviewed.
+func OrgAssociationSummaries(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID) ([]OrgAssociationSummary, error) {
+	threshold := 3
+
+	rows, err := pool.Query(ctx, `
+SELECT org_login,
+       count(*)::int,
+       count(*) FILTER (WHERE prior_association IS NOT NULL
+                          AND (prior_association->>'score')::numeric > 0)::int,
+       count(*) FILTER (WHERE (prior_association->>'shared_org')::boolean)::int,
+       count(*) FILTER (WHERE (prior_association->>'frequent_merge_relation')::boolean)::int,
+       count(*) FILTER (WHERE COALESCE((prior_association->>'prior_grainhack_co_occurrence')::int, 0) > 0)::int,
+       count(*) FILTER (WHERE (prior_association->>'accounts_created_within_7_days')::boolean)::int
+FROM hackathon_assignments
+WHERE hackathon_id = $1
+GROUP BY org_login
+ORDER BY 3 DESC, org_login
+`, hackathonID)
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.OrgAssociationSummaries: %w", err)
+	}
+	defer rows.Close()
+
+	out := []OrgAssociationSummary{}
+	for rows.Next() {
+		var s OrgAssociationSummary
+		if err := rows.Scan(&s.OrgLogin, &s.Assignments, &s.WithEvidence, &s.SharedOrg,
+			&s.FrequentMerge, &s.RepeatCoOccurred, &s.CloseAccountAges); err != nil {
+			return nil, fmt.Errorf("hackathon.OrgAssociationSummaries: scan: %w", err)
+		}
+		s.Threshold = threshold
+		s.Flagged = s.WithEvidence >= threshold
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }

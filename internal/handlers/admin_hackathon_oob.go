@@ -52,16 +52,30 @@ func (h *AdminHackathonOOBHandler) List() fiber.Handler {
 			summaries[i].Assignments = events
 		}
 
+		// §4.2 association evidence alongside the out-of-band counts. §7
+		// reduces maintainer-pool eligibility on "repeated out-of-band
+		// assignments (§2.3), or a pattern of flagged associations (§4.2)",
+		// so the two belong on one screen - an admin judging eligibility
+		// should not have to assemble the evidence from two places.
+		associations, assocErr := hackathon.OrgAssociationSummaries(c.Context(), h.db.Pool, hackathonID)
+		if assocErr != nil {
+			slog.Warn("association summaries", "error", assocErr)
+		}
+
 		return c.JSON(fiber.Map{
-			"orgs": summaries,
+			"orgs":         summaries,
+			"associations": associations,
 			// Stated in the payload so the UI does not have to encode this
 			// rule itself, and so it stays true if the UI is rewritten.
 			// §7 makes eligibility reductions admin-reviewable, not automatic.
 			"flagging_is_advisory": true,
-			"note": "Crossing the threshold flags an org for review. It applies no penalty and " +
+			"note": "Crossing either threshold flags an org for review. It applies no penalty and " +
 				"withholds no payment on its own - repeated out-of-band assignment can be a " +
 				"maintainer who has not read the rules or one routing issues to an alt account, " +
-				"and those are indistinguishable from this data alone.",
+				"and those are indistinguishable from this data alone. The same is true of " +
+				"association evidence: a maintainer whose repeat contributors keep winning issues " +
+				"is describing the relationship this platform exists to grow, and the identical " +
+				"numbers also describe collusion.",
 		})
 	}
 }

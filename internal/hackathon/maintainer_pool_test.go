@@ -432,3 +432,40 @@ VALUES ($1, $2, $3, 'open', $4, now())
 		t.Errorf("the smallest real repo normalised to %.3f; a participating repo should not score zero on contributor growth", norms[0])
 	}
 }
+
+// maintainer_criteria_weights must actually override the Go defaults. A key
+// visible in the admin UI that silently changes nothing is the same failure
+// as auto_revert_oob_assignment: an admin sets it, sees it set, and believes
+// it took effect.
+func TestCriteriaWeights_ConfigOverridesTheDefaults(t *testing.T) {
+	defaults := criteriaWeights(map[string]string{})
+	if defaults[CriterionFirstTimeContributors] != 0.25 {
+		t.Fatalf("default weight = %v, want 0.25", defaults[CriterionFirstTimeContributors])
+	}
+
+	overridden := criteriaWeights(map[string]string{
+		"maintainer_criteria_weights": `{"first_time_contributors":0.7,"issue_clarity_rating":0.1}`,
+	})
+	if overridden[CriterionFirstTimeContributors] != 0.7 {
+		t.Errorf("configured weight did not take effect: got %v, want 0.7", overridden[CriterionFirstTimeContributors])
+	}
+	if overridden[CriterionIssueClarity] != 0.1 {
+		t.Errorf("configured clarity weight = %v, want 0.1", overridden[CriterionIssueClarity])
+	}
+	// Keys the config does not mention keep their default rather than
+	// dropping to zero, so a partial override is not a silent deletion.
+	if overridden[CriterionRepoPredatesEvent] != 0.25 {
+		t.Errorf("unmentioned criterion = %v, want its 0.25 default kept", overridden[CriterionRepoPredatesEvent])
+	}
+	// Malformed config falls back rather than zeroing every weight, which
+	// would make every repo score 0 and split the pool evenly by accident.
+	garbage := criteriaWeights(map[string]string{"maintainer_criteria_weights": `{not json`})
+	if garbage[CriterionFirstTimeContributors] != 0.25 {
+		t.Errorf("malformed weights did not fall back to defaults: %v", garbage)
+	}
+	// An unknown key is ignored rather than inflating the denominator.
+	unknown := criteriaWeights(map[string]string{"maintainer_criteria_weights": `{"made_up_criterion":9}`})
+	if _, ok := unknown["made_up_criterion"]; ok {
+		t.Error("an unknown criterion key was accepted into the weight set")
+	}
+}

@@ -116,6 +116,19 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 			"phase":          phase,
 			"rules":          rules,
 			"section_order":  hackathon.SectionOrder,
+			// Read alongside the numbers, not instead of them. The maintainer
+			// note exists because the pool split looks narrower than the
+			// underlying contributor counts and that difference is easy to
+			// misread as the scoring not working.
+			"section_notes": fiber.Map{
+				"Maintainer pool": "Two of these are floor criteria rather than growth measures: whether the repo " +
+					"had commits before the event was announced, and whether it stayed active afterwards. A repo that " +
+					"has been around and stays around scores full marks on both, so most participating repos sit near " +
+					"the top of them. They exist to separate a real project from one spun up to farm an event, not to " +
+					"rank real projects against each other - which is why the spread in the final split is narrower " +
+					"than the spread in raw contributor counts. Criteria with too little data to be meaningful are " +
+					"dropped and their weight shared across the rest, rather than counted as a zero.",
+			},
 			// Structural rules that live in code rather than config, because
 			// they protect an ordering that a config edit must not be able to
 			// invert. Published for the same reason as everything else.

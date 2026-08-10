@@ -159,7 +159,7 @@ var Definitions = map[string]SettingDef{
 	"maintainer_holdback_pct":      {Key: "maintainer_holdback_pct", Type: "int", Default: "30", Section: "Maintainer pool", Description: "% of a maintainer's payout held back.", ValidRange: "0-100", Active: true},
 	"maintainer_holdback_days":     {Key: "maintainer_holdback_days", Type: "int", Default: "90", Section: "Maintainer pool", Description: "Days the holdback is held before release.", Active: true},
 	"maintainer_min_repo_age_days": {Key: "maintainer_min_repo_age_days", Type: "int", Default: "90", Section: "Maintainer pool", Description: "Minimum repo age to be maintainer-pool eligible."},
-	"maintainer_criteria_weights":  {Key: "maintainer_criteria_weights", Type: "object", Default: "{}", Section: "Maintainer pool", Description: "Weights for each maintainer-pool eligibility criterion."},
+	"maintainer_criteria_weights":  {Key: "maintainer_criteria_weights", Type: "object", Default: "{}", Section: "Maintainer pool", Description: "Weights for each maintainer-pool eligibility criterion. Unmentioned criteria keep their default; a criterion dropped for thin data has its weight redistributed across the rest.", Active: true},
 	// §7's holdback is only an anti-farming mechanism if its release is
 	// conditional on the thing it measures - "a maintainer farming an event is
 	// gone the next day; one genuinely growing a project is still there". A
