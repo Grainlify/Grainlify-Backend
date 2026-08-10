@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jagadeesh/grainlify/backend/internal/chain"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/email"
@@ -36,8 +37,11 @@ const endOfEventWarningLead = 24 * time.Hour
 // jobs and is safe to run anywhere, whereas this one writes assignments and
 // calls GitHub.
 type AssignmentRunner struct {
-	pool     db.DBPool
-	gh       *github.Client
+	pool db.DBPool
+	gh   *github.Client
+	// chains is nil for events that are not on-chain, which is every event
+	// today. When set, a draw refuses to run without a confirmed commit.
+	chains   *chain.Registry
 	notifier *notifications.Service
 	// installationToken resolves a GitHub App installation token for a
 	// project, so the runner can set the GitHub assignee after a draw.
@@ -198,6 +202,20 @@ ORDER BY random()
 				}
 				continue
 			}
+		}
+
+		// §5.3: refuse to draw without a confirmed on-chain seed commit.
+		// The window is left closed and the issue is picked up again on a
+		// later tick, so a commit that confirms late still gets its draw -
+		// running now would produce a result nobody could verify, and that
+		// is indistinguishable afterwards from an honest one.
+		if err := CheckDrawCommit(ctx, r.pool, r.chains, d.hackathonID, d.issueID, d.issueNumber); err != nil {
+			slog.Warn("hackathon: draw withheld, seed commit not confirmed",
+				"issue_id", d.issueID, "issue_number", d.issueNumber, "error", err)
+			if err := ExtendWindowForCommit(ctx, r.pool, d.issueID); err != nil {
+				slog.Warn("hackathon: extend window for pending commit", "issue_id", d.issueID, "error", err)
+			}
+			continue
 		}
 
 		res, err := RunDraw(ctx, r.pool, d.hackathonID, d.issueID, 0, false)
@@ -395,4 +413,15 @@ SELECT
 	a.Commits = count
 	a.CommitsMeasured = true
 	return a
+}
+
+// WithChains attaches a chain registry, turning on the §5.3 refuse-to-draw
+// guarantee for events that run chain pools.
+//
+// Separate from the constructor because it is optional: a runner with no
+// registry behaves exactly as before, which is what keeps every existing
+// event working while the on-chain path is adopted per event.
+func (r *AssignmentRunner) WithChains(reg *chain.Registry) *AssignmentRunner {
+	r.chains = reg
+	return r
 }
