@@ -300,6 +300,14 @@ UPDATE hackathons SET config_snapshot = $1, config_snapshot_taken_at = now() WHE
 		if _, err := CloseAppealsAndRecompute(ctx, pool, hackathonID, actorID); err != nil {
 			return fmt.Errorf("hackathon.Transition: phase committed, but the post-appeal payout recompute failed: %w", err)
 		}
+		// §7 maintainer pool, scored and allocated from its own budget line.
+		// medianFn is nil here: the review median needs GitHub calls per repo,
+		// and that criterion drops cleanly (with a recorded reason) rather
+		// than blocking the settle on network availability. An admin can
+		// re-run the settle computation once it is fetchable.
+		if _, err := SettleMaintainerPool(ctx, pool, hackathonID, nil); err != nil {
+			return fmt.Errorf("hackathon.Transition: phase committed, but the maintainer pool settle failed: %w", err)
+		}
 	}
 	return nil
 }

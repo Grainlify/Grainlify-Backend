@@ -111,6 +111,15 @@ func (r *AssignmentRunner) Run(ctx context.Context) error {
 			if err := r.sweepClosedEvents(ctx); err != nil {
 				slog.Warn("hackathon: closed-event sweep failed", "error", err)
 			}
+			// §7 holdbacks. Selects on (pending AND due_at <= now()), which
+			// carries no memory of previous ticks - a service down across a
+			// due date resolves it on the next tick rather than skipping it,
+			// same convergence property as sweepClosedEvents above.
+			if n, err := ReleaseDueHoldbacks(ctx, r.pool, r.repoActivity); err != nil {
+				slog.Warn("hackathon: holdback release failed", "error", err)
+			} else if n > 0 {
+				slog.Info("hackathon: holdbacks resolved", "count", n)
+			}
 		}
 	}
 }
@@ -348,4 +357,42 @@ func (r *AssignmentRunner) warnEndOfEvent(ctx context.Context) error {
 		)
 	}
 	return nil
+}
+
+// repoActivity measures continued repo activity for a holdback decision.
+//
+// Commits come from the GitHub API; merged PRs and issue events come from
+// rows already synced, so a GitHub failure degrades to "commits not measured"
+// rather than to "no activity". That distinction is load-bearing:
+// DecideHoldback keeps a holdback pending when activity could not be
+// measured, instead of withholding money on missing evidence.
+func (r *AssignmentRunner) repoActivity(ctx context.Context, projectID uuid.UUID, repoFullName string, since time.Time, windowDays int) RepoActivity {
+	a := RepoActivity{WindowDays: windowDays, Since: since}
+
+	if err := r.pool.QueryRow(ctx, `
+SELECT
+  (SELECT count(*) FROM github_pull_requests
+     WHERE project_id = $1 AND merged AND merged_at_github IS NOT NULL AND merged_at_github >= $2)::int,
+  (SELECT count(*) FROM github_issues
+     WHERE project_id = $1 AND updated_at_github IS NOT NULL AND updated_at_github >= $2)::int
+`, projectID, since).Scan(&a.MergedPRs, &a.IssueActivity); err != nil {
+		slog.Warn("hackathon: repo activity query failed", "project_id", projectID, "error", err)
+	}
+
+	if r.gh == nil || r.installationToken == nil {
+		return a
+	}
+	tok, err := r.installationToken(ctx, projectID)
+	if err != nil {
+		return a
+	}
+	count, _, err := r.gh.CountCommitsSince(ctx, tok, repoFullName, since, 3)
+	if err != nil {
+		slog.Warn("hackathon: commit count failed, leaving it unmeasured",
+			"project_id", projectID, "error", err)
+		return a
+	}
+	a.Commits = count
+	a.CommitsMeasured = true
+	return a
 }

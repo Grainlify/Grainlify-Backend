@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -188,13 +189,30 @@ WHERE $2::timestamptz IS NULL OR first_at >= $2::timestamptz
 `, projectID, announcedAt).Scan(&firstTimers); err != nil {
 		return out, fmt.Errorf("hackathon.ComputeMaintainerScore: first-timers: %w", err)
 	}
-	// Normalised against a soft target of 10 newcomers; above that is full
-	// marks rather than unbounded advantage, so one very large repo cannot
-	// dominate the pool on scale alone.
+	// Log-scaled against a published reference, not linear.
+	//
+	// Chosen from real data rather than picked: across the projects on the
+	// platform today the distinct-contributor count spans 2 to 246. A linear
+	// scale with a small cap saturates - an earlier n/10 version gave a repo
+	// with 19 newcomers exactly the same mark as one with 246, so the
+	// criterion stopped discriminating across two thirds of the field. A
+	// linear scale to the maximum has the opposite failure: the largest repo
+	// takes the pool by sheer size, and the three largest here belong to one
+	// org.
+	//
+	// A log scale discriminates across orders of magnitude without letting
+	// scale alone decide. The reference is config so it is publishable in
+	// advance alongside the draw weights - a maintainer planning around
+	// "what counts as full marks" needs that number before the event.
+	reference := float64(atoiOr(cfg["maintainer_first_timers_reference"], 200))
+	if reference < 2 {
+		reference = 2
+	}
 	criteria = append(criteria, Criterion{
 		Key: CriterionFirstTimeContributors, Included: true,
-		Raw: floatPtr(float64(firstTimers)), Normalized: clampUnit(float64(firstTimers) / 10.0),
-		Weight: weights[CriterionFirstTimeContributors],
+		Raw:        floatPtr(float64(firstTimers)),
+		Normalized: clampUnit(math.Log(1+float64(firstTimers)) / math.Log(1+reference)),
+		Weight:     weights[CriterionFirstTimeContributors],
 	})
 
 	// 2. Median time to first review. Faster is better; 72h or worse scores
@@ -405,4 +423,217 @@ func DecideHoldback(payout MaintainerPayout, activity RepoActivity, cfg map[stri
 		d.Reason = fmt.Sprintf("No commits, merged PRs or issue activity in the %d days after the event.", activity.WindowDays)
 	}
 	return d
+}
+
+// ReviewMedianFn looks up a repo's median time to first review. Injected so
+// the settle path decides whether to make network calls, and so the scoring
+// rules stay testable without one. Returning nil drops that criterion.
+type ReviewMedianFn func(projectID uuid.UUID, repoFullName string) *float64
+
+// SettleMaintainerPool scores every participating repo, allocates the
+// maintainer pool across them, and persists the result.
+//
+// Called on the transition into settled, next to the contributor recompute.
+// Idempotent per hackathon: re-running replaces the rows rather than adding a
+// second allocation, so a retry after a partial failure converges instead of
+// paying twice.
+//
+// The money comes from hackathons.maintainer_prize_pool and nowhere else.
+func SettleMaintainerPool(
+	ctx context.Context,
+	pool db.DBPool,
+	hackathonID uuid.UUID,
+	medianFn ReviewMedianFn,
+) ([]MaintainerPayout, error) {
+	cfg, err := EffectiveValues(ctx, pool, &hackathonID)
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.SettleMaintainerPool: config: %w", err)
+	}
+
+	var maintainerPool float64
+	if err := pool.QueryRow(ctx, `
+SELECT COALESCE(maintainer_prize_pool, 0) FROM hackathons WHERE id = $1
+`, hackathonID).Scan(&maintainerPool); err != nil {
+		return nil, fmt.Errorf("hackathon.SettleMaintainerPool: pool: %w", err)
+	}
+
+	rows, err := pool.Query(ctx, `
+SELECT DISTINCT p.id, p.github_full_name, p.owner_user_id
+FROM hackathon_project_applications hpa
+JOIN projects p ON p.id = hpa.project_id
+WHERE hpa.hackathon_id = $1 AND hpa.status = 'accepted'
+ORDER BY p.id
+`, hackathonID)
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.SettleMaintainerPool: participants: %w", err)
+	}
+	type participant struct {
+		id       uuid.UUID
+		fullName string
+		owner    uuid.UUID
+	}
+	var participants []participant
+	for rows.Next() {
+		var p participant
+		if err := rows.Scan(&p.id, &p.fullName, &p.owner); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		participants = append(participants, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	scores := make([]MaintainerScore, 0, len(participants))
+	owners := map[uuid.UUID]uuid.UUID{}
+	for _, p := range participants {
+		var median *float64
+		if medianFn != nil {
+			median = medianFn(p.id, p.fullName)
+		}
+		s, err := ComputeMaintainerScore(ctx, pool, hackathonID, p.id, median, cfg)
+		if err != nil {
+			return nil, err
+		}
+		scores = append(scores, s)
+		owners[p.id] = p.owner
+	}
+
+	payouts := AllocateMaintainerPool(scores, maintainerPool, cfg, time.Now())
+	byProject := map[uuid.UUID]MaintainerScore{}
+	for _, s := range scores {
+		byProject[s.ProjectID] = s
+	}
+
+	for _, p := range payouts {
+		s := byProject[p.ProjectID]
+		criteriaJSON, err := json.Marshal(s.Criteria)
+		if err != nil {
+			return nil, fmt.Errorf("hackathon.SettleMaintainerPool: marshal criteria: %w", err)
+		}
+		owner := owners[p.ProjectID]
+		if _, err := pool.Exec(ctx, `
+INSERT INTO hackathon_maintainer_payouts
+  (hackathon_id, project_id, org_login, maintainer_user_id, score, criteria,
+   gross_amount, holdback_pct, holdback_amount, immediate_amount, holdback_due_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+ON CONFLICT (hackathon_id, project_id) DO UPDATE SET
+  org_login = EXCLUDED.org_login,
+  maintainer_user_id = EXCLUDED.maintainer_user_id,
+  score = EXCLUDED.score,
+  criteria = EXCLUDED.criteria,
+  gross_amount = EXCLUDED.gross_amount,
+  holdback_pct = EXCLUDED.holdback_pct,
+  holdback_amount = EXCLUDED.holdback_amount,
+  immediate_amount = EXCLUDED.immediate_amount,
+  holdback_due_at = EXCLUDED.holdback_due_at,
+  updated_at = now()
+`, hackathonID, p.ProjectID, p.OrgLogin, owner, s.Score, criteriaJSON,
+			p.GrossAmount, p.HoldbackPct, p.HoldbackAmount, p.ImmediateAmount, p.HoldbackDueAt); err != nil {
+			return nil, fmt.Errorf("hackathon.SettleMaintainerPool: persist: %w", err)
+		}
+	}
+	return payouts, nil
+}
+
+// ActivityFn measures a repo's activity since a cutoff, for the holdback
+// decision. Injected for the same reason as ReviewMedianFn.
+type ActivityFn func(ctx context.Context, projectID uuid.UUID, repoFullName string, since time.Time, windowDays int) RepoActivity
+
+// ReleaseDueHoldbacks resolves every holdback whose due date has passed.
+//
+// Convergent by construction, not by being run on time. The query selects on
+// (status = 'pending' AND holdback_due_at <= now()), which carries no memory
+// of whether a previous tick happened - so a service that is down across a
+// due date resolves it on the next tick rather than skipping it, the same
+// property sweepClosedEvents relies on. Nothing here records "last run at".
+//
+// A holdback whose activity could not be measured stays pending and is
+// therefore retried on the following tick, which is the behaviour that makes
+// a transient GitHub failure harmless rather than a silent forfeiture.
+func ReleaseDueHoldbacks(ctx context.Context, pool db.DBPool, activityFn ActivityFn) (resolved int, err error) {
+	rows, err := pool.Query(ctx, `
+SELECT mp.id, mp.hackathon_id, mp.project_id, p.github_full_name, mp.holdback_amount,
+       COALESCE(h.appeals_closed_at, h.results_published_at, mp.created_at)
+FROM hackathon_maintainer_payouts mp
+JOIN projects p ON p.id = mp.project_id
+JOIN hackathons h ON h.id = mp.hackathon_id
+WHERE mp.holdback_status = 'pending'
+  AND mp.holdback_due_at IS NOT NULL
+  AND mp.holdback_due_at <= now()
+ORDER BY mp.holdback_due_at
+LIMIT 200
+`)
+	if err != nil {
+		return 0, fmt.Errorf("hackathon.ReleaseDueHoldbacks: %w", err)
+	}
+	type due struct {
+		id          uuid.UUID
+		hackathonID uuid.UUID
+		projectID   uuid.UUID
+		fullName    string
+		amount      float64
+		since       time.Time
+	}
+	var items []due
+	for rows.Next() {
+		var d due
+		if err := rows.Scan(&d.id, &d.hackathonID, &d.projectID, &d.fullName, &d.amount, &d.since); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, d := range items {
+		cfg, err := EffectiveValues(ctx, pool, &d.hackathonID)
+		if err != nil {
+			continue
+		}
+		windowDays := atoiOr(cfg["maintainer_activity_window_days"], 60)
+		activity := RepoActivity{WindowDays: windowDays, Since: d.since}
+		if activityFn != nil {
+			activity = activityFn(ctx, d.projectID, d.fullName, d.since, windowDays)
+		}
+
+		decision := DecideHoldback(MaintainerPayout{HoldbackAmount: d.amount}, activity, cfg)
+		activityJSON, _ := json.Marshal(decision.Activity)
+
+		if decision.Status == "pending" {
+			// Record that we looked and could not measure, without resolving.
+			// The next tick retries because the selection predicate is
+			// unchanged.
+			if _, err := pool.Exec(ctx, `
+UPDATE hackathon_maintainer_payouts
+SET activity = $2, activity_checked_at = now(), holdback_reason = $3, updated_at = now()
+WHERE id = $1
+`, d.id, activityJSON, decision.Reason); err != nil {
+				return resolved, err
+			}
+			continue
+		}
+
+		var destination any
+		if decision.Destination != "" {
+			destination = decision.Destination
+		}
+		if _, err := pool.Exec(ctx, `
+UPDATE hackathon_maintainer_payouts
+SET holdback_status = $2, released_amount = $3, withheld_amount = $4,
+    withheld_destination = $5, activity = $6, activity_checked_at = now(),
+    holdback_resolved_at = now(), holdback_reason = $7, updated_at = now()
+WHERE id = $1 AND holdback_status = 'pending'
+`, d.id, decision.Status, decision.Released, decision.Withheld,
+			destination, activityJSON, decision.Reason); err != nil {
+			return resolved, err
+		}
+		resolved++
+	}
+	return resolved, nil
 }

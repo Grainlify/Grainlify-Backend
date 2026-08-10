@@ -2,6 +2,7 @@ package hackathon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -222,5 +223,212 @@ func TestDecideHoldback_ReleaseDependsOnContinuedActivity(t *testing.T) {
 	}
 	if unmeasured.Withheld != 0 {
 		t.Errorf("unmeasured activity withheld %v", unmeasured.Withheld)
+	}
+}
+
+// A holdback whose due date passed while the service was down must still
+// resolve on the next tick. The selection predicate carries no memory of
+// previous runs, which is what makes that true - so this test drives it by
+// backdating the due date rather than by simulating a schedule.
+func TestReleaseDueHoldbacks_SurvivesAMissedRun(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+
+	if _, err := pool.Exec(ctx, `
+INSERT INTO hackathon_maintainer_payouts
+  (hackathon_id, project_id, org_login, score, gross_amount, holdback_pct,
+   holdback_amount, immediate_amount, holdback_due_at)
+VALUES ($1,$2,'acme',1,1000,30,300,700, now() - interval '14 days')
+`, hackathonID, projectID); err != nil {
+		t.Fatalf("seed payout: %v", err)
+	}
+
+	active := func(_ context.Context, _ uuid.UUID, _ string, since time.Time, windowDays int) RepoActivity {
+		return RepoActivity{WindowDays: windowDays, Since: since, Commits: 9, MergedPRs: 3, CommitsMeasured: true}
+	}
+
+	n, err := ReleaseDueHoldbacks(ctx, pool, active)
+	if err != nil {
+		t.Fatalf("ReleaseDueHoldbacks: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("resolved %d holdbacks, want 1 - a due date passed 14 days ago must still be picked up", n)
+	}
+
+	var status string
+	var released float64
+	if err := pool.QueryRow(ctx, `
+SELECT holdback_status, released_amount FROM hackathon_maintainer_payouts
+WHERE hackathon_id = $1 AND project_id = $2
+`, hackathonID, projectID).Scan(&status, &released); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if status != "released" || released != 300 {
+		t.Errorf("status=%q released=%v, want released/300", status, released)
+	}
+
+	// Already resolved: a second pass must not double-release.
+	n, err = ReleaseDueHoldbacks(ctx, pool, active)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second pass resolved %d, want 0", n)
+	}
+}
+
+// An unmeasurable repo stays pending and is retried, rather than forfeiting
+// the money because one GitHub call failed.
+func TestReleaseDueHoldbacks_UnmeasurableStaysPendingAndRetries(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+
+	if _, err := pool.Exec(ctx, `
+INSERT INTO hackathon_maintainer_payouts
+  (hackathon_id, project_id, org_login, score, gross_amount, holdback_pct,
+   holdback_amount, immediate_amount, holdback_due_at)
+VALUES ($1,$2,'acme',1,1000,30,300,700, now() - interval '1 day')
+`, hackathonID, projectID); err != nil {
+		t.Fatalf("seed payout: %v", err)
+	}
+
+	unmeasurable := func(_ context.Context, _ uuid.UUID, _ string, since time.Time, windowDays int) RepoActivity {
+		return RepoActivity{WindowDays: windowDays, Since: since, CommitsMeasured: false}
+	}
+
+	if _, err := ReleaseDueHoldbacks(ctx, pool, unmeasurable); err != nil {
+		t.Fatalf("ReleaseDueHoldbacks: %v", err)
+	}
+	var status string
+	var withheld float64
+	var checkedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT holdback_status, withheld_amount, activity_checked_at
+FROM hackathon_maintainer_payouts WHERE hackathon_id = $1 AND project_id = $2
+`, hackathonID, projectID).Scan(&status, &withheld, &checkedAt); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want pending - money must not be forfeited on missing evidence", status)
+	}
+	if withheld != 0 {
+		t.Errorf("withheld %v while unmeasurable", withheld)
+	}
+	if checkedAt == nil {
+		t.Error("no activity_checked_at recorded; the attempt should be visible")
+	}
+
+	// Still selected on the next pass, and resolves once measurable.
+	measured := func(_ context.Context, _ uuid.UUID, _ string, since time.Time, windowDays int) RepoActivity {
+		return RepoActivity{WindowDays: windowDays, Since: since, CommitsMeasured: true}
+	}
+	n, err := ReleaseDueHoldbacks(ctx, pool, measured)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("retry resolved %d, want 1 - a pending holdback must remain selectable", n)
+	}
+	if err := pool.QueryRow(ctx, `
+SELECT holdback_status, withheld_amount FROM hackathon_maintainer_payouts
+WHERE hackathon_id = $1 AND project_id = $2
+`, hackathonID, projectID).Scan(&status, &withheld); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if status != "withheld" || withheld != 300 {
+		t.Errorf("after measuring no activity: status=%q withheld=%v, want withheld/300", status, withheld)
+	}
+}
+
+// Settling persists a row per participating repo, with the criteria snapshot,
+// and re-running replaces rather than duplicates.
+func TestSettleMaintainerPool_PersistsAndIsIdempotent(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+	if _, err := pool.Exec(ctx, `UPDATE hackathons SET maintainer_prize_pool = 500 WHERE id = $1`, hackathonID); err != nil {
+		t.Fatalf("set pool: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := SettleMaintainerPool(ctx, pool, hackathonID, nil); err != nil {
+			t.Fatalf("SettleMaintainerPool run %d: %v", i, err)
+		}
+	}
+
+	var rows int
+	var criteria []byte
+	if err := pool.QueryRow(ctx, `
+SELECT count(*)::int, MIN(criteria::text)::jsonb
+FROM hackathon_maintainer_payouts WHERE hackathon_id = $1 AND project_id = $2
+`, hackathonID, projectID).Scan(&rows, &criteria); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("got %d rows after settling twice, want 1", rows)
+	}
+	if len(criteria) < 10 {
+		t.Errorf("criteria snapshot looks empty: %s", criteria)
+	}
+}
+
+// The first-timer criterion must keep discriminating across the range real
+// repos actually occupy.
+//
+// Pinned from a simulation against live data: distinct-contributor counts on
+// the platform span 2 to 246. An earlier linear n/10 normalisation gave 19
+// and 246 the identical mark, so four of six repos tied at full marks and the
+// criterion decided nothing. This asserts the shape rather than exact values,
+// so tuning the reference stays possible but flattening it does not.
+func TestComputeMaintainerScore_FirstTimerScaleDoesNotSaturate(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	pool := d.Pool
+	cfg := map[string]string{}
+
+	// Representative of the real spread, smallest to largest.
+	counts := []int{2, 5, 19, 135}
+	var norms []float64
+
+	for _, n := range counts {
+		hackathonID, projectID, _ := fxLiveHackathon(t, pool)
+		// announced_at is in the past on this fixture, so contributions
+		// seeded now count as first-timers within the event.
+		for i := 0; i < n; i++ {
+			if _, err := pool.Exec(ctx, `
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, author_login, created_at_github)
+VALUES ($1, $2, $3, 'open', $4, now())
+`, projectID, uuid.New().ID(), 10000+i, fmt.Sprintf("newcomer-%d-%s", i, uuid.New().String()[:6])); err != nil {
+				t.Fatalf("seed contributor: %v", err)
+			}
+		}
+		score, err := ComputeMaintainerScore(ctx, pool, hackathonID, projectID, nil, cfg)
+		if err != nil {
+			t.Fatalf("ComputeMaintainerScore(n=%d): %v", n, err)
+		}
+		for _, c := range score.Criteria {
+			if c.Key == CriterionFirstTimeContributors {
+				norms = append(norms, c.Normalized)
+			}
+		}
+	}
+
+	if len(norms) != len(counts) {
+		t.Fatalf("got %d normalised values, want %d", len(norms), len(counts))
+	}
+	for i := 1; i < len(norms); i++ {
+		if norms[i] <= norms[i-1] {
+			t.Errorf("n=%d scored %.3f, not above n=%d at %.3f - the scale has saturated and stopped discriminating",
+				counts[i], norms[i], counts[i-1], norms[i-1])
+		}
+	}
+	// And the bottom of the real range must not be pinned at zero either.
+	if norms[0] <= 0 {
+		t.Errorf("the smallest real repo normalised to %.3f; a participating repo should not score zero on contributor growth", norms[0])
 	}
 }
