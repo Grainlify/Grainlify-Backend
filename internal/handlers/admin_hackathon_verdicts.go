@@ -153,11 +153,20 @@ func (h *AdminHackathonVerdictsHandler) List() fiber.Handler {
 			out = append(out, v)
 		}
 
+		// Stats are returned with the list rather than behind a separate
+		// call: the disagreement rate is a number someone should see every
+		// time they open the queue, not one they have to go looking for.
+		stats, statsErr := hackathon.ComputeJudgingStats(c.Context(), h.db.Pool, hackathonID)
+		if statsErr != nil {
+			slog.Warn("hackathon verdicts: stats", "error", statsErr)
+		}
+
 		// Shadow mode is reported alongside the list so the UI can say
 		// plainly that nothing here has been shown to anyone.
 		return c.JSON(fiber.Map{
 			"verdicts":    out,
 			"shadow_mode": hackathon.ShadowMode(c.Context(), h.db.Pool, hackathonID),
+			"stats":       stats,
 		})
 	}
 }

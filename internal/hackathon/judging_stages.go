@@ -409,19 +409,76 @@ func rawToJSONB(raw []byte) []byte {
 	return quoted
 }
 
-// RunCrossCheck is §5.4: the same prompt through a second provider.
+// PromptVersionCrossCheck tracks the cross-check prompt separately from the
+// judge's, so a change to one is traceable without implying the other moved.
+const PromptVersionCrossCheck = "crosscheck-v1"
+
+// RunCrossCheck is §5.6: the *same prompt and schema* through a *different
+// provider*.
 //
-// §5.4 is specific that this must be a *different* provider rather than a
-// second run of the same model: "a model's second run repeats its own blind
-// spots, so self-agreement is weak evidence. Cross-provider agreement is
-// strong. Same cost either way."
+// §5.6: "Do this rather than running the same model twice: a model's second
+// run repeats its own blind spots, so self-agreement is weak evidence.
+// Cross-provider agreement is strong. Same cost either way."
 //
-// Not yet implemented against a second provider - the ai package speaks only
-// to Anthropic today. Rather than run the same model twice and record it as
-// a cross-check, which would manufacture false agreement, this returns
-// "unavailable" so the verdict routes to escalation on its own.
-func RunCrossCheck(_ context.Context, _ db.DBPool, _ JudgeInput) (*JudgeVerdict, error) {
-	return nil, fmt.Errorf("cross-check needs a second provider, which is not configured")
+// The prompt and schema are shared with the judge deliberately - the point
+// is to ask the identical question. The *client* is not: see
+// ai.OpenAIClient's doc comment for why sharing transport or parsing code
+// between the two would reintroduce the common-cause failure this stage
+// exists to rule out.
+//
+// Returns nil with no error when no second provider is configured, which
+// NeedsEscalation reads as "no cross-check" and routes to a human. That is
+// the correct outcome; running Anthropic twice and calling it agreement
+// would not be.
+func RunCrossCheck(
+	ctx context.Context,
+	pool db.DBPool,
+	openai *ai.OpenAIClient,
+	in JudgeInput,
+) (*JudgeVerdict, error) {
+	if openai == nil || !openai.Enabled() {
+		return nil, nil
+	}
+
+	inj := DetectInjection(map[string]string{
+		"diff":            in.Diff,
+		"pr_body":         in.PRBody,
+		"commit_messages": in.CommitMessages,
+		"review_thread":   in.ReviewThread,
+		"maintainer_note": in.MaintainerNote,
+	})
+
+	model, _ := EffectiveValue(ctx, pool, &in.HackathonID, "model_cross_check")
+	if model == "" {
+		model = "gpt-4o"
+	}
+
+	system := judgingSystemPrompt + "\n" + judgingFewShotPlaceholder
+	user := buildJudgeUserContent(in)
+
+	var out JudgeVerdict
+	rec, err := openai.StructuredCallRecorded(ctx, model, system, user,
+		"record_judgement", "Record the judgement for this pull request.", judgeToolSchema, &out)
+
+	logModelCall(ctx, pool, modelCallLog{
+		HackathonID: in.HackathonID,
+		VerdictID:   in.VerdictID,
+		Stage:       "cross_check",
+		Provider:    "openai",
+		Model:       model,
+		PromptVer:   PromptVersionCrossCheck,
+		Record:      rec,
+		Err:         err,
+	})
+
+	if err != nil {
+		// A failed cross-check is not a disagreement and must not be scored
+		// as one - it is simply an absent second opinion, which escalates.
+		return nil, err
+	}
+
+	applyStructuralOverrides(&out, in, inj)
+	return &out, nil
 }
 
 // NeedsEscalation implements §5.4's routing.
