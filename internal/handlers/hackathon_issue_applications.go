@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -354,4 +355,107 @@ func (h *HackathonIssueApplicationsHandler) installationTokenFor(c *fiber.Ctx, p
 		return ""
 	}
 	return tok
+}
+
+// contributorIssueDTO is the contributor-visible view of a GrainHack issue.
+//
+// Deliberately a separate shape from hackathonIssueDTO (the maintainer/admin
+// one): this is readable by any signed-in user, so it carries only what
+// someone deciding whether to apply needs, and none of the admin fields like
+// flagged_for_admin or flagged_reason.
+type contributorIssueDTO struct {
+	ID                 uuid.UUID  `json:"id"`
+	HackathonID        uuid.UUID  `json:"hackathon_id"`
+	HackathonName      string     `json:"hackathon_name"`
+	ProjectID          uuid.UUID  `json:"project_id"`
+	IssueNumber        int        `json:"issue_number"`
+	Status             string     `json:"status"`
+	AcceptanceCriteria string     `json:"acceptance_criteria"`
+	DifficultyTier     string     `json:"difficulty_tier"`
+	PrimaryLanguage    string     `json:"primary_language"`
+	Reserved           bool       `json:"reserved"`
+	WindowOpensAt      *time.Time `json:"application_window_opens_at"`
+	WindowClosesAt     *time.Time `json:"application_window_closes_at"`
+}
+
+// GetForContributor handles GET /projects/:id/grainhack/:number.
+//
+// One round trip for everything the apply panel needs: the issue's GrainHack
+// state, how many people are already in the pool, and the caller's own
+// application if they have one. Returns 404 when the issue isn't in a
+// GrainHack, which is the common case and which the UI renders as "nothing
+// here" rather than an error.
+func (h *HackathonIssueApplicationsHandler) GetForContributor() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+		userIDStr, _ := c.Locals(auth.LocalUserID).(string)
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		}
+		projectID, err := uuid.Parse(c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
+		}
+		issueNumber, err := strconv.Atoi(c.Params("number"))
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_issue_number"})
+		}
+
+		var d contributorIssueDTO
+		var reserved *bool
+		err = h.db.Pool.QueryRow(c.Context(), `
+SELECT hi.id, hi.hackathon_id, h.name, hi.project_id, hi.issue_number, hi.status,
+       COALESCE(hi.acceptance_criteria, ''), COALESCE(hi.difficulty_tier, ''),
+       COALESCE(hi.primary_language, ''), hi.reserved,
+       hi.application_window_opens_at, hi.application_window_closes_at
+FROM hackathon_issues hi
+JOIN hackathons h ON h.id = hi.hackathon_id
+WHERE hi.project_id = $1 AND hi.issue_number = $2 AND hi.status <> 'removed'
+ORDER BY hi.created_at DESC
+LIMIT 1
+`, projectID, issueNumber).Scan(&d.ID, &d.HackathonID, &d.HackathonName, &d.ProjectID, &d.IssueNumber,
+			&d.Status, &d.AcceptanceCriteria, &d.DifficultyTier, &d.PrimaryLanguage, &reserved,
+			&d.WindowOpensAt, &d.WindowClosesAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not_a_hackathon_issue"})
+		}
+		if err != nil {
+			slog.Error("hackathon contributor issue", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "load_failed"})
+		}
+		d.Reserved = reserved != nil && *reserved
+
+		// Pool size is public within the event: it's what tells someone
+		// whether applying here is worth a slot of their attention.
+		var applicantCount int
+		_ = h.db.Pool.QueryRow(c.Context(), `
+SELECT count(*) FROM hackathon_issue_applications
+WHERE hackathon_issue_id = $1 AND status = 'applied'
+`, d.ID).Scan(&applicantCount)
+
+		var mine *hackathonIssueApplicationDTO
+		var m hackathonIssueApplicationDTO
+		err = h.db.Pool.QueryRow(c.Context(), `
+SELECT a.id, a.hackathon_id, h.name, a.hackathon_issue_id, hi.project_id, p.github_full_name,
+       hi.issue_number, a.status, a.gate_failure_reason, a.fit, hi.application_window_closes_at, a.created_at
+FROM hackathon_issue_applications a
+JOIN hackathons h ON h.id = a.hackathon_id
+JOIN hackathon_issues hi ON hi.id = a.hackathon_issue_id
+JOIN projects p ON p.id = hi.project_id
+WHERE a.hackathon_issue_id = $1 AND a.user_id = $2
+`, d.ID, userID).Scan(&m.ID, &m.HackathonID, &m.HackathonName, &m.IssueID, &m.ProjectID,
+			&m.RepoFullName, &m.IssueNumber, &m.Status, &m.GateFailure, &m.Fit, &m.WindowClosesAt, &m.CreatedAt)
+		if err == nil {
+			mine = &m
+		}
+
+		return c.JSON(fiber.Map{
+			"issue":           d,
+			"applicant_count": applicantCount,
+			"my_application":  mine,
+		})
+	}
 }

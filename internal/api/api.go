@@ -329,6 +329,9 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	// §4 assignment pipeline, contributor-facing.
 	hackathonIssueApps := handlers.NewHackathonIssueApplicationsHandler(cfg, deps.DB)
+	// Contributor-visible issue state - any signed-in user, unlike the
+	// owner-or-admin /projects/:id/hackathon-issues/:number above.
+	app.Get("/projects/:id/grainhack/:number", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.GetForContributor())
 	app.Post("/hackathon-issues/:id/apply", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Apply())
 	app.Get("/hackathon-issue-applications/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.Mine())
 	app.Get("/hackathon-assignments/me", auth.RequireAuth(cfg.JWTSecret), hackathonIssueApps.MyAssignments())
