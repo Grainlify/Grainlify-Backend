@@ -59,6 +59,7 @@ var SectionOrder = []string{
 	"Draw weights",
 	"Judging and payout",
 	"Maintainer pool",
+	"Founding pool",
 	"Chains",
 	"Models",
 }
@@ -172,6 +173,29 @@ var Definitions = map[string]SettingDef{
 	"maintainer_activity_full_prs":      {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
 	"maintainer_partial_release_pct":    {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
 	"maintainer_withheld_destination":   {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
+	// Founding Contributor Pool. One fixed pool, announced up front,
+	// distributed once at the first GrainHack's settlement. Share values are
+	// config rather than constants for the same reason every other rule here
+	// is: contributors plan around them, so they have to be publishable.
+	//
+	// The ratios matter more than the absolute numbers. Verification is worth
+	// a fortieth of a merged PR deliberately - at parity, most of the pool
+	// would flow to people who did nothing but create an account, starving
+	// the contributors the programme exists to attract. Signing up buys you a
+	// wave multiplier and a badge; the money follows merged code.
+	"founding_pool_usdc":                    {Key: "founding_pool_usdc", Type: "money", Default: "3000", Section: "Founding pool", Description: "Total USDC in the Founding Contributor Pool. Fixed and announced up front - liability can never exceed it, however many people take part.", ValidRange: "> 0", Active: true},
+	"founding_share_verified_account":       {Key: "founding_share_verified_account", Type: "float", Default: "0.1", Section: "Founding pool", Description: "Shares for verifying an account before the first GrainHack opens. Deliberately tiny: it registers you and grants your wave multiplier rather than paying you for existing.", ValidRange: ">= 0", Active: true},
+	"founding_share_merged_pr":              {Key: "founding_share_merged_pr", Type: "float", Default: "5", Section: "Founding pool", Description: "Shares for each of your merged pull requests during the first GrainHack. Uncapped, because producing these at scale requires the work the pool exists to pay for.", ValidRange: ">= 0", Active: true},
+	"founding_share_referral_verified":      {Key: "founding_share_referral_verified", Type: "float", Default: "0.5", Section: "Founding pool", Description: "Shares when someone you referred verifies their account. Capped in total - see founding_referral_verified_cap_shares.", ValidRange: ">= 0", Active: true},
+	"founding_share_referral_merged_pr":     {Key: "founding_share_referral_merged_pr", Type: "float", Default: "5", Section: "Founding pool", Description: "Shares when someone you referred ships a merged pull request during the first GrainHack. Uncapped: it cannot be faked cheaply.", ValidRange: ">= 0", Active: true},
+	"founding_referral_verified_cap_shares": {Key: "founding_referral_verified_cap_shares", Type: "float", Default: "10", Section: "Founding pool", Description: "Lifetime ceiling on shares from referrals that only verified. The single most important number here: above it, referrals pay only when the person actually ships code.", ValidRange: ">= 0", Active: true},
+	"founding_wave_founding_slots":          {Key: "founding_wave_founding_slots", Type: "int", Default: "100", Section: "Founding pool", Description: "Slots in the Founding wave. Frozen the moment the first member is assigned - a wave that widens after launch tells everyone the announced limits are not real.", ValidRange: ">= 1", Active: true},
+	"founding_wave_two_slots":               {Key: "founding_wave_two_slots", Type: "int", Default: "400", Section: "Founding pool", Description: "Slots in Wave 2, after the Founding wave fills. Frozen at first assignment alongside the Founding slots.", ValidRange: ">= 1", Active: true},
+	"founding_multiplier_founding":          {Key: "founding_multiplier_founding", Type: "float", Default: "1.5", Section: "Founding pool", Description: "Multiplier applied to a Founding member's whole share total.", ValidRange: "> 0", Active: true},
+	"founding_multiplier_wave_two":          {Key: "founding_multiplier_wave_two", Type: "float", Default: "1.25", Section: "Founding pool", Description: "Multiplier applied to a Wave 2 member's whole share total.", ValidRange: "> 0", Active: true},
+	"founding_multiplier_open":              {Key: "founding_multiplier_open", Type: "float", Default: "1.0", Section: "Founding pool", Description: "Multiplier for everyone joining after Wave 2 fills. Nobody is turned away - the open wave earns fully from merged pull requests.", ValidRange: "> 0", Active: true},
+	"founding_require_social_follow":        {Key: "founding_require_social_follow", Type: "bool", Default: "true", Section: "Founding pool", Description: "Whether following the social accounts is required to receive a share. An eligibility gate worth zero shares, re-checked at settlement rather than when earned.", Active: true},
+
 	"unclaimed_sweep_days":              {Key: "unclaimed_sweep_days", Type: "int", Default: "180", Section: "Chains", Description: "Days after settlement before unclaimed on-chain funds may be swept. Sweeping is time-locked and multisig-gated.", ValidRange: ">= 1"},
 	"unclaimed_sweep_destination":       {Key: "unclaimed_sweep_destination", Type: "enum", Default: "next_event_pool_same_chain", Section: "Chains", Description: "Where unclaimed funds go, always on the same chain. Published in advance.", ValidRange: "next_event_pool_same_chain|refund_to_sponsor"},
 	"empty_chain_pool_disposition":      {Key: "empty_chain_pool_disposition", Type: "enum", Default: "refund_to_sponsor", Section: "Chains", Description: "What happens to a chain's pool that ends with no accepted PRs. Refunded to that chain's sponsor via the same multisig, time-locked path as a cancelled event - not a separate mechanism.", ValidRange: "refund_to_sponsor|next_event_pool_same_chain"},
@@ -291,6 +315,9 @@ func EffectiveValues(ctx context.Context, pool db.DBPool, hackathonID *uuid.UUID
 func SetValue(ctx context.Context, exec pgExecutor, hackathonID *uuid.UUID, key, newValue string, actorID uuid.UUID) error {
 	if _, ok := Definitions[key]; !ok {
 		return fmt.Errorf("hackathon.SetValue: unknown config key %q", key)
+	}
+	if err := guardFoundingWaveBoundary(ctx, exec, key, newValue); err != nil {
+		return err
 	}
 
 	// The real prior EFFECTIVE value (override > global > factory default),

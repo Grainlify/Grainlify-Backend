@@ -24,7 +24,9 @@ import (
 // Four keys hit one or the other of these during this build, which is why
 // this is a test rather than a note asking the next person to check.
 func TestConfigDefinitions_ActiveFlagMatchesActualUse(t *testing.T) {
-	roots := []string{".", "../handlers", "../syncjobs", "../api", "../ingest"}
+	// ../founding is where the Founding pool keys are consumed; without it
+	// every one of them would look declared-but-inert.
+	roots := []string{".", "../handlers", "../syncjobs", "../api", "../ingest", "../founding"}
 
 	// Read every non-test Go file once; keys are then matched against the
 	// whole corpus rather than re-walking per key.

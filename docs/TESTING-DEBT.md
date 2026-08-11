@@ -200,3 +200,53 @@ What it would involve:
 Worth doing before an event runs across timezones, because "which day did this
 contribution land on" becomes a payout-adjacent question once windows open and
 close on dates.
+
+---
+
+# Testing debt: the points-programme freeze seam
+
+## What it is
+
+`internal/handlers/points_freeze.go` holds `pointsProgrammeFrozen`, a package
+var rather than a const purely so tests can flip it. The seam exists because
+freezing the fixed-rate points programme would otherwise have deleted live
+coverage of behaviour that still has to work if the freeze is ever lifted:
+redemption validation, the referral and social-follow award arithmetic, and
+the idempotency of both completion paths.
+
+Nine tests currently call `UnfreezePointsProgrammeForTest`.
+
+## Why it is debt and not a design
+
+The seam keeps code alive that nothing in production can reach. Every one of
+those nine tests exercises a path that is, by decision, dead: the programme is
+retired in favour of the Founding Contributor Pool, and the plan is not to
+lift the freeze. Coverage of unreachable code reads as coverage, which is
+worse than no coverage — it makes the suite look like it is testing more than
+it is, and it makes the freeze look provisional when it is not.
+
+## The deadline
+
+**If the freeze has not been lifted by 2026-02-11 — six months from the
+freeze — delete the seam and everything behind it:**
+
+- `pointsProgrammeFrozen`, `guardPointsAccrual`, `pointsGrantAmount` and
+  `pointsRedemptionsFrozen`
+- `points_freeze_export_test.go` in its entirety
+- the nine tests that call `UnfreezePointsProgrammeForTest`, and the award
+  branches they cover
+- most likely the points programme itself: `point_ledger`, `redemptions`,
+  the `/points/me` and `/redemptions*` endpoints, and the award paths in
+  `referrals.go` and `social_follow.go`
+
+Deleting is the cheap outcome here, which is why it gets a date. Production
+held zero points, zero referrals and zero redemptions when the freeze went in,
+so there is no data to migrate and nobody to notify — and that will not become
+more true by waiting. A flag nobody exercises, guarding a system nobody can
+reach, is exactly the thing that rots into "we were not sure why this was
+here" a year from now.
+
+What must be kept if the points tables are dropped: the **referral graph**
+and the **social-follow completions**. Those are not points-programme state —
+the Founding Contributor Pool reads both, as its referral shares and its
+eligibility gate.

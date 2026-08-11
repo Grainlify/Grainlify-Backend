@@ -224,9 +224,19 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	referrals := handlers.NewReferralsHandler(deps.DB)
 	app.Get("/referrals/me", auth.RequireAuth(cfg.JWTSecret), referrals.Me())
 
-	// Points balance (internal/handlers/points.go).
+	// Points balance (internal/handlers/points.go). The points programme is
+	// frozen - this stays readable so an existing balance is never hidden,
+	// but nothing grants and nothing redeems.
 	points := handlers.NewPointsHandler(deps.DB)
 	app.Get("/points/me", auth.RequireAuth(cfg.JWTSecret), points.Me())
+
+	// Founding Contributor Pool (internal/handlers/founding.go). Wave
+	// progress is public - it is the announcement's engine. Neither endpoint
+	// returns a money figure: §6 forbids any per-person number, and settlement
+	// results are stored and rendered nowhere.
+	foundingH := handlers.NewFoundingHandler(deps.DB)
+	app.Get("/founding/waves", foundingH.WaveProgress())
+	app.Get("/founding/me", auth.RequireAuth(cfg.JWTSecret), foundingH.MyShares())
 
 	// Social-follow program: proof-of-follow submissions + review (internal/handlers/social_follow.go).
 	socialFollow := handlers.NewSocialFollowHandler(deps.DB, notifSvc)

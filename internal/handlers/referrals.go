@@ -165,6 +165,14 @@ func maybeCompleteReferral(ctx context.Context, d *db.DB, notify *notifications.
 		return
 	}
 
+	// Founding Contributor Pool: this same verification transition assigns
+	// the permanent wave and grants the (tiny) verification share plus the
+	// referrer's capped verify-only share. Called from here so both
+	// verification paths - the status poll and the webhook - pick it up
+	// without either having to remember, exactly as referral completion
+	// already works. Best-effort; never fails verification.
+	onVerifiedForFoundingPool(ctx, d, referredUserID)
+
 	var referralID, referrerUserID uuid.UUID
 	err := d.Pool.QueryRow(ctx, `
 SELECT id, referrer_user_id FROM referrals
