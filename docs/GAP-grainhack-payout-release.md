@@ -1,113 +1,159 @@
-# Gap: nothing disburses a GrainHack payout
+# Gap: nothing disburses a payout
+
+Scope, not a build plan to execute yet. It blocks two things at once: GrainHack
+contributor and maintainer payouts, and the Founding Contributor Pool
+settlement, which by design routes through the same guarded path rather than a
+second mechanism.
 
 ## The problem
 
-GrainHack computes what everyone is owed and never pays it. The whole
-pipeline runs — draws assign, PRs are judged, buckets are set, `ComputePayout`
-divides the pool, `SettleMaintainerPool` scores repos and writes payout rows,
-`ReleaseDueHoldbacks` resolves holdbacks after 90 days — and at the end there
-is no code path that moves money.
+Everything computes. Nothing pays.
 
-The chokepoint that was built to gate a release has no caller:
+Draws assign, PRs are judged, `ComputePayout` divides the pool, a payout run
+row is written with every contributor's amount, `SettleMaintainerPool` scores
+repos and splits the holdback, `ReleaseDueHoldbacks` resolves it 90 days
+later, and `founding.Compute` divides the founding pool. At the end of all of
+that, no code path moves value.
+
+The chokepoint built for it has no caller:
 
 ```
 $ grep -rn "GuardPayoutRelease(" --include="*.go" internal/ cmd/ | grep -v _test
 internal/hackathon/judging_policy.go:59:   // GuardPayoutRelease is the single chokepoint...
 ```
 
-Its own doc comment describes it as "the single chokepoint every payout
-release must pass" and it is thoroughly tested. There is nothing on the other
-side of it.
+Its own comment calls it "the single chokepoint every payout release must
+pass". There is nothing on the other side of it.
 
-This is not the same shape of gap as the chain layer. There the feature is
-unreachable and obviously so. Here every visible artefact of a working payout
-system exists — amounts, holdback statuses, due dates, withheld destinations —
-and reads as though money moved.
+**Correction to the first version of this document:** it claimed there was no
+payout-run table and that one needed building. That was wrong.
+`hackathon_payout_runs` exists, `CloseAppealsAndRecompute` writes to it, and
+it already carries `unit_value`, `total_units`, floor state, `computed_by` and
+a `published` flag. The gap is narrower than first stated, and the flag is the
+clue: **`published` is never set to true by any code.** The schema anticipated
+this step; nobody built it.
 
 ## What exists
 
 | Piece | State |
 |---|---|
-| `ComputePayout` — units, `unit_value`, floor strategy, diminishing curve | Built, tested, called from the appeals recompute |
-| `PayoutPlan` per contributor | Computed |
-| `SettleMaintainerPool` — scores, gross, holdback split, due date | Built, called on the transition to `settled` |
-| `ReleaseDueHoldbacks` — resolves due holdbacks against repo activity | Built, wired into the assignment runner's periodic loop |
-| `GuardPayoutRelease` — confirm flag, actor, run id, shadow mode, phase, appeals closed | Built, tested, **never called** |
-| Anything that transfers value | **Does not exist** |
+| `hackathon_payout_runs` — pool, units, unit value, floor, `published` flag | Written on every appeals-close recompute; `published` never set |
+| `hackathon_verdicts.payout_amount` / `payout_run_id` / `effective_units` | Written per contributor by the same recompute |
+| `hackathon_maintainer_payouts` — gross, holdback, released, withheld, due date | Written at settle; resolved by the holdback job |
+| `founding_settlements` / `founding_settlement_lines` | Written by `founding.Compute`; never released |
+| `GuardPayoutRelease` — confirm flag, actor, run id, not-shadow, phase settled, appeals closed | Built, tested, **never called** |
+| Anything that moves value | **Does not exist** |
 
 ## What is missing
 
-Ordered by what blocks what. Sizing is deliberately coarse — the point is the
-shape of the gap, not an estimate to hold anyone to.
+### 1. The decision: what "paid" means for event one
 
-### 1. A payout run as a stored object
+Answer this before writing anything; everything else is shaped by it.
 
-`GuardPayoutRelease` takes a `PayoutRunID`, and there is no table of payout
-runs. Today `ComputePayout` returns a plan that is used and dropped. A release
-needs the plan it is releasing to be a row someone can point at afterwards:
-which verdicts, which amounts, which `unit_value`, computed when, from which
-config snapshot.
+There is an existing precedent in this codebase, and it is the one to copy.
+Point redemptions were **manually reviewed and manually sent**: an admin
+listed pending requests, sent USDC out of band, and marked the row paid
+(`ListAdmin` / `MarkPaid` / `Reject`). No automated transfer ever existed here
+— which means "build a disbursement path" has never actually meant "build a
+transfer engine" on this platform, and it should not start meaning that now.
 
-Without this there is no answer to "what exactly did we pay, and why that
-number" six weeks later, which is the same requirement the draw and verdict
-records already meet.
+Three options, in increasing cost:
 
-### 2. A decision on what "paid" means off-chain
+- **Manual send, recorded release (recommended for event one).** An admin
+  triggers a release, the guard runs, the run is marked published with actor
+  and timestamp, and a per-contributor payout list is exported. The USDC send
+  itself is a human operation. Smallest honest version; matches the redemption
+  precedent; auditable.
+- **Semi-automated via the existing Stellar path.** Reuse whatever sends
+  redemption USDC today, driven from the payout list. Only worth it once the
+  volume makes manual sending error-prone.
+- **On-chain escrow and pull-based claims.** Already specified in the on-chain
+  spec, and unreachable: nothing can create a chain pool
+  (`GAP-grainhack-first-chain-event.md`). Not a candidate for event one.
 
-This is the question to answer before writing anything. The on-chain spec
-answers it for chains — escrow, Merkle root, contributor claims — but no event
-can run on a chain, so the first paying GrainHack will settle off-chain. The
-options are materially different in effort:
+### 2. Where `GuardPayoutRelease` gets called from
 
-- **Reuse the redemption path.** Contributors already receive USDC on Stellar
-  through the points redemption flow, with KYC and manual team review. A
-  GrainHack payout could credit that same balance. Cheapest, and it inherits
-  KYC, review and payout mechanics that already work.
-- **A separate GrainHack disbursement.** Its own ledger and its own transfer
-  path. More work, and duplicates review and KYC unless deliberately shared.
-- **Pay by hand for event one.** The AI spec's own rollout suggests this. Then
-  the missing piece is a report and an audited "marked paid" action rather than
-  a transfer.
+One admin endpoint, and only one, so the guard cannot be bypassed by a second
+path added later:
 
-The third is probably right for the first event, but it still needs 1, 3 and 4.
+```
+POST /admin/hackathons/:id/payout-runs/:runId/release   { "confirm": true }
+```
 
-### 3. The release action itself
+It must:
 
-An admin-triggered endpoint that calls `GuardPayoutRelease`, and on success
-marks the run released and records who did it and when. The guard is written;
-this is the caller it was designed for, plus persistence of the outcome.
+- call `GuardPayoutRelease` first and refuse on any error, unchanged
+- set `published = true`, `published_at`, and the releasing actor **in the same
+  transaction** as whatever it marks paid
+- be idempotent on `published` — a double-fired release is the one failure here
+  with no clean recovery, so re-releasing an already-published run must be a
+  no-op rather than a second event
+- write an audit row, like every other admin action
 
-Must be idempotent. A double-fired release on a set of payouts is the one
-failure here with no clean recovery.
+`GuardPayoutRelease` itself does not change. It already checks the five things
+that matter and fails closed on all of them.
 
-### 4. Maintainer payouts have the same hole
+### 3. The founding settlement release
 
-`hackathon_maintainer_payouts` carries gross, holdback, released and withheld
-amounts, and `ReleaseDueHoldbacks` moves rows to `released` /
-`partially_released` / `withheld`. All of it is accounting. Nothing pays the
-maintainer either, and the holdback release path does not go through
-`GuardPayoutRelease` at all — worth deciding whether it should.
+`founding_settlements.released_at` exists and is never set. The founding pool
+settles through the same endpoint and the same guard — not a parallel one.
+That was a deliberate constraint in the redesign and it should survive
+implementation: two release paths means two places to forget a check.
+
+Note the ordering constraint: the founding pool is divided at the **first
+GrainHack's settlement**, so its release depends on that event reaching
+`settled` with appeals closed — the same precondition the guard already
+enforces.
+
+### 4. Maintainer payouts and the holdback
+
+`ReleaseDueHoldbacks` moves rows to `released` / `partially_released` /
+`withheld` on a timer plus repo activity. That is accounting; nothing pays the
+maintainer either.
+
+Open question worth deciding rather than inheriting: **should the holdback
+release route through `GuardPayoutRelease`?** It currently does not, and it
+fires from a background job rather than an admin action. Arguments both ways —
+the guard's phase/appeals checks are meaningless 90 days after settlement, but
+"every payout passes one chokepoint" is worth more than the checks themselves.
 
 ### 5. Contributors cannot see an amount
 
-There is no contributor-facing endpoint that returns what someone earned. The
-verdict view shows the bucket, criteria and reasoning; it does not show money.
-Whatever "paid" comes to mean, a contributor needs to see the number before it
-arrives, and to be told it exists.
+No endpoint returns what anyone earned. For GrainHack that is a gap; for the
+founding pool it is **deliberate and must stay that way** until a release path
+exists — §6 forbids publishing a per-person figure, and a source-scanning
+guard test currently fails the build if a founding settlement figure reaches a
+handler or notification.
 
-## Recommended sequence
+So this splits:
 
-1. Decide question 2. Everything else is shaped by it.
-2. Build the payout run object (1) — needed under every option, and it is the
-   record an appeal argues against.
-3. Build the release action (3) on top of the existing guard.
-4. Expose the amount to contributors (5).
-5. Decide whether the maintainer holdback release routes through the same
-   guard (4).
+- GrainHack payout amounts: publishable after results, already stored per
+  verdict, needs an endpoint.
+- Founding shares: share counts are already exposed at `/founding/me`; the
+  converted amount stays hidden until there is something real behind it.
+
+## The smallest honest version
+
+For one event, in order:
+
+1. Decide (1) — manual send, recorded release.
+2. Build the release endpoint (2): guard, mark published, audit, idempotent.
+3. Export a payout list from the run — login, amount, and for the founding
+   pool the wave multiplier that produced it, so a recipient can be answered.
+4. Send manually, out of band.
+5. Expose GrainHack payout amounts to contributors after release (5).
+
+That is a few days of work and it is honest: it does not claim to transfer
+anything it cannot, and every number it emits is one that was already computed
+and can be reproduced from stored rows.
+
+What it deliberately leaves out: automated transfers, on-chain escrow, and any
+per-person founding figure. Each of those is a larger decision than the
+release step itself, and none of them blocks event one.
 
 ## Until then
 
-`judging_shadow_mode` defaults to `true` and now blocks the transition to
-live, so an event cannot quietly go live and publish results it has no way to
-honour. That guard is a stopgap for exactly this gap and should stay until
-payouts release.
+`judging_shadow_mode` defaults to `true` and blocks the transition to live, so
+an event cannot quietly go live and publish results it has no way to honour.
+That guard is a stopgap for exactly this gap and should stay until payouts
+release.
