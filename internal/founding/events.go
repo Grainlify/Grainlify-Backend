@@ -70,8 +70,83 @@ func OnVerified(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[s
 	}
 }
 
-// OnMergedPR is called when a contributor's pull request is merged during the
-// first GrainHack.
+// GrantMergedPRShares awards merged-PR shares for a whole event, once, at
+// appeals close.
+//
+// **Two conditions, both required: the pull request is merged, and the final
+// post-appeal verdict accepted it.** Neither alone is sound:
+//
+//   - Merge alone is a maintainer-controllable signal. A maintainer can merge
+//     anything, and the maintainer-pool scoring already excludes every metric
+//     a maintainer can move by themselves for exactly this reason.
+//   - Verdict alone is not final. An appeal can change a bucket, so granting
+//     at verdict time would mean building a clawback path - and clawing back
+//     a share somebody has already been shown is precisely the problem the
+//     appeals recompute exists to avoid.
+//
+// Hooked to the existing appeals-close recompute rather than to a new event,
+// because that is the one moment at which nothing underneath can still move:
+// every appeal has a human answer, the buckets are final, and the pool
+// arithmetic has been redone. One grant, at the point of no further change.
+//
+// Safe to re-run. The unique index on (user, reason, source) makes a repeat a
+// no-op, which matters because the recompute can be retried and because a
+// partial failure here is best-effort - a missed grant is recoverable by
+// running this again, since the source data is the verdict rows themselves.
+//
+// The consequence, which is documented rather than hidden: **merged-PR shares
+// do not appear until after appeals close.** That is correct - nobody's share
+// should be visible while it can still move - but it does mean a contributor
+// sees a merged pull request and no shares for it until the window shuts.
+func GrantMergedPRShares(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID, cfg map[string]string) (int, error) {
+	rows, err := pool.Query(ctx, `
+SELECT v.id, v.user_id
+FROM hackathon_verdicts v
+JOIN github_pull_requests pr
+  ON pr.project_id = v.project_id AND pr.number = v.pr_number
+WHERE v.hackathon_id = $1
+  AND pr.merged_at_github IS NOT NULL
+  AND v.final_bucket IS NOT NULL
+  AND v.final_bucket <> 'rejected'
+  AND v.user_id IS NOT NULL
+ORDER BY v.id
+`, hackathonID)
+	if err != nil {
+		return 0, fmt.Errorf("founding.GrantMergedPRShares: load verdicts: %w", err)
+	}
+	defer rows.Close()
+
+	type award struct {
+		verdictID uuid.UUID
+		userID    uuid.UUID
+	}
+	var awards []award
+	for rows.Next() {
+		var a award
+		if err := rows.Scan(&a.verdictID, &a.userID); err != nil {
+			return 0, fmt.Errorf("founding.GrantMergedPRShares: scan: %w", err)
+		}
+		awards = append(awards, a)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	granted := 0
+	for _, a := range awards {
+		// The verdict id is the source ref on both sides, so a contributor's
+		// share and their referrer's share for the same pull request are each
+		// recorded once and cannot double on a re-run.
+		OnMergedPR(ctx, pool, a.userID, a.verdictID, cfg)
+		granted++
+	}
+	return granted, nil
+}
+
+// OnMergedPR grants the shares for one accepted, merged pull request.
+//
+// Called by GrantMergedPRShares at appeals close rather than directly from a
+// merge or a verdict - see that function for why both conditions are needed.
 //
 // Grants the contributor their merged-PR shares and, separately, grants their
 // referrer the referral-merged-PR shares. The referrer's side is uncapped on

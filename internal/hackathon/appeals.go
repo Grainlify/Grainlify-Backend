@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/founding"
 )
 
 // AI-specs.md §6.
@@ -416,5 +418,25 @@ UPDATE hackathons SET appeals_closed_at = now(), updated_at = now() WHERE id = $
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: commit: %w", err)
 	}
+
+	// Founding Contributor Pool: merged-PR shares are granted here and only
+	// here, because this is the one moment nothing underneath can still move -
+	// every appeal has a human answer and the buckets are final. Granting at
+	// verdict time would need a clawback path for upheld appeals; granting at
+	// merge would pay on a signal a maintainer controls alone.
+	//
+	// After the commit and best-effort: the recompute is the authoritative
+	// outcome and is already durable, so a failure here must not undo it. A
+	// missed grant is recoverable by re-running, since the source is the
+	// verdict rows and the (user, reason, source) index makes a repeat a
+	// no-op.
+	if n, ferr := founding.GrantMergedPRShares(ctx, pool, hackathonID, cfg); ferr != nil {
+		slog.Warn("founding: merged-PR share grant failed at appeals close",
+			"hackathon_id", hackathonID, "error", ferr)
+	} else if n > 0 {
+		slog.Info("founding: merged-PR shares granted at appeals close",
+			"hackathon_id", hackathonID, "verdicts", n)
+	}
+
 	return plan, nil
 }

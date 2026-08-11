@@ -250,3 +250,35 @@ What must be kept if the points tables are dropped: the **referral graph**
 and the **social-follow completions**. Those are not points-programme state —
 the Founding Contributor Pool reads both, as its referral shares and its
 eligibility gate.
+
+---
+
+# Not debt: the founding wave advisory lock is a correctness dependency
+
+`founding.AssignWave` allocates sequence numbers under
+`pg_advisory_xact_lock`, then reads `max(sequence_number) + 1`. That looks
+like a hand-rolled sequence and it is tempting to "simplify" it into a
+Postgres `SEQUENCE` or an `IDENTITY` column. **Do not.**
+
+A Postgres sequence does not roll back. Two verifications landing together
+where one fails leaves members 1, 2, 4 — sequence 3 is burned and can never be
+issued. That is not a cosmetic gap:
+
+- **The wave boundary is a count.** Founding is "the first 100", so a burned
+  number silently shrinks the tier to 99 seats. The scarcity was announced;
+  the seat quietly does not exist.
+- **Nobody can hold it.** The Founding tier's entire value is that it is
+  countable and closed. A member who never existed at position 3 is not
+  recoverable later, because membership is permanent and assigned in order.
+- **It is invisible until someone counts.** Nothing errors. The programme
+  runs, the badge is issued, and the discrepancy surfaces only if somebody
+  reconciles the member count against the announced slot count — most likely
+  in public, in a complaint.
+
+`TestAssignWave_ConcurrentAssignmentsStayGapless` runs twelve concurrent
+assignments and asserts sequences 1..12 all exist exactly once. If that test
+is ever failing after a change here, the change is wrong — do not relax the
+assertion.
+
+The lock is per-programme rather than per-user deliberately: the invariant is
+global ordering, which cannot be enforced by a lock scoped to one member.
