@@ -257,61 +257,40 @@ func TestAdminBootstrapAdmin(t *testing.T) {
 		}
 	})
 
-	t.Run("correct token promotes a contributor to admin", func(t *testing.T) {
+	t.Run("promotes only while no admin exists, and refuses afterwards", func(t *testing.T) {
+		// Bootstrap used to promote any authenticated caller who presented the
+		// shared token, permanently and unrecorded - a self-service admin
+		// grant. It now only ever creates the FIRST admin.
+		if _, err := d.Pool.Exec(context.Background(),
+			`UPDATE users SET role = 'contributor' WHERE role = 'admin'`); err != nil {
+			t.Fatalf("clear admins: %v", err)
+		}
+
 		uid := adminSuiteInsertUser(t, d, "contributor")
 		tok := adminSuiteToken(t, uid, "contributor")
+		bootstrap := func() int {
+			req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			req.Header.Set("X-Admin-Bootstrap-Token", goodToken)
+			resp, err := app.Test(req, -1)
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+			return resp.StatusCode
+		}
 
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("X-Admin-Bootstrap-Token", goodToken)
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
+		if got := bootstrap(); got != fiber.StatusOK {
+			t.Fatalf("first bootstrap status = %d, want %d on an install with no admin", got, fiber.StatusOK)
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != fiber.StatusOK {
-			t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body["ok"] != true {
-			t.Errorf("ok = %v, want true", body["ok"])
-		}
-		if body["role"] != "admin" {
-			t.Errorf("role = %v, want admin", body["role"])
-		}
-		tokenStr, _ := body["token"].(string)
-		if tokenStr == "" {
-			t.Errorf("expected a non-empty fresh JWT in response")
-		}
-		if role := adminSuiteUserRole(t, d, uid); role != "admin" {
-			t.Errorf("role in DB = %q, want admin (promotion did not persist)", role)
-		}
-	})
 
-	t.Run("already-admin caller gets a fresh token without error", func(t *testing.T) {
-		uid := adminSuiteInsertUser(t, d, "admin")
-		tok := adminSuiteToken(t, uid, "admin")
-
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("X-Admin-Bootstrap-Token", goodToken)
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != fiber.StatusOK {
-			t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body["role"] != "admin" {
-			t.Errorf("role = %v, want admin", body["role"])
+		// The same caller, the same correct token, immediately after: refused,
+		// because an admin now exists. Further admins come from an existing
+		// admin's attributed decision.
+		second := adminSuiteInsertUser(t, d, "contributor")
+		tok = adminSuiteToken(t, second, "contributor")
+		if got := bootstrap(); got != fiber.StatusForbidden {
+			t.Errorf("second bootstrap status = %d, want %d once an admin exists", got, fiber.StatusForbidden)
 		}
 	})
 

@@ -371,82 +371,89 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/grainhack/verdicts/:id/appeal", auth.RequireAuth(cfg.JWTSecret), hackathonAppeals.Appeal())
 
 	admin := handlers.NewAdminHandler(cfg, deps.DB)
+	// Admin authorisation reads the role from the database on every request
+	// rather than trusting the JWT's role claim, so removing someone's admin
+	// takes effect immediately instead of when their token expires. Uncached
+	// by design - see auth.RequireLiveRole.
+	liveRole := handlers.NewRoleLookup(deps.DB)
+	requireAdmin := auth.RequireLiveRole(liveRole, "admin")
+
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
-	adminGroup.Get("/users", auth.RequireRole("admin"), admin.ListUsers())
-	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), admin.SetUserRole())
+	adminGroup.Get("/users", requireAdmin, admin.ListUsers())
+	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
 
-	adminGroup.Get("/social-follow/submissions", auth.RequireRole("admin"), socialFollow.ListSubmissions())
-	adminGroup.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), socialFollow.Approve())
-	adminGroup.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), socialFollow.Reject())
+	adminGroup.Get("/social-follow/submissions", requireAdmin, socialFollow.ListSubmissions())
+	adminGroup.Post("/social-follow/submissions/:id/approve", requireAdmin, socialFollow.Approve())
+	adminGroup.Post("/social-follow/submissions/:id/reject", requireAdmin, socialFollow.Reject())
 	// Eligibility is re-read at settlement, so an approval has to be
 	// withdrawable after the fact.
-	adminGroup.Post("/social-follow/submissions/:id/revoke", auth.RequireRole("admin"), socialFollow.Revoke())
+	adminGroup.Post("/social-follow/submissions/:id/revoke", requireAdmin, socialFollow.Revoke())
 
-	adminGroup.Get("/redemptions", auth.RequireRole("admin"), redemptions.ListAdmin())
-	adminGroup.Post("/redemptions/:id/mark-paid", auth.RequireRole("admin"), redemptions.MarkPaid())
-	adminGroup.Post("/redemptions/:id/reject", auth.RequireRole("admin"), redemptions.Reject())
+	adminGroup.Get("/redemptions", requireAdmin, redemptions.ListAdmin())
+	adminGroup.Post("/redemptions/:id/mark-paid", requireAdmin, redemptions.MarkPaid())
+	adminGroup.Post("/redemptions/:id/reject", requireAdmin, redemptions.Reject())
 
 	ecosystemsAdmin := handlers.NewEcosystemsAdminHandler(deps.DB)
-	adminGroup.Get("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.List())
-	adminGroup.Get("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.GetByID())
-	adminGroup.Post("/ecosystems", auth.RequireRole("admin"), ecosystemsAdmin.Create())
-	adminGroup.Put("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.Update())
-	adminGroup.Delete("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.Delete())
+	adminGroup.Get("/ecosystems", requireAdmin, ecosystemsAdmin.List())
+	adminGroup.Get("/ecosystems/:id", requireAdmin, ecosystemsAdmin.GetByID())
+	adminGroup.Post("/ecosystems", requireAdmin, ecosystemsAdmin.Create())
+	adminGroup.Put("/ecosystems/:id", requireAdmin, ecosystemsAdmin.Update())
+	adminGroup.Delete("/ecosystems/:id", requireAdmin, ecosystemsAdmin.Delete())
 
 	// Open Source Week (admin)
 	oswAdmin := handlers.NewOpenSourceWeekAdminHandler(deps.DB)
-	adminGroup.Get("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.List())
-	adminGroup.Post("/open-source-week/events", auth.RequireRole("admin"), oswAdmin.Create())
-	adminGroup.Delete("/open-source-week/events/:id", auth.RequireRole("admin"), oswAdmin.Delete())
+	adminGroup.Get("/open-source-week/events", requireAdmin, oswAdmin.List())
+	adminGroup.Post("/open-source-week/events", requireAdmin, oswAdmin.Create())
+	adminGroup.Delete("/open-source-week/events/:id", requireAdmin, oswAdmin.Delete())
 
 	// GrainHack (admin)
 	adminHackathons := handlers.NewAdminHackathonsHandler(deps.DB)
-	adminGroup.Post("/hackathons", auth.RequireRole("admin"), adminHackathons.Create())
-	adminGroup.Get("/hackathons", auth.RequireRole("admin"), adminHackathons.List())
-	adminGroup.Get("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.GetByID())
-	adminGroup.Put("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.Update())
-	adminGroup.Post("/hackathons/:id/transition", auth.RequireRole("admin"), adminHackathons.Transition())
+	adminGroup.Post("/hackathons", requireAdmin, adminHackathons.Create())
+	adminGroup.Get("/hackathons", requireAdmin, adminHackathons.List())
+	adminGroup.Get("/hackathons/:id", requireAdmin, adminHackathons.GetByID())
+	adminGroup.Put("/hackathons/:id", requireAdmin, adminHackathons.Update())
+	adminGroup.Post("/hackathons/:id/transition", requireAdmin, adminHackathons.Transition())
 
 	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(cfg, deps.DB, notifSvc)
-	adminGroup.Get("/hackathons/:id/applications", auth.RequireRole("admin"), adminHackathonApps.ListAdmin())
-	adminGroup.Get("/hackathons/applications/:appId/signals", auth.RequireRole("admin"), adminHackathonApps.Signals())
-	adminGroup.Post("/hackathons/applications/:appId/accept", auth.RequireRole("admin"), adminHackathonApps.Accept())
-	adminGroup.Post("/hackathons/applications/:appId/reject", auth.RequireRole("admin"), adminHackathonApps.Reject())
-	adminGroup.Post("/hackathons/applications/:appId/request-more-info", auth.RequireRole("admin"), adminHackathonApps.RequestMoreInfo())
+	adminGroup.Get("/hackathons/:id/applications", requireAdmin, adminHackathonApps.ListAdmin())
+	adminGroup.Get("/hackathons/applications/:appId/signals", requireAdmin, adminHackathonApps.Signals())
+	adminGroup.Post("/hackathons/applications/:appId/accept", requireAdmin, adminHackathonApps.Accept())
+	adminGroup.Post("/hackathons/applications/:appId/reject", requireAdmin, adminHackathonApps.Reject())
+	adminGroup.Post("/hackathons/applications/:appId/request-more-info", requireAdmin, adminHackathonApps.RequestMoreInfo())
 
-	adminGroup.Get("/hackathons/:id/issues", auth.RequireRole("admin"), hackathonIssues.ListForHackathon())
+	adminGroup.Get("/hackathons/:id/issues", requireAdmin, hackathonIssues.ListForHackathon())
 
 	// §4 assignment pipeline, admin-facing. simulate-draw runs the full
 	// pipeline against real applicants and writes no assignment.
 	adminDraws := handlers.NewAdminHackathonDrawsHandler(deps.DB)
-	adminGroup.Post("/hackathon-issues/:id/simulate-draw", auth.RequireRole("admin"), adminDraws.Simulate())
-	adminGroup.Get("/hackathons/:id/draws", auth.RequireRole("admin"), adminDraws.ListDraws())
-	adminGroup.Get("/hackathons/:id/assignments", auth.RequireRole("admin"), adminDraws.ListAssignments())
+	adminGroup.Post("/hackathon-issues/:id/simulate-draw", requireAdmin, adminDraws.Simulate())
+	adminGroup.Get("/hackathons/:id/draws", requireAdmin, adminDraws.ListDraws())
+	adminGroup.Get("/hackathons/:id/assignments", requireAdmin, adminDraws.ListAssignments())
 
 	// §5 judging - the human review interface. In shadow mode (the default)
 	// every verdict is reviewed by hand, so this is the primary surface.
 	adminVerdicts := handlers.NewAdminHackathonVerdictsHandler(deps.DB)
-	adminGroup.Get("/hackathons/:id/verdicts", auth.RequireRole("admin"), adminVerdicts.List())
-	adminGroup.Get("/hackathon-verdicts/:id", auth.RequireRole("admin"), adminVerdicts.Get())
-	adminGroup.Post("/hackathon-verdicts/:id/override", auth.RequireRole("admin"), adminVerdicts.Override())
+	adminGroup.Get("/hackathons/:id/verdicts", requireAdmin, adminVerdicts.List())
+	adminGroup.Get("/hackathon-verdicts/:id", requireAdmin, adminVerdicts.Get())
+	adminGroup.Post("/hackathon-verdicts/:id/override", requireAdmin, adminVerdicts.Override())
 
 	// §6 appeals. The admin queue carries the full verdict with each appeal so
 	// a reviewer answers it with both model verdicts and the diff in front of
 	// them, as the spec requires.
-	adminGroup.Get("/hackathons/:id/appeals", auth.RequireRole("admin"), hackathonAppeals.AdminList())
-	adminGroup.Post("/hackathon-appeals/:id/decide", auth.RequireRole("admin"), hackathonAppeals.AdminDecide())
+	adminGroup.Get("/hackathons/:id/appeals", requireAdmin, hackathonAppeals.AdminList())
+	adminGroup.Post("/hackathon-appeals/:id/decide", requireAdmin, hackathonAppeals.AdminDecide())
 
 	// §2.3 step 4 - out-of-band assignments surfaced for review. Advisory:
 	// crossing the threshold flags an org, it does not penalise one.
 	adminOOB := handlers.NewAdminHackathonOOBHandler(deps.DB)
-	adminGroup.Get("/hackathons/:id/oob-assignments", auth.RequireRole("admin"), adminOOB.List())
+	adminGroup.Get("/hackathons/:id/oob-assignments", requireAdmin, adminOOB.List())
 
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(deps.DB)
-	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())
-	adminGroup.Put("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.Update())
-	adminGroup.Post("/hackathon-config/reset", auth.RequireRole("admin"), adminHackathonConfig.Reset())
-	adminGroup.Get("/hackathon-config/audit", auth.RequireRole("admin"), adminHackathonConfig.Audit())
+	adminGroup.Get("/hackathon-config", requireAdmin, adminHackathonConfig.List())
+	adminGroup.Put("/hackathon-config", requireAdmin, adminHackathonConfig.Update())
+	adminGroup.Post("/hackathon-config/reset", requireAdmin, adminHackathonConfig.Reset())
+	adminGroup.Get("/hackathon-config/audit", requireAdmin, adminHackathonConfig.Audit())
 
 	// Notifications (in-app list/read + per-type email/in-app preferences)
 	notif := handlers.NewNotificationsHandler(deps.DB)
