@@ -181,6 +181,9 @@ func TestAttachReferral_SelfReferralIsNoOp(t *testing.T) {
 }
 
 func TestMaybeCompleteReferral_CompletesPendingAndAwardsPoints(t *testing.T) {
+	// Covers the award arithmetic itself, which must keep working if the
+	// freeze is lifted. The frozen behaviour has its own tests.
+	UnfreezePointsProgrammeForTest(t)
 	d := referralsTestDB(t)
 	referrerID := referralsCreateUser(t, d)
 	referredID := referralsCreateUser(t, d)
@@ -224,6 +227,9 @@ func TestMaybeCompleteReferral_NoPendingReferralIsNoOp(t *testing.T) {
 }
 
 func TestMaybeCompleteReferral_SecondCallIsIdempotent(t *testing.T) {
+	// Covers the award arithmetic itself, which must keep working if the
+	// freeze is lifted. The frozen behaviour has its own tests.
+	UnfreezePointsProgrammeForTest(t)
 	d := referralsTestDB(t)
 	referrerID := referralsCreateUser(t, d)
 	referredID := referralsCreateUser(t, d)

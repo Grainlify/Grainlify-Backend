@@ -180,11 +180,14 @@ WHERE referred_user_id = $1 AND status = 'pending'
 	// Guards against a race between the webhook and the status-poll path
 	// both observing the "verified" transition at nearly the same time -
 	// only one Exec wins the pending->completed move.
+	// The completion is still recorded while the programme is frozen - the
+	// Founding Contributor Pool reads this graph - but it awards nothing.
+	awarded := pointsGrantAmount(referralPointsPerCompletion)
 	tag, err := d.Pool.Exec(ctx, `
 UPDATE referrals
 SET status = 'completed', points_awarded = $1, completed_at = now()
 WHERE id = $2 AND status = 'pending'
-`, referralPointsPerCompletion, referralID)
+`, awarded, referralID)
 	if err != nil {
 		slog.Warn("referrals: completion update failed", "referral_id", referralID, "error", err)
 		return
@@ -193,13 +196,19 @@ WHERE id = $2 AND status = 'pending'
 		return
 	}
 
-	if err := insertLedgerEntry(ctx, d.Pool, referrerUserID, referralPointsPerCompletion, "referral", &referralID); err != nil {
-		slog.Warn("referrals: ledger entry failed", "referral_id", referralID, "error", err)
+	if awarded > 0 {
+		if err := insertLedgerEntry(ctx, d.Pool, referrerUserID, awarded, "referral", &referralID); err != nil {
+			slog.Warn("referrals: ledger entry failed", "referral_id", referralID, "error", err)
+		}
 	}
 
-	notify.Notify(ctx, referrerUserID, notifications.TypeReferralCompleted,
-		"Referral reward earned",
-		fmt.Sprintf("Someone you referred completed verification. You earned %d points.", referralPointsPerCompletion),
-		"/settings?tab=referrals",
-	)
+	// Never promise points that were not granted. While the programme is
+	// frozen the referral is real and still counts toward the Founding
+	// Contributor Pool, so the notification says that instead of a number.
+	title, body := "Referral reward earned", fmt.Sprintf("Someone you referred completed verification. You earned %d points.", awarded)
+	if awarded == 0 {
+		title = "Someone you referred is verified"
+		body = "They completed verification, and your referral is recorded. Rewards are moving to the Founding Contributor Pool - we'll share the details before it opens."
+	}
+	notify.Notify(ctx, referrerUserID, notifications.TypeReferralCompleted, title, body, "/settings?tab=referrals")
 }

@@ -44,6 +44,9 @@ VALUES ($1, $2, 'data:image/png;base64,x', 'approved')
 }
 
 func TestMaybeCompleteSocialFollow_AwardsOnceAllThreeApproved(t *testing.T) {
+	// Covers the award arithmetic itself, which must keep working if the
+	// freeze is lifted. The frozen behaviour has its own tests.
+	UnfreezePointsProgrammeForTest(t)
 	d := referralsTestDB(t)
 	userID := referralsCreateUser(t, d)
 
@@ -80,6 +83,9 @@ SELECT amount FROM point_ledger WHERE user_id = $1 AND reason = 'social_follow'
 }
 
 func TestMaybeCompleteSocialFollow_SecondCallDoesNotDoubleAward(t *testing.T) {
+	// Covers the award arithmetic itself, which must keep working if the
+	// freeze is lifted. The frozen behaviour has its own tests.
+	UnfreezePointsProgrammeForTest(t)
 	d := referralsTestDB(t)
 	userID := referralsCreateUser(t, d)
 

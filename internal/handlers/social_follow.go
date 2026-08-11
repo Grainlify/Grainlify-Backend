@@ -317,11 +317,17 @@ SELECT count(*) FROM social_follow_submissions WHERE user_id = $1 AND status = '
 
 	// PRIMARY KEY on user_id is the guard: only the first of any concurrent
 	// approvals that crosses the threshold actually inserts a row.
+	// Still recorded while the programme is frozen, and awards nothing.
+	// Following becomes an *eligibility* requirement for the Founding
+	// Contributor Pool rather than a payment, so the completion record is
+	// what that check will read - and unlike a payment it cannot be farmed,
+	// because there is no longer anything to collect.
+	awarded := pointsGrantAmount(socialFollowPointsPerCompletion)
 	tag, err := d.Pool.Exec(ctx, `
 INSERT INTO social_follow_completions (user_id, points_awarded)
 VALUES ($1, $2)
 ON CONFLICT (user_id) DO NOTHING
-`, userID, socialFollowPointsPerCompletion)
+`, userID, awarded)
 	if err != nil {
 		slog.Warn("social_follow: completion insert failed", "user_id", userID, "error", err)
 		return
@@ -330,13 +336,17 @@ ON CONFLICT (user_id) DO NOTHING
 		return // already completed
 	}
 
-	if err := insertLedgerEntry(ctx, d.Pool, userID, socialFollowPointsPerCompletion, "social_follow", nil); err != nil {
-		slog.Warn("social_follow: ledger entry failed", "user_id", userID, "error", err)
+	if awarded > 0 {
+		if err := insertLedgerEntry(ctx, d.Pool, userID, awarded, "social_follow", nil); err != nil {
+			slog.Warn("social_follow: ledger entry failed", "user_id", userID, "error", err)
+		}
 	}
 
-	notify.Notify(ctx, userID, notifications.TypeSocialFollowCompleted,
-		"Social follow reward earned",
-		"You followed us on every platform and verification is complete - you earned "+strconv.Itoa(socialFollowPointsPerCompletion)+" points.",
-		"/settings?tab=rewards",
-	)
+	title, body := "Social follow reward earned",
+		"You followed us on every platform and verification is complete - you earned "+strconv.Itoa(awarded)+" points."
+	if awarded == 0 {
+		title = "Social follow verified"
+		body = "You're following us everywhere and your proof is approved. Rewards are moving to the Founding Contributor Pool - we'll share the details before it opens."
+	}
+	notify.Notify(ctx, userID, notifications.TypeSocialFollowCompleted, title, body, "/settings?tab=rewards")
 }

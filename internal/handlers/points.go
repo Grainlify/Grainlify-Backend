@@ -27,6 +27,11 @@ type pgExecutor interface {
 // lookups don't apply here since that table's PK is user_id, redemptions.id)
 // and may be nil.
 func insertLedgerEntry(ctx context.Context, exec pgExecutor, userID uuid.UUID, amount int, reason string, referenceID *uuid.UUID) error {
+	// The single chokepoint for every point_ledger write, which is why the
+	// freeze lives here rather than at each grant site (points_freeze.go).
+	if err := guardPointsAccrual(amount); err != nil {
+		return err
+	}
 	_, err := exec.Exec(ctx, `
 INSERT INTO point_ledger (user_id, amount, reason, reference_id)
 VALUES ($1, $2, $3, $4)

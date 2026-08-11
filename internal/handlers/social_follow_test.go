@@ -190,11 +190,70 @@ func TestSocialFollowHandler_ApproveAllThree_CompletesAndAwardsPoints(t *testing
 	if err := json.Unmarshal(meBody, &meResp); err != nil {
 		t.Fatalf("unmarshal me: %v, body = %s", err, meBody)
 	}
+	// The completion is still recorded while the programme is frozen - the
+	// Founding Contributor Pool uses following as an eligibility check, and
+	// this record is what that check reads. What changes is that it is worth
+	// nothing: following is no longer a payment.
 	if !meResp.Completed {
 		t.Error("completed = false after approving all three platforms")
 	}
-	if meResp.PointsAwarded != 500 {
-		t.Errorf("points_awarded = %d, want 500", meResp.PointsAwarded)
+	if meResp.PointsAwarded != 0 {
+		t.Errorf("points_awarded = %d, want 0 while the points programme is frozen", meResp.PointsAwarded)
+	}
+}
+
+// TestSocialFollowHandler_ApproveAllThree_AwardsPointsWhenNotFrozen keeps the
+// award path covered for as long as it exists, so lifting the freeze cannot
+// silently ship a broken grant.
+func TestSocialFollowHandler_ApproveAllThree_AwardsPointsWhenNotFrozen(t *testing.T) {
+	handlers.UnfreezePointsProgrammeForTest(t)
+
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	userID := adminSuiteInsertUser(t, d, "contributor")
+	token := socialFollowSuiteToken(t, userID, "contributor")
+	adminID := adminSuiteInsertUser(t, d, "admin")
+	adminToken := socialFollowSuiteToken(t, adminID, "admin")
+
+	for _, p := range []string{"github", "telegram", "linkedin"} {
+		resp, body := notifSuiteDo(t, app, "POST", "/social-follow/"+p+"/submit", token,
+			[]byte(`{"screenshot":"data:image/png;base64,abc"}`))
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("submit(%s) status = %d, body = %s", p, resp.StatusCode, body)
+		}
+	}
+
+	_, listBody := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions", adminToken, nil)
+	var list struct {
+		Submissions []struct {
+			ID     string `json:"id"`
+			UserID string `json:"user_id"`
+		} `json:"submissions"`
+	}
+	if err := json.Unmarshal(listBody, &list); err != nil {
+		t.Fatalf("unmarshal submissions: %v, body = %s", err, listBody)
+	}
+	for _, s := range list.Submissions {
+		if s.UserID != userID.String() {
+			continue
+		}
+		resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+s.ID+"/approve", adminToken, nil)
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("approve status = %d, body = %s", resp.StatusCode, body)
+		}
+	}
+
+	_, meBody := notifSuiteDo(t, app, "GET", "/social-follow/me", token, nil)
+	var meResp struct {
+		Completed     bool `json:"completed"`
+		PointsAwarded int  `json:"points_awarded"`
+	}
+	if err := json.Unmarshal(meBody, &meResp); err != nil {
+		t.Fatalf("unmarshal me: %v, body = %s", err, meBody)
+	}
+	if !meResp.Completed || meResp.PointsAwarded != 500 {
+		t.Errorf("completed = %v, points_awarded = %d; want true and 500 when the programme is not frozen",
+			meResp.Completed, meResp.PointsAwarded)
 	}
 }
 

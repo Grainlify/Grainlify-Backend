@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,7 @@ func TestRedemptionsHandler_RequiresAuth(t *testing.T) {
 }
 
 func TestRedemptionsHandler_Create_RejectsBelowMinimum(t *testing.T) {
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -93,6 +95,7 @@ func TestRedemptionsHandler_Create_RejectsBelowMinimum(t *testing.T) {
 }
 
 func TestRedemptionsHandler_Create_RejectsInvalidWalletAddress(t *testing.T) {
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -106,6 +109,7 @@ func TestRedemptionsHandler_Create_RejectsInvalidWalletAddress(t *testing.T) {
 }
 
 func TestRedemptionsHandler_Create_RejectsInsufficientBalance(t *testing.T) {
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -120,6 +124,7 @@ func TestRedemptionsHandler_Create_RejectsInsufficientBalance(t *testing.T) {
 }
 
 func TestRedemptionsHandler_Create_DeductsBalanceAndRecordsRequest(t *testing.T) {
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -170,6 +175,9 @@ func TestRedemptionsHandler_AdminEndpoints_RequireAdminRole(t *testing.T) {
 }
 
 func TestRedemptionsHandler_Reject_RefundsPoints(t *testing.T) {
+	// Exercises the admin lifecycle of an existing redemption, which needs
+	// one to be creatable in the first place.
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -202,6 +210,9 @@ func TestRedemptionsHandler_Reject_RefundsPoints(t *testing.T) {
 }
 
 func TestRedemptionsHandler_MarkPaid_TransitionsStatus(t *testing.T) {
+	// Exercises the admin lifecycle of an existing redemption, which needs
+	// one to be creatable in the first place.
+	handlers.UnfreezePointsProgrammeForTest(t)
 	d := testDB(t)
 	app := redemptionsSuiteApp(d)
 	userID := adminSuiteInsertUser(t, d, "contributor")
@@ -231,5 +242,66 @@ func TestRedemptionsHandler_MarkPaid_TransitionsStatus(t *testing.T) {
 	json.Unmarshal(mineBody, &mine)
 	if len(mine.Redemptions) != 1 || mine.Redemptions[0].Status != "paid" {
 		t.Errorf("redemptions/me = %+v, want status \"paid\"", mine.Redemptions)
+	}
+}
+
+// TestRedemptionsHandler_Create_RefusedWhileProgrammeFrozen pins the freeze
+// on the path that would have moved money.
+//
+// The four validation tests above deliberately unfreeze first, because those
+// rules must keep working if the freeze is ever lifted. This one asserts the
+// shipped default, and asserts it *before* validation runs: a caller with a
+// perfectly valid request and a sufficient balance is still refused, and is
+// told why rather than being handed a validation error about a programme
+// that no longer exists.
+func TestRedemptionsHandler_Create_RefusedWhileProgrammeFrozen(t *testing.T) {
+	if !handlers.PointsProgrammeFrozenForTest() {
+		t.Fatal("the points programme should ship frozen; it is not")
+	}
+	d := testDB(t)
+	app := redemptionsSuiteApp(d)
+	userID := adminSuiteInsertUser(t, d, "contributor")
+	token := redemptionsSuiteToken(t, userID, "contributor")
+	redemptionsSuiteGrantPoints(t, d, userID, 1000)
+
+	wallet := redemptionsSuiteWallet(t)
+	resp, body := notifSuiteDo(t, app, "POST", "/redemptions", token,
+		[]byte(`{"points":300,"stellar_wallet_address":"`+wallet+`"}`))
+	if resp.StatusCode != fiber.StatusGone {
+		t.Fatalf("status = %d, want %d for a redemption while the programme is frozen; body = %s",
+			resp.StatusCode, fiber.StatusGone, body)
+	}
+	if !strings.Contains(string(body), "points_programme_frozen") {
+		t.Errorf("body = %s, want it to name points_programme_frozen so the caller knows why", body)
+	}
+
+	// Nothing may have been spent.
+	var spent int
+	if err := d.Pool.QueryRow(context.Background(), `
+SELECT COALESCE(count(*), 0) FROM redemptions WHERE user_id = $1
+`, userID).Scan(&spent); err != nil {
+		t.Fatalf("count redemptions: %v", err)
+	}
+	if spent != 0 {
+		t.Errorf("%d redemption row(s) written while frozen, want 0", spent)
+	}
+}
+
+// TestInsertLedgerEntry_FreezeBlocksGrantsButNotRefunds covers the accrual
+// chokepoint directly, in both directions.
+//
+// Grants are refused so a new grant path added later is frozen by default
+// rather than by somebody remembering. Negative entries stay permitted
+// because refusing a refund would strand a balance, which is the opposite of
+// what the freeze is for.
+func TestInsertLedgerEntry_FreezeBlocksGrantsButNotRefunds(t *testing.T) {
+	d := testDB(t)
+	userID := adminSuiteInsertUser(t, d, "contributor")
+
+	if err := handlers.InsertLedgerEntryForTest(context.Background(), d, userID, 100, "referral"); err == nil {
+		t.Error("a 100-point grant succeeded while the programme is frozen; it must be refused")
+	}
+	if err := handlers.InsertLedgerEntryForTest(context.Background(), d, userID, -50, "redemption_reversal"); err != nil {
+		t.Errorf("a refund was refused while frozen (%v); refunds must stay possible", err)
 	}
 }

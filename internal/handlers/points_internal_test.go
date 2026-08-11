@@ -8,6 +8,8 @@ import (
 )
 
 func TestPointsBalance_SumsLedgerEntries(t *testing.T) {
+	// Seeds the ledger with grants, which the freeze refuses by design.
+	UnfreezePointsProgrammeForTest(t)
 	d := referralsTestDB(t)
 	userID := referralsCreateUser(t, d)
 

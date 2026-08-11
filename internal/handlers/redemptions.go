@@ -69,6 +69,15 @@ func (h *RedemptionsHandler) Create() fiber.Handler {
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
+		// Refused before anything is parsed or validated, so a caller gets
+		// the real reason rather than a validation error about a programme
+		// that no longer runs (points_freeze.go).
+		if pointsRedemptionsFrozen() {
+			return c.Status(fiber.StatusGone).JSON(fiber.Map{
+				"error":   "points_programme_frozen",
+				"message": "The points programme has been retired and is being replaced by the Founding Contributor Pool.",
+			})
+		}
 		userID, ok := h.userID(c)
 		if !ok {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
