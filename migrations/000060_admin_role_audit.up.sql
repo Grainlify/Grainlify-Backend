@@ -45,3 +45,12 @@ CREATE INDEX IF NOT EXISTS idx_admin_role_audit_subject
   ON admin_role_audit(subject_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_admin_role_audit_created
   ON admin_role_audit(created_at DESC);
+
+-- Who last changed an event's settings. hackathons already had created_by but
+-- nothing recorded an edit, so "who moved the prize pool" had no answer even
+-- though "who created the event" did.
+--
+-- Separate from created_by rather than overwriting it: the two answer
+-- different questions, and losing the creator to record an editor would be a
+-- net loss of attribution.
+ALTER TABLE hackathons ADD COLUMN IF NOT EXISTS updated_by UUID REFERENCES users(id) ON DELETE SET NULL;

@@ -152,6 +152,12 @@ func (h *AdminHackathonsHandler) Update() fiber.Handler {
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_body"})
 		}
+		// This endpoint edits the prize pools, so an unattributed change here
+		// is an unattributed change to money.
+		actorID, ok := adminID(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		}
 
 		tag, err := h.db.Pool.Exec(c.Context(), `
 UPDATE hackathons SET
@@ -165,10 +171,12 @@ UPDATE hackathons SET
   merge_grace_period_hours = COALESCE($9, merge_grace_period_hours),
   contributor_prize_pool = COALESCE($10, contributor_prize_pool),
   maintainer_prize_pool = COALESCE($11, maintainer_prize_pool),
+  updated_by = $12,
   updated_at = now()
 WHERE id = $1
 `, id, req.Name, req.AnnouncedAt, req.ApplicationPeriodStart, req.ApplicationPeriodEnd, req.IssuePrepStart,
-			req.StartsAt, req.EndsAt, req.MergeGracePeriodHours, req.ContributorPrizePool, req.MaintainerPrizePool)
+			req.StartsAt, req.EndsAt, req.MergeGracePeriodHours, req.ContributorPrizePool, req.MaintainerPrizePool,
+			actorID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "hackathon_update_failed"})
 		}
