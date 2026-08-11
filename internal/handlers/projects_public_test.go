@@ -403,10 +403,25 @@ func TestProjectsPublicHandler_List_Filters(t *testing.T) {
 
 // TestProjectsPublicHandler_Recommended_NeedsMetadataFilter proves
 // Recommended() (GET /projects/recommended) applies the same needs_metadata
-// = false filter as List(). The "should appear" project is given a large,
-// synthetic contributor count so it reliably ranks within the endpoint's
-// limited result window despite unrelated rows other concurrently-running
-// test suites may insert into the shared database.
+// = false filter as List().
+//
+// The assertion is deliberately scoped to a property of the whole response -
+// "nothing returned has needs_metadata = true" - rather than to whether one
+// seeded project appears in the ranked window.
+//
+// It used to seed a project with 40 synthetic contributors and require it to
+// place in a top-20, on the theory that 40 was large enough to out-rank
+// whatever else the shared database happened to hold. That stopped being
+// true: the database has since accumulated 25 projects with 135 contributors
+// each, so the top 20 is full before this test's fixture is considered and
+// the assertion became impossible to satisfy for reasons having nothing to do
+// with needs_metadata. Re-seeding above the current high-water mark would buy
+// time and fail again the same way - a test that only passes by out-sizing
+// accumulated fixtures is a countdown, not a check. See docs/TESTING-DEBT.md.
+//
+// The property below is strictly stronger than the original membership check
+// (it constrains every returned row, not one) and is independent of how the
+// ranking orders things or of how much unrelated data exists.
 func TestProjectsPublicHandler_Recommended_NeedsMetadataFilter(t *testing.T) {
 	d := testDB(t)
 	owner := projectsFxUser(t, d.Pool)
@@ -418,7 +433,7 @@ func TestProjectsPublicHandler_Recommended_NeedsMetadataFilter(t *testing.T) {
 	projectsFxSeedManyContributors(t, d.Pool, hiddenID, 40)
 
 	app := newProjectsPublicTestApp(config.Config{}, d)
-	status, body := projectsFxDoJSON(t, app, "GET", "/projects/recommended?limit=20", "", nil)
+	status, body := projectsFxDoJSON(t, app, "GET", "/projects/recommended?limit=50", "", nil)
 	if status != fiber.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", status, body)
 	}
@@ -428,12 +443,73 @@ func TestProjectsPublicHandler_Recommended_NeedsMetadataFilter(t *testing.T) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	ids := projectsFxIDSet(resp.Projects)
-	if !ids[visibleID.String()] {
-		t.Errorf("expected needs_metadata=false, high-contributor project %s in Recommended(), got %v", visibleID, ids)
+
+	// Guards against the invariant below passing vacuously on an empty page.
+	if len(resp.Projects) == 0 {
+		t.Fatal("Recommended() returned no projects at all; the needs_metadata " +
+			"assertion below would pass vacuously")
 	}
+
+	ids := projectsFxIDSet(resp.Projects)
+
+	// The specific twin: same status, same contributor count, differing only
+	// in needs_metadata. Its absence is the point of the test.
 	if ids[hiddenID.String()] {
-		t.Errorf("needs_metadata=true project %s appeared in Recommended() despite equally-high contributor count; exclusion should be structural (WHERE clause), not ranking-based", hiddenID)
+		t.Errorf("needs_metadata=true project %s appeared in Recommended(); exclusion should be structural (WHERE clause), not ranking-based", hiddenID)
+	}
+
+	// And the general form: whatever the ranking chose to return, none of it
+	// may be needs_metadata = true. Resolved against the database rather than
+	// the payload because Recommended() does not serialise the column.
+	returned := make([]string, 0, len(resp.Projects))
+	for id := range ids {
+		returned = append(returned, id)
+	}
+	rows, err := d.Pool.Query(context.Background(), `
+SELECT id::text FROM projects WHERE id::text = ANY($1) AND needs_metadata = true
+`, returned)
+	if err != nil {
+		t.Fatalf("look up needs_metadata for returned projects: %v", err)
+	}
+	defer rows.Close()
+	var leaked []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		leaked = append(leaked, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	if len(leaked) > 0 {
+		t.Errorf("Recommended() returned %d project(s) with needs_metadata = true: %v", len(leaked), leaked)
+	}
+
+	// Positive control, so "hidden is absent" cannot pass for the wrong
+	// reason. The two fixtures differ only in needs_metadata, so if the
+	// visible twin satisfies the endpoint's eligibility predicate and the
+	// hidden one does not, the difference is attributable to that column and
+	// nothing else. Asserted against the predicate rather than against the
+	// ranked window, which is what makes it independent of how much unrelated
+	// data the shared database has accumulated.
+	var visibleEligible, hiddenEligible bool
+	if err := d.Pool.QueryRow(context.Background(), `
+SELECT
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = $1
+          AND p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false),
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = $2
+          AND p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false)
+`, visibleID, hiddenID).Scan(&visibleEligible, &hiddenEligible); err != nil {
+		t.Fatalf("eligibility control query: %v", err)
+	}
+	if !visibleEligible {
+		t.Errorf("control failed: the needs_metadata=false twin %s is not eligible for Recommended(), "+
+			"so the hidden twin's absence proves nothing about needs_metadata", visibleID)
+	}
+	if hiddenEligible {
+		t.Errorf("control failed: the needs_metadata=true twin %s is eligible for Recommended()", hiddenID)
 	}
 }
 

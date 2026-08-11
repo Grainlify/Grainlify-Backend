@@ -282,3 +282,66 @@ assertion.
 
 The lock is per-programme rather than per-user deliberately: the invariant is
 global ordering, which cannot be enforced by a lock scoped to one member.
+
+---
+
+# Shared-fixture accumulation, third occurrence: top-N assertions rot
+
+Recorded 2026-08-11. Same root property as the "dominance value" fixture noted
+above under *The real fix* — `grainlify_test` is never truncated, so anything
+a test leaves behind competes with every later run — but a different symptom,
+worth naming separately because it fails in a way that looks like a real bug
+in the code under test.
+
+## What happened
+
+`TestProjectsPublicHandler_Recommended_NeedsMetadataFilter` seeded a project
+with 40 synthetic contributors and asserted it appeared in
+`GET /projects/recommended?limit=20`. The number 40 was chosen to be "large
+enough" to place in the window regardless of unrelated rows.
+
+By 2026-08-11 the database held **25 projects with 135 contributors each**
+(12 of them created 2026-08-10, 13 on 2026-08-11), plus ~50 more above 40.
+The top 20 was therefore full before the test's own fixture was considered,
+and the assertion had become impossible to satisfy — for reasons having
+nothing to do with `needs_metadata`, the thing under test.
+
+It surfaced during unrelated leaderboard work and cost real time to attribute,
+because a failing "expected my project in the results" assertion reads exactly
+like a regression in the endpoint's filter.
+
+## Why re-seeding is not the fix
+
+The obvious repair is to seed 200 contributors instead of 40. That works until
+some other suite seeds 300. A test that passes only by out-sizing accumulated
+junk is a countdown with an unknown timer, and each round makes the database
+slower for everyone (see the runtime analysis at the top of this file).
+
+## What to do instead
+
+Assert a property of the *whole response* rather than membership of one row in
+a ranked window:
+
+> nothing returned has `needs_metadata = true`
+
+That is strictly stronger than the original check — it constrains every row
+returned, not one — and it is independent of ordering and of how much
+unrelated data exists. A separate positive control asserts the two fixtures
+differ only in `needs_metadata` by testing them against the endpoint's
+eligibility predicate directly, rather than against the ranked window.
+
+## The general rule
+
+**In this suite, do not assert that a seeded row appears within a top-N.**
+The database is shared, never truncated, and monotonically growing, so N is
+effectively a race against every other suite's fixtures. Prefer, in order:
+
+1. A property that must hold of every returned row.
+2. Absence of a specific row (absence does not compete for slots).
+3. Relative ordering between two rows *both* found in the response.
+4. Only if none of those work: membership, with an explicit comment saying
+   why, and a bound on how it can rot.
+
+The leaderboard suite reaches for (2) and (3) throughout, and its
+`leaderboardSuiteFindRanked` helper makes "conclusively absent" distinct from
+"gave up looking" for the same reason — worth copying.

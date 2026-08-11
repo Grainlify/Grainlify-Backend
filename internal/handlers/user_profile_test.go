@@ -87,6 +87,10 @@ type userProfileSuiteContribSpec struct {
 	Title       string
 	State       string    // defaults to "open"
 	CreatedAt   time.Time // defaults to time.Now().UTC()
+	// Merged applies to pull requests only. A merged one also gets a
+	// merged_at_github timestamp, because the ranking is windowed and an
+	// undated merge cannot be placed in a period.
+	Merged bool
 }
 
 // userProfileSuiteIssue inserts a github_issues row per the schema in
@@ -128,13 +132,19 @@ func userProfileSuitePR(t *testing.T, pool db.DBPool, spec userProfileSuiteContr
 	if spec.Title == "" {
 		spec.Title = "test pr " + uuid.NewString()
 	}
+	var mergedAt *time.Time
+	if spec.Merged {
+		m := time.Now().UTC().Add(-time.Hour)
+		mergedAt = &m
+	}
 	var id uuid.UUID
 	err := pool.QueryRow(context.Background(), `
-INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, author_login, url, merged, created_at_github)
-VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8)
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, author_login, url, merged, created_at_github, merged_at_github, closed_at_github)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $9, $8, $10, $10)
 RETURNING id
 `, spec.ProjectID, projectsFxNextGHUserID(), spec.Number, spec.State, spec.Title, spec.AuthorLogin,
-		fmt.Sprintf("https://github.com/test-owner/test-repo/pull/%d", spec.Number), spec.CreatedAt).Scan(&id)
+		fmt.Sprintf("https://github.com/test-owner/test-repo/pull/%d", spec.Number), spec.CreatedAt,
+		spec.Merged, mergedAt).Scan(&id)
 	if err != nil {
 		t.Fatalf("userProfileSuitePR: insert: %v", err)
 	}
@@ -282,11 +292,14 @@ func TestUserProfileHandler_Profile(t *testing.T) {
 		if resp.Rank.Position != nil {
 			t.Errorf("rank.position = %v, want nil for a user with no contributions", *resp.Rank.Position)
 		}
-		// Surprise worth flagging: unlike PublicProfile() (which defaults an
-		// unranked user's tier to "unranked"), Profile()'s no-rank fallback
-		// is "bronze" - see user_profile.go:211-220 vs :1073-1080.
-		if resp.Rank.Tier != "bronze" {
-			t.Errorf("rank.tier = %q, want \"bronze\" (Profile()'s no-contributions default)", resp.Rank.Tier)
+		// Profile() used to fall back to "bronze" here while PublicProfile()
+		// fell back to "unranked" for the same user - the two endpoints
+		// disagreed about the same person's badge. They now both say
+		// "unranked": Bronze is a real position (500+) that a contributor
+		// earned, and handing it to someone with no qualifying merges both
+		// overstates them and makes the genuine Bronze badge meaningless.
+		if resp.Rank.Tier != "unranked" {
+			t.Errorf("rank.tier = %q, want \"unranked\" for a user with no merged pull requests", resp.Rank.Tier)
 		}
 	})
 
@@ -302,7 +315,12 @@ func TestUserProfileHandler_Profile(t *testing.T) {
 			EcosystemID: &ecoID, Language: &lang,
 		})
 		userProfileSuiteIssue(t, d.Pool, userProfileSuiteContribSpec{ProjectID: contribProject, AuthorLogin: login, Number: 1})
-		userProfileSuitePR(t, d.Pool, userProfileSuiteContribSpec{ProjectID: contribProject, AuthorLogin: login, Number: 1})
+		// Merged: the rank is computed from merged pull requests, so an
+		// unmerged one would leave this login correctly unranked and the rank
+		// assertion below would be testing nothing.
+		userProfileSuitePR(t, d.Pool, userProfileSuiteContribSpec{
+			ProjectID: contribProject, AuthorLogin: login, Number: 1, State: "closed", Merged: true,
+		})
 
 		// A project whose github_full_name happens to start with "<login>/"
 		// counts toward projects_led_count here - Profile() computes "led"
@@ -362,7 +380,7 @@ func TestUserProfileHandler_Profile(t *testing.T) {
 		}
 
 		if resp.Rank == nil || resp.Rank.Position == nil || *resp.Rank.Position < 1 {
-			t.Errorf("rank.position = %v, want a positive int (this login now has >0 contributions)", resp.Rank)
+			t.Errorf("rank.position = %v, want a positive int (this login now has a merged pull request)", resp.Rank)
 		}
 		if resp.Rank != nil && resp.Rank.Tier == "" {
 			t.Errorf("rank.tier is empty, want a non-empty tier name")

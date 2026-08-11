@@ -47,13 +47,26 @@ RETURNING id
 // merged as an explicit parameter (existing test helpers in this repo all
 // hardcode merged=false, unusable for eligibility tests that need merged
 // PRs).
+// orgRatingsFxPR inserts a closed pull request, merged or not.
+//
+// A merged one also gets merged_at_github, which real data always has: GitHub
+// returns merged_at on every merged pull request, and it is the field the
+// repo-list sync actually populates. It matters because the ranking is
+// windowed - an undated merge cannot be placed in a time period, so it is
+// correctly absent from the season board, and a fixture without a timestamp
+// was silently testing that edge case instead of the behaviour it meant to.
 func orgRatingsFxPR(t *testing.T, pool db.DBPool, projectID uuid.UUID, number int, authorLogin string, merged bool) {
 	t.Helper()
+	var mergedAt *time.Time
+	if merged {
+		now := time.Now().Add(-time.Hour)
+		mergedAt = &now
+	}
 	_, err := pool.Exec(context.Background(), `
-INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, author_login, url, merged)
-VALUES ($1, $2, $3, 'closed', $4, $5, $6, $7)
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, author_login, url, merged, merged_at_github, closed_at_github)
+VALUES ($1, $2, $3, 'closed', $4, $5, $6, $7, $8, COALESCE($8, now()))
 `, projectID, orgRatingsFxNextPRID(), number, "pr-"+uuid.New().String()[:8], authorLogin,
-		fmt.Sprintf("https://github.com/test/test/pull/%d", number), merged)
+		fmt.Sprintf("https://github.com/test/test/pull/%d", number), merged, mergedAt)
 	if err != nil {
 		t.Fatalf("orgRatingsFxPR: insert: %v", err)
 	}

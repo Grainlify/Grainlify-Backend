@@ -157,67 +157,16 @@ LIMIT 10
 			})
 		}
 
-		// Get user's rank position in leaderboard
-		// Use a more efficient query with CTE
-		var rankPosition *int
-		err = h.db.Pool.QueryRow(c.Context(), `
-WITH contribution_counts AS (
-  SELECT 
-    ga.login,
-    (
-      SELECT COUNT(*) 
-      FROM github_issues i
-      INNER JOIN projects p ON i.project_id = p.id
-      WHERE i.author_login = ga.login AND p.status = 'verified'
-    ) +
-    (
-      SELECT COUNT(*) 
-      FROM github_pull_requests pr
-      INNER JOIN projects p ON pr.project_id = p.id
-      WHERE pr.author_login = ga.login AND p.status = 'verified'
-    ) as contribution_count
-  FROM github_accounts ga
-  INNER JOIN users u ON ga.user_id = u.id
-  WHERE (
-    SELECT COUNT(*) 
-    FROM github_issues i
-    INNER JOIN projects p ON i.project_id = p.id
-    WHERE i.author_login = ga.login AND p.status = 'verified'
-  ) +
-  (
-    SELECT COUNT(*) 
-    FROM github_pull_requests pr
-    INNER JOIN projects p ON pr.project_id = p.id
-    WHERE pr.author_login = ga.login AND p.status = 'verified'
-  ) > 0
-),
-ranked_users AS (
-  SELECT 
-    login,
-    ROW_NUMBER() OVER (
-      ORDER BY contribution_count DESC, login ASC
-    ) as rank_position
-  FROM contribution_counts
-)
-SELECT rank_position
-FROM ranked_users
-WHERE login = $1
-`, *githubLogin).Scan(&rankPosition)
-
-		// Calculate rank tier
-		var rankTier RankTier
-		var rankTierName string
-		var rankTierColor string
-		if rankPosition != nil && *rankPosition > 0 {
-			rankTier = GetRankTier(*rankPosition)
-			rankTierName = GetRankTierDisplayName(rankTier)
-			rankTierColor = GetRankTierColor(rankTier)
-		} else {
-			// User has no contributions or not ranked
-			rankTier = RankBronze
-			rankTierName = GetRankTierDisplayName(rankTier)
-			rankTierColor = GetRankTierColor(rankTier)
-		}
+		// Rank badge (seasonal, with all-time alongside).
+		//
+		// Delegated to internal/ranking so this badge cannot disagree with
+		// the board it claims to reflect. The query that used to be inline
+		// here disagreed twice over: it matched author_login case-sensitively
+		// where the board grouped case-insensitively, and it ranked only
+		// logins joined through github_accounts -> users, i.e. only people
+		// who had signed up. An unregistered contributor ahead of you was
+		// invisible to it, so every badge below them read one place too good.
+		rankBadge := buildRankBadge(c.Context(), h.db.Pool, *githubLogin)
 
 		// Get user profile fields (bio, website, social links, kyc) from users table
 		var bio, website, telegram, linkedin, whatsapp, twitter, discord *string
@@ -270,12 +219,7 @@ WHERE p.status = 'verified'
 			"kyc_verified": func() bool {
 				return kycStatus != nil && *kycStatus == "verified"
 			}(),
-			"rank": fiber.Map{
-				"position":   rankPosition,
-				"tier":       string(rankTier),
-				"tier_name":  rankTierName,
-				"tier_color": rankTierColor,
-			},
+			"rank": rankBadge,
 		}
 
 		// Add bio, website, and social links if available
@@ -1035,61 +979,11 @@ LIMIT 10
 			})
 		}
 
-		// Calculate rank position: rank over full leaderboard, then select this user's position.
-		// (Filtering by user before ROW_NUMBER() would make every user appear as 1st.)
-		var rankPosition *int
-		err = h.db.Pool.QueryRow(c.Context(), `
-WITH ranked_contributors AS (
-  SELECT 
-    ac.login,
-    (
-      SELECT COUNT(*) 
-      FROM github_issues i
-      INNER JOIN projects p ON i.project_id = p.id
-      WHERE LOWER(i.author_login) = LOWER(ac.login) AND p.status = 'verified'
-    ) +
-    (
-      SELECT COUNT(*) 
-      FROM github_pull_requests pr
-      INNER JOIN projects p ON pr.project_id = p.id
-      WHERE LOWER(pr.author_login) = LOWER(ac.login) AND p.status = 'verified'
-    ) as contribution_count
-  FROM (
-    -- LOWER() here, not just in the counts below. A case-sensitive DISTINCT
-    -- feeding case-insensitive counting is what let one contributor occupy
-    -- several rows on the leaderboard, each reporting the combined total -
-    -- here it would inflate the rank position of everyone below them.
-    SELECT DISTINCT LOWER(i.author_login) as login
-    FROM github_issues i
-    INNER JOIN projects p ON i.project_id = p.id
-    WHERE i.author_login IS NOT NULL AND i.author_login != '' AND p.status = 'verified'
-    UNION
-    SELECT DISTINCT LOWER(pr.author_login) as login
-    FROM github_pull_requests pr
-    INNER JOIN projects p ON pr.project_id = p.id
-    WHERE pr.author_login IS NOT NULL AND pr.author_login != '' AND p.status = 'verified'
-  ) ac
-),
-ranked AS (
-  SELECT login, ROW_NUMBER() OVER (ORDER BY contribution_count DESC, login ASC) as rank_position
-  FROM ranked_contributors
-)
-SELECT rank_position FROM ranked WHERE LOWER(login) = LOWER($1)
-`, *githubLogin).Scan(&rankPosition)
-		if err != nil {
-			// User not in ranking, that's okay
-			rankPosition = nil
-		}
-
-		// Calculate rank tier
-		rankTier := RankTierUnranked
-		rankTierName := "Unranked"
-		rankTierColor := "#7a6b5a"
-		if rankPosition != nil {
-			rankTier = GetRankTier(*rankPosition)
-			rankTierName = GetRankTierDisplayName(rankTier)
-			rankTierColor = GetRankTierColor(rankTier)
-		}
+		// Rank badge, from the one shared definition in internal/ranking - the
+		// same builder the other profile endpoint uses and the same ranking
+		// the public board shows, so all three agree by construction. See
+		// TestRankingIsConsistent.
+		rankBadge := buildRankBadge(c.Context(), h.db.Pool, *githubLogin)
 
 		// Get projects contributed to and projects led counts
 		var projectsContributedToCount int
@@ -1157,12 +1051,7 @@ WHERE u.id = $1
 			"kyc_verified": func() bool {
 				return kycStatus != nil && *kycStatus == "verified"
 			}(),
-			"rank": fiber.Map{
-				"position":   rankPosition,
-				"tier":       string(rankTier),
-				"tier_name":  rankTierName,
-				"tier_color": rankTierColor,
-			},
+			"rank": rankBadge,
 		}
 
 		if bio != nil && *bio != "" {

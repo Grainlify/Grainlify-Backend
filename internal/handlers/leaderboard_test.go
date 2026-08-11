@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -152,17 +153,62 @@ VALUES ($1, $2, $3, 'open', $4)
 	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_issues WHERE project_id = $1 AND github_issue_id = $2`, projectID, n)
 }
 
-// leaderboardSuitePR inserts an open github_pull_requests row authored by
-// authorLogin against projectID.
+// leaderboardSuitePR inserts a MERGED github_pull_requests row authored by
+// authorLogin against projectID, merged just now (so it falls inside the
+// default season window).
+//
+// Merged, because a merged pull request is the only thing the ranking counts.
+// This helper used to insert an open one and the board counted it all the
+// same; every test below that seeds "a contribution" means this.
 func leaderboardSuitePR(t *testing.T, pool db.DBPool, projectID uuid.UUID, authorLogin string) {
+	t.Helper()
+	leaderboardSuiteMergedPRAt(t, pool, projectID, authorLogin, time.Now().Add(-time.Hour))
+}
+
+// leaderboardSuiteMergedPRAt inserts a pull request merged at a specific
+// instant, for exercising the season window boundary.
+func leaderboardSuiteMergedPRAt(t *testing.T, pool db.DBPool, projectID uuid.UUID, authorLogin string, mergedAt time.Time) {
 	t.Helper()
 	n := atomic.AddInt64(&leaderboardSuiteItemSeq, 1)
 	_, err := pool.Exec(context.Background(), `
-INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, author_login)
-VALUES ($1, $2, $3, 'open', $4)
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, author_login, merged, merged_at_github, closed_at_github)
+VALUES ($1, $2, $3, 'closed', $4, TRUE, $5, $5)
+`, projectID, n, n, authorLogin, mergedAt)
+	if err != nil {
+		t.Fatalf("leaderboardSuiteMergedPRAt: insert PR: %v", err)
+	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_pull_requests WHERE project_id = $1 AND github_pr_id = $2`, projectID, n)
+}
+
+// leaderboardSuiteOpenPR inserts an open, never-merged pull request. Nothing
+// in the ranking should count it.
+func leaderboardSuiteOpenPR(t *testing.T, pool db.DBPool, projectID uuid.UUID, authorLogin string) {
+	t.Helper()
+	n := atomic.AddInt64(&leaderboardSuiteItemSeq, 1)
+	_, err := pool.Exec(context.Background(), `
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, author_login, merged)
+VALUES ($1, $2, $3, 'open', $4, FALSE)
 `, projectID, n, n, authorLogin)
 	if err != nil {
-		t.Fatalf("leaderboardSuitePR: insert PR: %v", err)
+		t.Fatalf("leaderboardSuiteOpenPR: insert PR: %v", err)
+	}
+	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_pull_requests WHERE project_id = $1 AND github_pr_id = $2`, projectID, n)
+}
+
+// leaderboardSuiteClosedUnmergedPR inserts a pull request that was closed
+// without being merged. It carries closed_at_github and a merge_commit_sha,
+// because GitHub populates a test-merge sha on unmerged PRs too - if the
+// ranking ever treats that column as a merge signal, this row is what catches
+// it.
+func leaderboardSuiteClosedUnmergedPR(t *testing.T, pool db.DBPool, projectID uuid.UUID, authorLogin string) {
+	t.Helper()
+	n := atomic.AddInt64(&leaderboardSuiteItemSeq, 1)
+	_, err := pool.Exec(context.Background(), `
+INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, author_login, merged, closed_at_github, merge_commit_sha)
+VALUES ($1, $2, $3, 'closed', $4, FALSE, now(), 'deadbeefcafe')
+`, projectID, n, n, authorLogin)
+	if err != nil {
+		t.Fatalf("leaderboardSuiteClosedUnmergedPR: insert PR: %v", err)
 	}
 	leaderboardSuiteCleanup(t, pool, `DELETE FROM github_pull_requests WHERE project_id = $1 AND github_pr_id = $2`, projectID, n)
 }
@@ -268,7 +314,7 @@ func leaderboardSuiteFindRanked(t *testing.T, app *fiber.App, username string, m
 		if len(entries) < 100 {
 			return nil // exhausted the whole ranking: conclusively absent
 		}
-		last, ok := entries[len(entries)-1]["contributions"].(float64)
+		last, ok := entries[len(entries)-1]["merged_prs"].(float64)
 		if ok && int(last) < minScore {
 			return nil // past the score band: conclusively absent
 		}
@@ -293,24 +339,28 @@ func TestLeaderboardSuite_RanksByContributionCountAndReportsExpectedFields(t *te
 	owner := leaderboardSuiteUser(t, d.Pool)
 	project := leaderboardSuiteProject(t, d.Pool, owner, ecoID, "verified")
 
-	// alice: signed up (has a linked github_accounts row) and has 4
-	// contributions (2 issues + 2 PRs) - the handler sums both.
+	// alice: signed up (has a linked github_accounts row) and has 4 merged
+	// pull requests. She is also seeded with two authored issues, an open PR
+	// and a closed-unmerged PR, none of which may move her score - under the
+	// previous definition all four counted and she would score 8.
 	aliceUser := leaderboardSuiteUser(t, d.Pool)
 	aliceLogin := "lbsuite-alice-" + uuid.New().String()[:8]
 	leaderboardSuiteLinkedAccount(t, d.Pool, aliceUser, aliceLogin, "https://cdn.example/alice.png")
-	leaderboardSuiteIssue(t, d.Pool, project, aliceLogin)
-	leaderboardSuiteIssue(t, d.Pool, project, aliceLogin)
 	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
 	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
+	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
+	leaderboardSuitePR(t, d.Pool, project, aliceLogin)
+	leaderboardSuiteIssue(t, d.Pool, project, aliceLogin)
+	leaderboardSuiteIssue(t, d.Pool, project, aliceLogin)
+	leaderboardSuiteOpenPR(t, d.Pool, project, aliceLogin)
+	leaderboardSuiteClosedUnmergedPR(t, d.Pool, project, aliceLogin)
 
-	// bob: never signed up (no github_accounts row). Seeded with one issue
-	// and one PR rather than a single issue - partly so the issues+PRs sum is
-	// exercised for an unlinked contributor too, and partly because a
-	// 1-contribution contributor is indistinguishable from the ~3000 accumulated
-	// 1-contribution contributors this shared database has piled up, which is
-	// what used to force a scan of the entire ranking to locate him.
+	// bob: never signed up (no github_accounts row). Two merged PRs rather
+	// than one, because a 1-merge contributor sits in the long tail of other
+	// 1-merge contributors this shared database accumulates, which is what
+	// used to force a scan of the entire ranking to locate him.
 	bobLogin := "lbsuite-bob-" + uuid.New().String()[:8]
-	leaderboardSuiteIssue(t, d.Pool, project, bobLogin)
+	leaderboardSuitePR(t, d.Pool, project, bobLogin)
 	leaderboardSuitePR(t, d.Pool, project, bobLogin)
 
 	// Leaderboard() ranks every qualifying contributor globally with no
@@ -330,17 +380,33 @@ func TestLeaderboardSuite_RanksByContributionCountAndReportsExpectedFields(t *te
 		t.Fatalf("bob (%s) is missing from the leaderboard despite %d contributions in a verified project", bobLogin, bobScore)
 	}
 
-	if c, _ := aliceEntry["contributions"].(float64); c != 4 {
-		t.Errorf("alice contributions = %v, want 4 (2 issues + 2 PRs)", aliceEntry["contributions"])
+	if c, _ := aliceEntry["merged_prs"].(float64); c != 4 {
+		t.Errorf("alice merged_prs = %v, want 4. Her 2 authored issues, 1 open PR "+
+			"and 1 closed-unmerged PR must not count; a score of 8 means the "+
+			"ranking is counting authored activity again", aliceEntry["merged_prs"])
 	}
-	if c, _ := bobEntry["contributions"].(float64); c != 2 {
-		t.Errorf("bob contributions = %v, want 2 (1 issue + 1 PR)", bobEntry["contributions"])
+	if s, _ := aliceEntry["score"].(float64); s != 4 {
+		t.Errorf("alice score = %v, want it to equal merged_prs (4)", aliceEntry["score"])
+	}
+	if c, _ := bobEntry["merged_prs"].(float64); c != 2 {
+		t.Errorf("bob merged_prs = %v, want 2", bobEntry["merged_prs"])
+	}
+
+	// Trend was removed: it was hardcoded to "same"/0 for every contributor
+	// since the endpoint was written, because the historical snapshots it
+	// needs are not collected. A column that has never once carried
+	// information should not be in the payload.
+	if _, present := aliceEntry["trend"]; present {
+		t.Errorf("response still carries a \"trend\" field: %v", aliceEntry["trend"])
+	}
+	if _, present := aliceEntry["trendValue"]; present {
+		t.Errorf("response still carries a \"trendValue\" field: %v", aliceEntry["trendValue"])
 	}
 
 	aliceRank, _ := aliceEntry["rank"].(float64)
 	bobRank, _ := bobEntry["rank"].(float64)
 	if !(aliceRank < bobRank) {
-		t.Errorf("alice rank %v should be numerically less than (better than) bob rank %v, since alice has more contributions (4 vs 2)", aliceRank, bobRank)
+		t.Errorf("alice rank %v should be numerically less than (better than) bob rank %v, since alice has more merged PRs (4 vs 2)", aliceRank, bobRank)
 	}
 
 	// rank_tier/rank_tier_name must be self-consistent with the exported
@@ -400,8 +466,8 @@ func TestLeaderboardSuite_ExcludesContributorsFromNonVerifiedProjects(t *testing
 	// prove it did not happen.
 	const leakScore = 3
 	login := "lbsuite-pending-" + uuid.New().String()[:8]
-	leaderboardSuiteIssue(t, d.Pool, pendingProject, login)
-	leaderboardSuiteIssue(t, d.Pool, pendingProject, login)
+	leaderboardSuitePR(t, d.Pool, pendingProject, login)
+	leaderboardSuitePR(t, d.Pool, pendingProject, login)
 	leaderboardSuitePR(t, d.Pool, pendingProject, login)
 
 	if e := leaderboardSuiteFindRanked(t, app, login, leakScore); e != nil {
@@ -419,8 +485,8 @@ func TestLeaderboardSuite_OffsetControlsPageAndRankNumbering(t *testing.T) {
 	// Guarantee at least 2 globally-qualifying contributors exist so
 	// offset=1 always has a row to return, regardless of what else is in
 	// the shared database.
-	leaderboardSuiteIssue(t, d.Pool, project, "lbsuite-page-a-"+uuid.New().String()[:8])
-	leaderboardSuiteIssue(t, d.Pool, project, "lbsuite-page-b-"+uuid.New().String()[:8])
+	leaderboardSuitePR(t, d.Pool, project, "lbsuite-page-a-"+uuid.New().String()[:8])
+	leaderboardSuitePR(t, d.Pool, project, "lbsuite-page-b-"+uuid.New().String()[:8])
 
 	status0, body0 := leaderboardSuiteDoJSON(t, app, "/leaderboard?limit=1&offset=0")
 	if status0 != fiber.StatusOK {
@@ -525,7 +591,7 @@ func leaderboardSuiteCountMatching(t *testing.T, app *fiber.App, lowerLogin stri
 		if len(entries) < 100 {
 			return found
 		}
-		if last, ok := entries[len(entries)-1]["contributions"].(float64); ok && int(last) < minScore {
+		if last, ok := entries[len(entries)-1]["merged_prs"].(float64); ok && int(last) < minScore {
 			return found
 		}
 	}
@@ -555,16 +621,16 @@ func TestLeaderboardSuite_CaseVariantLoginsCollapseIntoOneRankedContributor(t *t
 	lower := "lbsuite-case-" + suffix
 	upper := "LBSuite-Case-" + suffix
 
-	leaderboardSuiteIssue(t, d.Pool, project, upper)
-	leaderboardSuiteIssue(t, d.Pool, project, lower)
+	leaderboardSuitePR(t, d.Pool, project, upper)
+	leaderboardSuitePR(t, d.Pool, project, lower)
 	leaderboardSuitePR(t, d.Pool, project, upper)
 
 	matches := leaderboardSuiteCountMatching(t, app, lower, wantContributions)
 	if len(matches) != 1 {
 		t.Fatalf("got %d leaderboard entries for %q spelled two ways, want exactly 1: %v", len(matches), lower, matches)
 	}
-	if c, _ := matches[0]["contributions"].(float64); int(c) != wantContributions {
-		t.Errorf("contributions = %v, want %d (2 issues + 1 PR across both spellings)", matches[0]["contributions"], wantContributions)
+	if c, _ := matches[0]["merged_prs"].(float64); int(c) != wantContributions {
+		t.Errorf("merged_prs = %v, want %d (3 merged PRs across both spellings)", matches[0]["merged_prs"], wantContributions)
 	}
 }
 
@@ -592,15 +658,15 @@ func TestLeaderboardSuite_DuplicateLinkedAccountsDoNotDuplicateContributor(t *te
 	leaderboardSuiteLinkedAccount(t, d.Pool, firstUser, login, "https://cdn.example/first.png")
 	leaderboardSuiteLinkedAccount(t, d.Pool, secondUser, login, "https://cdn.example/second.png")
 
-	leaderboardSuiteIssue(t, d.Pool, project, login)
-	leaderboardSuiteIssue(t, d.Pool, project, login)
+	leaderboardSuitePR(t, d.Pool, project, login)
+	leaderboardSuitePR(t, d.Pool, project, login)
 	leaderboardSuitePR(t, d.Pool, project, login)
 
 	matches := leaderboardSuiteCountMatching(t, app, login, wantContributions)
 	if len(matches) != 1 {
 		t.Fatalf("got %d leaderboard entries for %q with two linked accounts, want exactly 1: %v", len(matches), login, matches)
 	}
-	if c, _ := matches[0]["contributions"].(float64); int(c) != wantContributions {
-		t.Errorf("contributions = %v, want %d", matches[0]["contributions"], wantContributions)
+	if c, _ := matches[0]["merged_prs"].(float64); int(c) != wantContributions {
+		t.Errorf("merged_prs = %v, want %d", matches[0]["merged_prs"], wantContributions)
 	}
 }

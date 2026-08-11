@@ -649,6 +649,20 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 				}
 			}
 
+			// GitHub's "list pull requests" response has no `merged` field -
+			// only `merged_at`. It is present on the single-PR "get" endpoint,
+			// which this path does not call. So it.Merged unmarshalled to
+			// false for every row this sync ever wrote: at the time of
+			// writing, production held 1299 pull requests with a merge
+			// timestamp and exactly zero with merged = true.
+			//
+			// Nothing read the column until merged PRs became the basis of
+			// the leaderboard, which is how it stayed wrong this long. Derive
+			// it from the timestamp that IS returned, and keep it.Merged as
+			// the other half of the OR so the webhook path (which does set it
+			// correctly) can't be regressed by a list sync arriving second.
+			merged := it.Merged || mergedAt != nil
+
 			_, _ = w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, merge_commit_sha, head_sha, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
@@ -659,7 +673,11 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   body = EXCLUDED.body,
   author_login = EXCLUDED.author_login,
   url = EXCLUDED.url,
-  merged = EXCLUDED.merged,
+  -- Monotonic: a merged pull request cannot become unmerged on GitHub, so a
+  -- later sync must never clear the flag. Without the OR, a list sync
+  -- arriving after the merge webhook would overwrite a correct true with a
+  -- derived value and silently drop the author's contribution.
+  merged = github_pull_requests.merged OR EXCLUDED.merged,
   created_at_github = EXCLUDED.created_at_github,
   updated_at_github = EXCLUDED.updated_at_github,
   closed_at_github = EXCLUDED.closed_at_github,
@@ -667,7 +685,7 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   head_sha = COALESCE(NULLIF(EXCLUDED.head_sha, ''), github_pull_requests.head_sha),
   merged_at_github = EXCLUDED.merged_at_github,
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, it.Merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA, it.Head.SHA)
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA, it.Head.SHA)
 		}
 	}
 

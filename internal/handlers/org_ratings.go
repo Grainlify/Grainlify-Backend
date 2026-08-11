@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/ranking"
 )
 
 type OrgRatingsHandler struct {
@@ -80,31 +81,16 @@ func canRateOrg(ctx context.Context, pool db.DBPool, userID uuid.UUID, githubLog
 // Returns (nil, nil) if the org has no ranked contributors at all - not an
 // error, just "unranked" (mirrors user_profile.go's own rank-lookup
 // not-found handling).
+// orgRankPosition returns an org's position on the public project
+// leaderboard.
+//
+// It delegates to internal/ranking rather than carrying its own SQL. The
+// copy that used to live here ranked orgs by distinct authors of *any* issue
+// or pull request, merged or not, bots included, all-time - so the badge on
+// an org's profile could disagree with the org's row on the leaderboard
+// about both its position and what was being counted.
 func orgRankPosition(ctx context.Context, pool db.DBPool, orgLogin string) (*int, error) {
-	var position *int
-	err := pool.QueryRow(ctx, `
-WITH org_contributors AS (
-  SELECT SPLIT_PART(p.github_full_name, '/', 1) AS org_login,
-         COUNT(DISTINCT LOWER(contributions.author_login)) AS contributors
-  FROM (
-    SELECT project_id, author_login FROM github_issues WHERE author_login IS NOT NULL AND author_login != ''
-    UNION
-    SELECT project_id, author_login FROM github_pull_requests WHERE author_login IS NOT NULL AND author_login != ''
-  ) contributions
-  JOIN projects p ON p.id = contributions.project_id
-  WHERE p.status = 'verified' AND p.deleted_at IS NULL
-  GROUP BY SPLIT_PART(p.github_full_name, '/', 1)
-),
-ranked AS (
-  SELECT org_login, contributors,
-         ROW_NUMBER() OVER (ORDER BY contributors DESC, org_login ASC) AS position
-  FROM org_contributors
-)
-SELECT position FROM ranked WHERE LOWER(org_login) = LOWER($1)
-`, orgLogin).Scan(&position)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
+	position, _, err := ranking.OrgPosition(ctx, pool, orgLogin, ranking.Options{}, time.Now())
 	return position, err
 }
 
