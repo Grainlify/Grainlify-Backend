@@ -76,7 +76,7 @@ LIMIT 50
 			if err := rows.Scan(&gid, &number, &state, &title, &body, &author, &url, &assigneesJSON, &labelsJSON, &commentsCount, &commentsJSON, &updated, &lastSeen); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
 			}
-			
+
 			// Parse JSONB fields
 			var assignees []any
 			var labels []any
@@ -90,7 +90,7 @@ LIMIT 50
 			if len(commentsJSON) > 0 {
 				_ = json.Unmarshal(commentsJSON, &comments)
 			}
-			
+
 			out = append(out, fiber.Map{
 				"github_issue_id": gid,
 				"number":          number,
@@ -100,7 +100,7 @@ LIMIT 50
 				"author_login":    author,
 				"assignees":       assignees,
 				"labels":          labels,
-				"comments_count": commentsCount,
+				"comments_count":  commentsCount,
 				"comments":        comments, // Actual comments array
 				"url":             url,
 				"updated_at":      updated,
@@ -143,18 +143,18 @@ LIMIT 50
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "prs_list_failed"})
 			}
 			out = append(out, fiber.Map{
-				"github_pr_id":    gid,
-				"number":          number,
-				"state":           state,
-				"title":           title,
-				"author_login":    author,
-				"url":             url,
-				"merged":          merged,
-				"created_at":       createdAt,
-				"updated_at":      updated,
-				"closed_at":       closedAt,
-				"merged_at":       mergedAt,
-				"last_seen_at":    lastSeen,
+				"github_pr_id": gid,
+				"number":       number,
+				"state":        state,
+				"title":        title,
+				"author_login": author,
+				"url":          url,
+				"merged":       merged,
+				"created_at":   createdAt,
+				"updated_at":   updated,
+				"closed_at":    closedAt,
+				"merged_at":    mergedAt,
+				"last_seen_at": lastSeen,
 			})
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"prs": out})
@@ -190,10 +190,10 @@ LIMIT 50
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "events_list_failed"})
 			}
 			out = append(out, fiber.Map{
-				"delivery_id":  deliveryID,
-				"event":        event,
-				"action":       action,
-				"received_at":  receivedAt,
+				"delivery_id": deliveryID,
+				"event":       event,
+				"action":      action,
+				"received_at": receivedAt,
 			})
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"events": out})
@@ -227,7 +227,3 @@ func (h *ProjectDataHandler) authorizeProject(c *fiber.Ctx) (uuid.UUID, bool, er
 	ownerOK := owner == userID || role == "admin"
 	return projectID, ownerOK, nil
 }
-
-
-
-

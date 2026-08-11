@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
@@ -38,17 +39,37 @@ func Eligible(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[str
 	if cfg["founding_require_social_follow"] == "false" {
 		return true, "", nil
 	}
-	var completed bool
+
+	// Read the submission's own status rather than a separate "completed"
+	// record. The old social_follow_completions table existed to hold
+	// points_awarded and nothing else; a row in it meant "was paid", which is
+	// not the same claim as "is eligible now" and would have kept somebody
+	// eligible after their approval was withdrawn.
+	//
+	// Only 'approved' passes. 'revoked' is the case this distinction exists
+	// for: an approval that has since been withdrawn must not confer
+	// eligibility, and it is the path most likely to break silently, because
+	// a revoked submission still looks like a submission.
+	var status string
 	err := pool.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM social_follow_completions WHERE user_id = $1)
-`, userID).Scan(&completed)
+SELECT status FROM social_follow_submissions WHERE user_id = $1
+`, userID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, "no social follow submission at settlement", nil
+	}
 	if err != nil {
 		return false, "", fmt.Errorf("founding.Eligible: %w", err)
 	}
-	if !completed {
-		return false, "social follow not completed at settlement", nil
+
+	switch status {
+	case "approved":
+		return true, "", nil
+	case "revoked":
+		return false, "social follow approval was revoked before settlement", nil
+	default:
+		// pending or rejected.
+		return false, "social follow not approved at settlement (" + status + ")", nil
 	}
-	return true, "", nil
 }
 
 // Line is one member's computed settlement.

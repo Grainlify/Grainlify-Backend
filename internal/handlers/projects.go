@@ -152,7 +152,7 @@ func (h *ProjectsHandler) Mine() fiber.Handler {
 			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		
+
 		userID, err := uuid.Parse(sub)
 		if err != nil {
 			slog.Warn("projects/mine: failed to parse user_id as UUID",

@@ -232,5 +232,3 @@ func (h *OpenSourceWeekAdminHandler) Delete() fiber.Handler {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
-
-

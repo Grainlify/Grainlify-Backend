@@ -4,14 +4,14 @@ package handlers
 type RankTier string
 
 const (
-	RankConqueror RankTier = "conqueror" // Top 1-5
-	RankAce       RankTier = "ace"       // Top 6-10
-	RankCrown     RankTier = "crown"      // Top 11-20
-	RankDiamond   RankTier = "diamond"   // Top 21-50
-	RankGold      RankTier = "gold"      // Top 51-100
-	RankSilver    RankTier = "silver"     // Top 101-500
-	RankBronze    RankTier = "bronze"    // Below 500 or no contributions
-	RankTierUnranked RankTier = "unranked" // No contributions or not in ranking
+	RankConqueror    RankTier = "conqueror" // Top 1-5
+	RankAce          RankTier = "ace"       // Top 6-10
+	RankCrown        RankTier = "crown"     // Top 11-20
+	RankDiamond      RankTier = "diamond"   // Top 21-50
+	RankGold         RankTier = "gold"      // Top 51-100
+	RankSilver       RankTier = "silver"    // Top 101-500
+	RankBronze       RankTier = "bronze"    // Below 500 or no contributions
+	RankTierUnranked RankTier = "unranked"  // No contributions or not in ranking
 )
 
 // GetRankTier returns the rank tier based on leaderboard position
@@ -88,4 +88,3 @@ func GetRankTierColor(tier RankTier) string {
 		return "#CD7F32"
 	}
 }
-

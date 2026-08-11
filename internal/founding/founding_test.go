@@ -61,14 +61,21 @@ INSERT INTO users (email, role) VALUES ($1, 'contributor') RETURNING id
 	return id
 }
 
-func completeSocialFollow(t *testing.T, d *db.DB, userID uuid.UUID) {
+// socialFollowWithStatus gives a user a submission in a given state.
+func socialFollowWithStatus(t *testing.T, d *db.DB, userID uuid.UUID, status string) {
 	t.Helper()
 	if _, err := d.Pool.Exec(context.Background(), `
-INSERT INTO social_follow_completions (user_id, points_awarded) VALUES ($1, 0)
-ON CONFLICT (user_id) DO NOTHING
-`, userID); err != nil {
-		t.Fatalf("complete social follow: %v", err)
+INSERT INTO social_follow_submissions (user_id, linkedin_screenshot, x_screenshot, status)
+VALUES ($1, 'data:image/png;base64,x', 'data:image/png;base64,x', $2)
+ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status
+`, userID, status); err != nil {
+		t.Fatalf("set social follow status: %v", err)
 	}
+}
+
+func completeSocialFollow(t *testing.T, d *db.DB, userID uuid.UUID) {
+	t.Helper()
+	socialFollowWithStatus(t, d, userID, "approved")
 }
 
 // TestWaveFor_BoundariesAtTheEdges pins the wave ranges, including the exact

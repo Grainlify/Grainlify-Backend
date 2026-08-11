@@ -164,7 +164,3 @@ func (h *AdminHandler) BootstrapAdmin() fiber.Handler {
 		})
 	}
 }
-
-
-
-

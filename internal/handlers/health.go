@@ -10,12 +10,3 @@ func Health() fiber.Handler {
 		})
 	}
 }
-
-
-
-
-
-
-
-
-

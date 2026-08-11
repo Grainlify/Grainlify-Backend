@@ -23,12 +23,20 @@ const (
 	// preference toggle exists in the UI so it's ready once payouts ship.
 	TypeRewardReceived Type = "reward_received"
 	// TypeReferralCompleted fires when someone a user referred finishes
-	// GitHub signup + KYC verification, crediting the referrer with points
-	// (internal/handlers/referrals.go maybeCompleteReferral).
+	// GitHub signup + KYC verification (internal/handlers/referrals.go
+	// maybeCompleteReferral). It no longer credits points - the fixed-rate
+	// programme is retired - and the referral now counts toward the Founding
+	// Contributor Pool instead.
 	TypeReferralCompleted Type = "referral_completed"
-	// TypeSocialFollowCompleted fires once a user's proof submissions for
-	// every social-follow platform have been approved
-	// (internal/handlers/social_follow.go maybeCompleteSocialFollow).
+	// TypeSocialFollowCompleted carries every social-follow decision:
+	// approved, rejected, or revoked (internal/handlers/social_follow.go
+	// decide). The stored value keeps its original name because it is
+	// persisted on existing notification rows and read by preference
+	// filters; the name is narrower than what it now covers.
+	//
+	// Revocation is the reason this fires on more than approval. Eligibility
+	// disappearing silently, and surfacing only when the pool is shared out,
+	// is how a defensible decision comes to look arbitrary.
 	TypeSocialFollowCompleted Type = "social_follow_completed"
 	// TypeRedemptionPaid fires when an admin marks a points->USDC redemption
 	// request as paid (internal/handlers/redemptions.go).

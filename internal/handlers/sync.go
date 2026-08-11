@@ -127,24 +127,3 @@ LIMIT 50
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"jobs": out})
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

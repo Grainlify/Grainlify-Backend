@@ -240,7 +240,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	// Social-follow program: proof-of-follow submissions + review (internal/handlers/social_follow.go).
 	socialFollow := handlers.NewSocialFollowHandler(deps.DB, notifSvc)
-	app.Post("/social-follow/:platform/submit", auth.RequireAuth(cfg.JWTSecret), socialFollow.Submit())
+	// One request covering both platforms. The old per-platform endpoint is
+	// gone rather than deprecated: leaving it reachable would leave the
+	// half-approved state reachable with it.
+	app.Post("/social-follow/submit", auth.RequireAuth(cfg.JWTSecret), socialFollow.SubmitAll())
 	app.Get("/social-follow/me", auth.RequireAuth(cfg.JWTSecret), socialFollow.Me())
 
 	// Points -> USDC redemption requests (internal/handlers/redemptions.go).
@@ -375,6 +378,9 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/social-follow/submissions", auth.RequireRole("admin"), socialFollow.ListSubmissions())
 	adminGroup.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), socialFollow.Approve())
 	adminGroup.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), socialFollow.Reject())
+	// Eligibility is re-read at settlement, so an approval has to be
+	// withdrawable after the fact.
+	adminGroup.Post("/social-follow/submissions/:id/revoke", auth.RequireRole("admin"), socialFollow.Revoke())
 
 	adminGroup.Get("/redemptions", auth.RequireRole("admin"), redemptions.ListAdmin())
 	adminGroup.Post("/redemptions/:id/mark-paid", auth.RequireRole("admin"), redemptions.MarkPaid())

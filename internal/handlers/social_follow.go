@@ -1,12 +1,8 @@
 package handlers
 
 import (
-	"context"
 	"errors"
-	"log/slog"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -17,30 +13,40 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
-// socialFollowPlatforms is the fixed set a user must have an approved
-// submission for to complete the program. Keep in sync with the frontend's
-// SOCIAL_FOLLOW_PLATFORMS list (features/settings/components/rewards).
-var socialFollowPlatforms = []string{"github", "telegram", "linkedin"}
+// Following Grainlify is an **eligibility requirement** for the Founding
+// Contributor Pool, worth zero shares.
+//
+// It used to pay 500 points. Paying real money for a free, reversible action
+// a bot can perform was the same mistake the whole redesign exists to undo -
+// and it came out of the budget that now pays people who ship code. As a
+// requirement it costs nothing, gets more follows rather than fewer (everyone
+// who wants a share must follow), and cannot be farmed, because there is
+// nothing to collect.
+//
+// Nothing in this file grants anything. If a future change adds a reward
+// here, it is reintroducing the retired programme.
 
-// socialFollowPointsPerCompletion is 5x referralPointsPerCompletion, per
-// product decision: this program is worth noticeably more than a single
-// referral since it requires action across three platforms.
-const socialFollowPointsPerCompletion = 5 * referralPointsPerCompletion
+// socialFollowPlatforms is the set a contributor must submit proof for. Both
+// are required and both are submitted together - see SubmitAll.
+//
+// Keep in sync with the frontend's SOCIAL_FOLLOW_PLATFORMS.
+var socialFollowPlatforms = []string{"linkedin", "x"}
 
-// maxScreenshotDataURLBytes bounds the base64 data URL string
-// (screenshot proof is stored as TEXT, same convention as
-// ecosystems.logo_url) - roughly a 5MB image after base64's ~1.37x
-// inflation, with headroom.
+// maxScreenshotDataURLBytes bounds each base64 data URL string (screenshots
+// are stored as TEXT, same convention as ecosystems.logo_url) - roughly a 5MB
+// image after base64's ~1.37x inflation, with headroom.
 const maxScreenshotDataURLBytes = 8 * 1024 * 1024
 
-func isValidSocialFollowPlatform(platform string) bool {
-	for _, p := range socialFollowPlatforms {
-		if p == platform {
-			return true
-		}
-	}
-	return false
-}
+// Submission states. 'revoked' is deliberately distinct from 'rejected':
+// rejected means the proof was not good enough, revoked means it was accepted
+// and has since been withdrawn. Only the second needs explaining to somebody
+// who thought they were eligible.
+const (
+	socialFollowPending  = "pending"
+	socialFollowApproved = "approved"
+	socialFollowRejected = "rejected"
+	socialFollowRevoked  = "revoked"
+)
 
 type SocialFollowHandler struct {
 	db     *db.DB
@@ -60,13 +66,28 @@ func (h *SocialFollowHandler) userID(c *fiber.Ctx) (uuid.UUID, bool) {
 	return id, true
 }
 
-type socialFollowSubmitRequest struct {
-	Screenshot string `json:"screenshot"`
+func isImageDataURL(s string) bool {
+	return strings.HasPrefix(s, "data:image/")
 }
 
-// Submit handles POST /social-follow/:platform/submit. Resubmission (e.g.
-// after a rejection) overwrites the same row and resets it to pending.
-func (h *SocialFollowHandler) Submit() fiber.Handler {
+type socialFollowSubmitRequest struct {
+	LinkedIn string `json:"linkedin_screenshot"`
+	X        string `json:"x_screenshot"`
+}
+
+// SubmitAll handles POST /social-follow/submit: both platforms, one request,
+// all or nothing.
+//
+// Atomicity is the point. Under the previous per-platform endpoint a
+// contributor could be approved on one platform and pending on another, which
+// meant "are they eligible?" had no single answer and a reviewer had to make
+// two decisions that only made sense together. Both screenshots arrive in one
+// request, land in one row, and are decided once.
+//
+// Resubmission after a rejection or a revocation overwrites the same row and
+// returns it to pending. Nothing is lost by that: every decision ever taken is
+// in social_follow_decisions, which is what a dispute is answered from.
+func (h *SocialFollowHandler) SubmitAll() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
@@ -76,52 +97,72 @@ func (h *SocialFollowHandler) Submit() fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
 
-		platform := c.Params("platform")
-		if !isValidSocialFollowPlatform(platform) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_platform"})
-		}
-
 		var req socialFollowSubmitRequest
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_body"})
 		}
-		if strings.TrimSpace(req.Screenshot) == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "screenshot_required"})
+		linkedIn, x := strings.TrimSpace(req.LinkedIn), strings.TrimSpace(req.X)
+
+		// Validate both before writing either. Refusing the whole request is
+		// the entire reason this endpoint exists: accepting the valid half
+		// would recreate the partial state the atomic model removes.
+		if linkedIn == "" || x == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "both_screenshots_required",
+				"message": "Both platforms are submitted together. Upload a screenshot for each before submitting.",
+			})
 		}
-		if !strings.HasPrefix(req.Screenshot, "data:image/") {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "screenshot_must_be_an_image"})
-		}
-		if len(req.Screenshot) > maxScreenshotDataURLBytes {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "screenshot_too_large"})
+		for _, s := range []string{linkedIn, x} {
+			if !isImageDataURL(s) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_screenshot"})
+			}
+			if len(s) > maxScreenshotDataURLBytes {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "screenshot_too_large"})
+			}
 		}
 
-		_, err := h.db.Pool.Exec(c.Context(), `
-INSERT INTO social_follow_submissions (user_id, platform, screenshot, status, rejection_reason, reviewed_by, reviewed_at, updated_at)
-VALUES ($1, $2, $3, 'pending', NULL, NULL, NULL, now())
-ON CONFLICT (user_id, platform) DO UPDATE SET
-  screenshot = EXCLUDED.screenshot,
-  status = 'pending',
-  rejection_reason = NULL,
-  reviewed_by = NULL,
-  reviewed_at = NULL,
-  updated_at = now()
-`, userID, platform, req.Screenshot)
+		tx, err := h.db.Pool.BeginTx(c.Context(), pgx.TxOptions{})
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submit_failed"})
 		}
+		defer func() { _ = tx.Rollback(c.Context()) }()
 
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
+		var submissionID uuid.UUID
+		if err := tx.QueryRow(c.Context(), `
+INSERT INTO social_follow_submissions (user_id, linkedin_screenshot, x_screenshot, status)
+VALUES ($1, $2, $3, 'pending')
+ON CONFLICT (user_id) DO UPDATE
+SET linkedin_screenshot = EXCLUDED.linkedin_screenshot,
+    x_screenshot        = EXCLUDED.x_screenshot,
+    status              = 'pending',
+    decided_by          = NULL,
+    decided_at          = NULL,
+    decision_reason     = NULL,
+    updated_at          = now()
+RETURNING id
+`, userID, linkedIn, x).Scan(&submissionID); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submit_failed"})
+		}
+
+		if _, err := tx.Exec(c.Context(), `
+INSERT INTO social_follow_decisions (submission_id, decision, actor_user_id)
+VALUES ($1, 'submitted', $2)
+`, submissionID, userID); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submit_failed"})
+		}
+
+		if err := tx.Commit(c.Context()); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submit_failed"})
+		}
+		return c.JSON(fiber.Map{"id": submissionID, "status": socialFollowPending})
 	}
 }
 
-type socialFollowStatusDTO struct {
-	Platform        string  `json:"platform"`
-	Status          *string `json:"status"` // null when never submitted
-	RejectionReason *string `json:"rejection_reason,omitempty"`
-}
-
-// Me handles GET /social-follow/me: per-platform submission status plus
-// whether the combined reward has been earned.
+// Me handles GET /social-follow/me.
+//
+// Returns the decision and its reason, including for a revocation. Somebody
+// whose eligibility is withdrawn without an explanation reads it as
+// arbitrary, and they would be right to.
 func (h *SocialFollowHandler) Me() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -132,221 +173,214 @@ func (h *SocialFollowHandler) Me() fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
 
-		rows, err := h.db.Pool.Query(c.Context(), `
-SELECT platform, status, rejection_reason FROM social_follow_submissions WHERE user_id = $1
-`, userID)
+		var (
+			status  string
+			reason  *string
+			decided *string
+		)
+		err := h.db.Pool.QueryRow(c.Context(), `
+SELECT status, decision_reason, decided_at::text
+FROM social_follow_submissions WHERE user_id = $1
+`, userID).Scan(&status, &reason, &decided)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(fiber.Map{
+				"platforms": socialFollowPlatforms,
+				"submitted": false,
+				"status":    nil,
+				"eligible":  false,
+			})
+		}
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status_lookup_failed"})
-		}
-		found := map[string]socialFollowStatusDTO{}
-		for rows.Next() {
-			var platform, status string
-			var reason *string
-			if err := rows.Scan(&platform, &status, &reason); err != nil {
-				rows.Close()
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status_scan_failed"})
-			}
-			found[platform] = socialFollowStatusDTO{Platform: platform, Status: &status, RejectionReason: reason}
-		}
-		rows.Close()
-
-		out := make([]socialFollowStatusDTO, 0, len(socialFollowPlatforms))
-		for _, p := range socialFollowPlatforms {
-			if dto, ok := found[p]; ok {
-				out = append(out, dto)
-			} else {
-				out = append(out, socialFollowStatusDTO{Platform: p, Status: nil})
-			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
 		}
 
-		var pointsAwarded int
-		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT points_awarded FROM social_follow_completions WHERE user_id = $1
-`, userID).Scan(&pointsAwarded)
-		completed := err == nil
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "completion_lookup_failed"})
-		}
-
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"platforms":      out,
-			"completed":      completed,
-			"points_awarded": pointsAwarded,
-			"points_reward":  socialFollowPointsPerCompletion,
+		return c.JSON(fiber.Map{
+			"platforms":       socialFollowPlatforms,
+			"submitted":       true,
+			"status":          status,
+			"decision_reason": reason,
+			"decided_at":      decided,
+			// The single question everything else here exists to answer.
+			"eligible": status == socialFollowApproved,
 		})
 	}
 }
 
-type socialFollowSubmissionDTO struct {
-	ID         uuid.UUID `json:"id"`
-	UserID     uuid.UUID `json:"user_id"`
-	Login      *string   `json:"login,omitempty"`
-	Platform   string    `json:"platform"`
-	Screenshot string    `json:"screenshot"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
-// ListSubmissions handles GET /admin/social-follow/submissions?status=pending
-// (status defaults to "pending" - the review queue - but any valid status
-// can be requested for a history view).
+// ListSubmissions handles GET /admin/social-follow/submissions.
+//
+// Returns both screenshots so a reviewer can see them side by side and make
+// one decision, rather than judging one platform without the other in view.
 func (h *SocialFollowHandler) ListSubmissions() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
 		}
-		status := c.Query("status", "pending")
 
-		rows, err := h.db.Pool.Query(c.Context(), `
-SELECT s.id, s.user_id, ga.login, s.platform, s.screenshot, s.status, s.created_at
+		// Defaults to the review queue; ?status=all for the full picture,
+		// which is what a revocation is decided from.
+		filter := c.Query("status", socialFollowPending)
+		query := `
+SELECT s.id, s.user_id, COALESCE(ga.login, ''), s.linkedin_screenshot, s.x_screenshot,
+       s.status, s.decision_reason, s.decided_at::text, s.created_at::text
 FROM social_follow_submissions s
 LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
-WHERE s.status = $1
-ORDER BY s.created_at ASC
-LIMIT 100
-`, status)
+`
+		args := []any{}
+		if filter != "all" {
+			query += " WHERE s.status = $1"
+			args = append(args, filter)
+		}
+		query += " ORDER BY s.created_at ASC"
+
+		rows, err := h.db.Pool.Query(c.Context(), query, args...)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submissions_list_failed"})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
 		}
 		defer rows.Close()
 
-		out := []socialFollowSubmissionDTO{}
+		out := []fiber.Map{}
 		for rows.Next() {
-			var s socialFollowSubmissionDTO
-			if err := rows.Scan(&s.ID, &s.UserID, &s.Login, &s.Platform, &s.Screenshot, &s.Status, &s.CreatedAt); err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "submissions_scan_failed"})
+			var (
+				id, userID                 uuid.UUID
+				login, linkedIn, x, status string
+				reason, decidedAt          *string
+				createdAt                  string
+			)
+			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &decidedAt, &createdAt); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
 			}
-			out = append(out, s)
+			out = append(out, fiber.Map{
+				"id": id, "user_id": userID, "github_login": login,
+				"linkedin_screenshot": linkedIn, "x_screenshot": x,
+				"status": status, "decision_reason": reason,
+				"decided_at": decidedAt, "created_at": createdAt,
+			})
 		}
-
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"submissions": out})
+		return c.JSON(fiber.Map{"submissions": out})
 	}
+}
+
+type socialFollowDecisionRequest struct {
+	Reason string `json:"reason"`
+}
+
+// decide applies one decision to a whole submission and logs it.
+//
+// One decision covers both platforms by construction - there is no per-
+// platform state left to disagree with itself.
+func (h *SocialFollowHandler) decide(c *fiber.Ctx, to string, requireReason bool) error {
+	if h.db == nil || h.db.Pool == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+	}
+	adminID, ok := h.userID(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+	}
+	submissionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_submission_id"})
+	}
+
+	var req socialFollowDecisionRequest
+	_ = c.BodyParser(&req)
+	reason := strings.TrimSpace(req.Reason)
+	if requireReason && reason == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   "reason_required",
+			"message": "A reason is recorded and shown to the contributor, so this decision needs one.",
+		})
+	}
+
+	tx, err := h.db.Pool.BeginTx(c.Context(), pgx.TxOptions{})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
+	}
+	defer func() { _ = tx.Rollback(c.Context()) }()
+
+	// Revocation applies only to something currently approved. Revoking a
+	// pending or rejected submission is meaningless and almost certainly a
+	// misclick on the wrong row.
+	var submitterID uuid.UUID
+	q := `
+UPDATE social_follow_submissions
+SET status = $1, decided_by = $2, decided_at = now(), decision_reason = NULLIF($3, ''), updated_at = now()
+WHERE id = $4`
+	if to == socialFollowRevoked {
+		q += ` AND status = '` + socialFollowApproved + `'`
+	}
+	q += ` RETURNING user_id`
+
+	if err := tx.QueryRow(c.Context(), q, to, adminID, reason, submissionID).Scan(&submitterID); errors.Is(err, pgx.ErrNoRows) {
+		if to == socialFollowRevoked {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":   "not_approved",
+				"message": "Only an approved submission can be revoked.",
+			})
+		}
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "submission_not_found"})
+	} else if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
+	}
+
+	if _, err := tx.Exec(c.Context(), `
+INSERT INTO social_follow_decisions (submission_id, decision, reason, actor_user_id)
+VALUES ($1, $2, NULLIF($3, ''), $4)
+`, submissionID, to, reason, adminID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
+	}
+
+	if err := tx.Commit(c.Context()); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
+	}
+
+	h.notifyDecision(c, submitterID, to, reason)
+	return c.JSON(fiber.Map{"ok": true, "status": to})
+}
+
+// notifyDecision tells the contributor what happened. Best-effort: a failed
+// notification must not undo a recorded decision.
+//
+// A revocation is the one that matters. Eligibility disappearing silently,
+// and only becoming visible when the pool is shared out, is exactly how a
+// fair decision comes to look arbitrary.
+func (h *SocialFollowHandler) notifyDecision(c *fiber.Ctx, userID uuid.UUID, to, reason string) {
+	if h.notify == nil {
+		return
+	}
+	var title, body string
+	switch to {
+	case socialFollowApproved:
+		title = "Social follow approved"
+		body = "Your follow proof was approved. You're eligible for the Founding Contributor Pool."
+	case socialFollowRejected:
+		title = "Social follow proof needs another look"
+		body = "Your follow proof wasn't approved: " + reason + " You can upload new screenshots and submit again."
+	case socialFollowRevoked:
+		title = "Social follow eligibility withdrawn"
+		body = "Your follow approval was withdrawn: " + reason + " You can submit new proof to become eligible again."
+	default:
+		return
+	}
+	h.notify.Notify(c.Context(), userID, notifications.TypeSocialFollowCompleted, title, body, "/settings?subtab=rewards")
 }
 
 // Approve handles POST /admin/social-follow/submissions/:id/approve.
 func (h *SocialFollowHandler) Approve() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
-		}
-		adminID, ok := h.userID(c)
-		if !ok {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
-		}
-		submissionID, err := uuid.Parse(c.Params("id"))
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_submission_id"})
-		}
-
-		var submitterID uuid.UUID
-		err = h.db.Pool.QueryRow(c.Context(), `
-UPDATE social_follow_submissions
-SET status = 'approved', reviewed_by = $1, reviewed_at = now(), updated_at = now()
-WHERE id = $2
-RETURNING user_id
-`, adminID, submissionID).Scan(&submitterID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "submission_not_found"})
-		}
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "approve_failed"})
-		}
-
-		maybeCompleteSocialFollow(c.Context(), h.db, h.notify, submitterID)
-
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
-	}
+	return func(c *fiber.Ctx) error { return h.decide(c, socialFollowApproved, false) }
 }
 
-type socialFollowRejectRequest struct {
-	Reason string `json:"reason"`
-}
-
-// Reject handles POST /admin/social-follow/submissions/:id/reject.
+// Reject handles POST /admin/social-follow/submissions/:id/reject. A reason is
+// required - it is shown to the contributor so they can fix and resubmit.
 func (h *SocialFollowHandler) Reject() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if h.db == nil || h.db.Pool == nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
-		}
-		adminID, ok := h.userID(c)
-		if !ok {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
-		}
-		submissionID, err := uuid.Parse(c.Params("id"))
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_submission_id"})
-		}
-		var req socialFollowRejectRequest
-		_ = c.BodyParser(&req) // reason is optional
-
-		tag, err := h.db.Pool.Exec(c.Context(), `
-UPDATE social_follow_submissions
-SET status = 'rejected', rejection_reason = $1, reviewed_by = $2, reviewed_at = now(), updated_at = now()
-WHERE id = $3
-`, nullIfEmpty(req.Reason), adminID, submissionID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "reject_failed"})
-		}
-		if tag.RowsAffected() == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "submission_not_found"})
-		}
-
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
-	}
+	return func(c *fiber.Ctx) error { return h.decide(c, socialFollowRejected, true) }
 }
 
-// maybeCompleteSocialFollow checks whether userID now has an approved
-// submission for every platform, and if so awards the combined reward
-// exactly once. Best-effort: never fails the caller (Approve() above).
-func maybeCompleteSocialFollow(ctx context.Context, d *db.DB, notify *notifications.Service, userID uuid.UUID) {
-	if d == nil || d.Pool == nil {
-		return
-	}
-
-	var approvedCount int
-	err := d.Pool.QueryRow(ctx, `
-SELECT count(*) FROM social_follow_submissions WHERE user_id = $1 AND status = 'approved'
-`, userID).Scan(&approvedCount)
-	if err != nil {
-		slog.Warn("social_follow: approved-count lookup failed", "user_id", userID, "error", err)
-		return
-	}
-	if approvedCount < len(socialFollowPlatforms) {
-		return
-	}
-
-	// PRIMARY KEY on user_id is the guard: only the first of any concurrent
-	// approvals that crosses the threshold actually inserts a row.
-	// Still recorded while the programme is frozen, and awards nothing.
-	// Following becomes an *eligibility* requirement for the Founding
-	// Contributor Pool rather than a payment, so the completion record is
-	// what that check will read - and unlike a payment it cannot be farmed,
-	// because there is no longer anything to collect.
-	awarded := pointsGrantAmount(socialFollowPointsPerCompletion)
-	tag, err := d.Pool.Exec(ctx, `
-INSERT INTO social_follow_completions (user_id, points_awarded)
-VALUES ($1, $2)
-ON CONFLICT (user_id) DO NOTHING
-`, userID, awarded)
-	if err != nil {
-		slog.Warn("social_follow: completion insert failed", "user_id", userID, "error", err)
-		return
-	}
-	if tag.RowsAffected() == 0 {
-		return // already completed
-	}
-
-	if awarded > 0 {
-		if err := insertLedgerEntry(ctx, d.Pool, userID, awarded, "social_follow", nil); err != nil {
-			slog.Warn("social_follow: ledger entry failed", "user_id", userID, "error", err)
-		}
-	}
-
-	title, body := "Social follow reward earned",
-		"You followed us on every platform and verification is complete - you earned "+strconv.Itoa(awarded)+" points."
-	if awarded == 0 {
-		title = "Social follow verified"
-		body = "You're following us everywhere and your proof is approved. Rewards are moving to the Founding Contributor Pool - we'll share the details before it opens."
-	}
-	notify.Notify(ctx, userID, notifications.TypeSocialFollowCompleted, title, body, "/settings?tab=rewards")
+// Revoke handles POST /admin/social-follow/submissions/:id/revoke.
+//
+// Eligibility is re-read at settlement, so an approval must be withdrawable
+// after the fact. The submission and both screenshots are kept: this is a
+// status change, and the record of what was approved is precisely what a
+// revocation dispute turns on.
+func (h *SocialFollowHandler) Revoke() fiber.Handler {
+	return func(c *fiber.Ctx) error { return h.decide(c, socialFollowRevoked, true) }
 }
