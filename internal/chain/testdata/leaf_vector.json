@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Cross-implementation leaf vector. The identical file lives at",
+    "Stellar-Contracts/contracts/grainhack-escrow/src/test.rs (inline constants,",
+    "test `leaf_matches_the_pinned_cross_implementation_vector`). The two must",
+    "stay byte-identical.",
+    "",
+    "The contract exports leaf() so an off-chain builder can be tested against",
+    "it rather than against a second implementation of the same rules that can",
+    "drift. That check was never wired up and the two did drift: for these",
+    "inputs the contract produces contract_leaf_contributor below, and the Go",
+    "builder in merkle.go produces backend_leaf_current. They hash different",
+    "field sets, so no choice of inputs makes them agree.",
+    "",
+    "Both digests are recorded here on purpose. Once a canonical construction is",
+    "chosen and both sides implement it, this collapses to one `leaf_contributor`",
+    "value asserted from Go and from Rust, and the two `*_current` fields go."
+  ],
+  "inputs": {
+    "identity_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "claim_address": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "amount_minor": 1500000,
+    "chain_id": "stellar",
+    "event_id": "evt-1"
+  },
+  "contract_leaf_contributor": "5b28103d10e8dd709b2c7d257bb212cdec80fac5b4f2aedecb41e24955acb6a3",
+  "contract_leaf_maintainer": "e5d16d25eacfff66968552c19b07fc8e16f3fc22b09e4c1aa6e583a8488a2395",
+  "backend_leaf_current": "4058d072cd76ba70d60006eb202c53131f94ee09bf7ab5eaf698580ec0b868a4",
+  "constructions": {
+    "contract": "sha256(0x00 || pool_u8 || address_xdr || identity_hash || amount_i128_be16)",
+    "backend": "sha256(0x00 || identity_hash || address_utf8 || amount_i64_be8 || chain_id_utf8 || event_id_utf8)"
+  }
+}
