@@ -88,6 +88,10 @@ WHERE referrer_user_id = $1
 			"completed":           completed,
 			"points_earned":       pointsEarned,
 			"points_per_referral": referralPointsPerCompletion,
+			// The window is published in the referral copy. It is served from
+			// the same constant the backend enforces, so the sentence a user
+			// reads cannot drift from the rule the token actually carries.
+			"referral_window_days": referralWindowDays,
 		})
 	}
 }
@@ -135,6 +139,10 @@ func generateReferralCode() string {
 // REFERRAL_CODE_TTL_DAYS in the frontend, which renders it in the copy.
 const ReferralCaptureTTL = 30 * 24 * time.Hour
 
+// referralWindowDays is ReferralCaptureTTL expressed the way it is published.
+// Derived, never typed twice.
+var referralWindowDays = int(ReferralCaptureTTL.Hours() / 24)
+
 // Capture handles GET /referrals/capture?ref=CODE.
 //
 // Signs the code with a capture time so the 30-day window can be enforced
@@ -159,7 +167,7 @@ func (h *ReferralsHandler) Capture() fiber.Handler {
 		}
 		return c.JSON(fiber.Map{
 			"token":      token,
-			"valid_days": int(ReferralCaptureTTL.Hours() / 24),
+			"valid_days": referralWindowDays,
 		})
 	}
 }

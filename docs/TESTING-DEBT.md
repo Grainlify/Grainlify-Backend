@@ -375,16 +375,17 @@ the test above has to be deleted rather than fixed.
 
 ## What is still not covered
 
-- **Cross-repo agreement on the published figure.**
-  `TestReferralCapture_Endpoint` asserts the endpoint reports
-  `valid_days == 30`, which pins the enforced TTL to the number the backend
-  publishes. Nothing ties that to `REFERRAL_CODE_TTL_DAYS` in
-  `Grainlify-Frontend/src/shared/api/client.ts`, which is what actually
-  renders in the referral copy. A guard test cannot cheaply read across
-  repositories; the durable fix is for the frontend to render the
-  `valid_days` the capture response already returns instead of its own
-  constant. Until it does, the two numbers can drift and the published claim
-  can outlive the enforced rule.
+- ~~**Cross-repo agreement on the published figure.**~~ **Closed.** There is
+  no longer a second copy of the number to disagree with. The frontend has no
+  window constant: `/referrals/capture` returns `valid_days`, which the client
+  stores next to the token and uses for its local sweep, and `/referrals/me`
+  returns `referral_window_days`, which is what the referral copy renders.
+  Both come from `handlers.ReferralCaptureTTL`, the same constant
+  `IssueReferralCapture` is called with. Note the general shape, because it
+  beats a guard test: a guard test detects drift after someone writes it,
+  whereas serving the figure from the enforcing constant makes the drift
+  unrepresentable. Prefer that whenever a published number and an enforced
+  number are the same number.
 - **The handler path at the real TTL.** The unit tests cover
   issue/parse directly. No test drives `POST /referrals/capture` →
   `GET /auth/github/login?ref_token=…` with a token that is genuinely near
