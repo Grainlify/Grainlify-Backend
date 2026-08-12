@@ -149,10 +149,27 @@ func (h *GitHubOAuthHandler) LoginStart() fiber.Handler {
 		redirectURI := c.Query("redirect")
 		slog.Info("OAuth login start - received redirect parameter", "redirect", redirectURI)
 
-		// Optional referral code (see internal/handlers/referrals.go). Not
-		// validated here - an unknown/stale code is simply a no-op attach at
-		// the callback, same as if no code were passed at all.
-		refCode := c.Query("ref")
+		// Optional referral code, carried as a SIGNED capture token rather
+		// than a bare code (see auth/referral_capture.go).
+		//
+		// A bare `ref` is deliberately no longer honoured. The published rule
+		// is "a click counts for 30 days", and while the expiry lived only in
+		// the browser it could be bypassed by calling this endpoint directly
+		// with a stale code. A published rule the backend does not enforce is
+		// the same class of problem as copy that contradicts the consent
+		// screen.
+		//
+		// Fails closed: an expired, forged, or malformed token yields no
+		// referral rather than an unverified one.
+		refCode := ""
+		if capture := strings.TrimSpace(c.Query("ref_token")); capture != "" {
+			code, capErr := auth.ParseReferralCapture(h.cfg.JWTSecret, capture)
+			if capErr != nil {
+				slog.Info("OAuth login start - referral capture token rejected", "error", capErr)
+			} else {
+				refCode = code
+			}
+		}
 
 		// Validate redirect_uri is a valid URL and from an allowed origin
 		if redirectURI != "" {

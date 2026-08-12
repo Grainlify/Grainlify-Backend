@@ -3,12 +3,15 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 )
@@ -17,8 +20,9 @@ const referralSuiteJWTSecret = "referrals-suite-test-secret"
 
 func referralSuiteApp(d *db.DB) *fiber.App {
 	app := fiber.New()
-	h := handlers.NewReferralsHandler(d)
+	h := handlers.NewReferralsHandler(d, config.Config{JWTSecret: referralSuiteJWTSecret})
 	app.Get("/referrals/me", auth.RequireAuth(referralSuiteJWTSecret), h.Me())
+	app.Get("/referrals/capture", h.Capture())
 	return app
 }
 
@@ -159,4 +163,53 @@ VALUES ($1, $2, $3, $4, CASE WHEN $3 = 'completed' THEN now() ELSE NULL END)
 	if got.PointsEarned != 200 {
 		t.Errorf("points_earned = %d, want 200", got.PointsEarned)
 	}
+}
+
+// TestReferralCapture_Endpoint covers GET /referrals/capture, the entry point
+// for the 30-day window. It touches no tables - a visitor clicking a referral
+// link has not signed in and the code is deliberately not validated here - so
+// it runs against a handler with no database.
+func TestReferralCapture_Endpoint(t *testing.T) {
+	app := referralSuiteApp(nil)
+
+	t.Run("returns a token that parses back to the code", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/referrals/capture?ref=ABC12345", nil)
+		resp, err := app.Test(req, -1)
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var body struct {
+			Token     string `json:"token"`
+			ValidDays int    `json:"valid_days"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// The published figure and the enforced figure are the same number.
+		if body.ValidDays != 30 {
+			t.Errorf("valid_days = %d, want 30 (the window in the referral copy)", body.ValidDays)
+		}
+		code, err := auth.ParseReferralCapture(referralSuiteJWTSecret, body.Token)
+		if err != nil {
+			t.Fatalf("issued token does not parse: %v", err)
+		}
+		if code != "ABC12345" {
+			t.Errorf("code = %q, want ABC12345", code)
+		}
+	})
+
+	t.Run("rejects a missing or oversized code", func(t *testing.T) {
+		for _, q := range []string{"", "?ref=", "?ref=" + strings.Repeat("A", 65)} {
+			resp, err := app.Test(httptest.NewRequest("GET", "/referrals/capture"+q, nil), -1)
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			if resp.StatusCode != 400 {
+				t.Errorf("query %q: status = %d, want 400", q, resp.StatusCode)
+			}
+		}
+	})
 }

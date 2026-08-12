@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
@@ -29,11 +32,12 @@ const referralCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 const referralCodeLength = 8
 
 type ReferralsHandler struct {
-	db *db.DB
+	db  *db.DB
+	cfg config.Config
 }
 
-func NewReferralsHandler(d *db.DB) *ReferralsHandler {
-	return &ReferralsHandler{db: d}
+func NewReferralsHandler(d *db.DB, cfg config.Config) *ReferralsHandler {
+	return &ReferralsHandler{db: d, cfg: cfg}
 }
 
 func (h *ReferralsHandler) userID(c *fiber.Ctx) (uuid.UUID, bool) {
@@ -124,6 +128,40 @@ func generateReferralCode() string {
 		out[i] = referralCodeAlphabet[int(v)%len(referralCodeAlphabet)]
 	}
 	return string(out)
+}
+
+// ReferralCaptureTTL is the published window: "a click counts for 30 days".
+// Kept here next to the referral logic, and mirrored by
+// REFERRAL_CODE_TTL_DAYS in the frontend, which renders it in the copy.
+const ReferralCaptureTTL = 30 * 24 * time.Hour
+
+// Capture handles GET /referrals/capture?ref=CODE.
+//
+// Signs the code with a capture time so the 30-day window can be enforced
+// server-side. Public and unauthenticated, because the visitor clicking a
+// referral link has not signed in yet - that is the entire point of the flow.
+//
+// The code is NOT validated against the users table here. Doing so would turn
+// this into an oracle for enumerating valid referral codes, and an unknown
+// code already no-ops harmlessly at attach time.
+func (h *ReferralsHandler) Capture() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		code := strings.TrimSpace(c.Query("ref"))
+		if code == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_ref"})
+		}
+		if len(code) > 64 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_ref"})
+		}
+		token, err := auth.IssueReferralCapture(h.cfg.JWTSecret, code, ReferralCaptureTTL)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "capture_failed"})
+		}
+		return c.JSON(fiber.Map{
+			"token":      token,
+			"valid_days": int(ReferralCaptureTTL.Hours() / 24),
+		})
+	}
 }
 
 // attachReferral records a pending referral for a brand new user, called

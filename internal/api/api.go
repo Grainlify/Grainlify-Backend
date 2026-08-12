@@ -221,8 +221,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	authGroup.Get("/kyc/status", auth.RequireAuth(cfg.JWTSecret), kyc.Status())
 
 	// Referral program: code + stats for the caller (internal/handlers/referrals.go).
-	referrals := handlers.NewReferralsHandler(deps.DB)
+	referrals := handlers.NewReferralsHandler(deps.DB, cfg)
 	app.Get("/referrals/me", auth.RequireAuth(cfg.JWTSecret), referrals.Me())
+	// Public: signs a referral code with its capture time so the published
+	// 30-day window is enforced server-side rather than only in the browser.
+	app.Get("/referrals/capture", referrals.Capture())
 
 	// Points balance (internal/handlers/points.go). The points programme is
 	// frozen - this stays readable so an existing balance is never hidden,

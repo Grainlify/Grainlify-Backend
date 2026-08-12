@@ -345,3 +345,62 @@ effectively a race against every other suite's fixtures. Prefer, in order:
 The leaderboard suite reaches for (2) and (3) throughout, and its
 `leaderboardSuiteFindRanked` helper makes "conclusively absent" distinct from
 "gave up looking" for the same reason — worth copying.
+
+# Time-dependent rules: expiry paths cannot be tested by waiting
+
+The referral attribution window (30 days, published in the referral copy) is
+enforced by the `exp` claim on the capture token issued by
+`POST /referrals/capture` and checked in `auth.ParseReferralCapture`. The rule
+it enforces is *"a click older than 30 days no longer attributes"* — and no
+test suite can wait 30 days to observe it.
+
+This is the class of rule that quietly goes untested for a year: the happy
+path is exercised constantly by real traffic, the failure path is exercised
+by nothing until someone finally presents a stale token and it either works
+when it should not, or fails when it should not, in production, once.
+
+## What makes it testable at all
+
+`auth.IssueReferralCapture(secret, code, ttl)` takes the TTL **as a
+parameter**. The 30-day figure lives at the call site
+(`handlers.ReferralCaptureTTL`), not inside the issuer. That single choice is
+what lets `TestReferralCapture_ExpiredTokenIsRejected` issue a token with a
+one-nanosecond TTL, sleep two milliseconds, and assert it is rejected — the
+elapsed-time condition is real, only the scale is compressed.
+
+**Keep the TTL a parameter.** If it is ever inlined as a constant inside the
+issuer or the parser "for simplicity", the expiry path becomes untestable
+without either a clock abstraction or a mutable package-level variable, and
+the test above has to be deleted rather than fixed.
+
+## What is still not covered
+
+- **Cross-repo agreement on the published figure.**
+  `TestReferralCapture_Endpoint` asserts the endpoint reports
+  `valid_days == 30`, which pins the enforced TTL to the number the backend
+  publishes. Nothing ties that to `REFERRAL_CODE_TTL_DAYS` in
+  `Grainlify-Frontend/src/shared/api/client.ts`, which is what actually
+  renders in the referral copy. A guard test cannot cheaply read across
+  repositories; the durable fix is for the frontend to render the
+  `valid_days` the capture response already returns instead of its own
+  constant. Until it does, the two numbers can drift and the published claim
+  can outlive the enforced rule.
+- **The handler path at the real TTL.** The unit tests cover
+  issue/parse directly. No test drives `POST /referrals/capture` →
+  `GET /auth/github/login?ref_token=…` with a token that is genuinely near
+  the boundary, because the boundary is 30 days away.
+- **Clock skew between issue and parse.** `golang-jwt` applies no leeway by
+  default here. A capture issued on a host whose clock is minutes ahead of
+  the host that parses it is fine (it only expires later); the reverse is
+  also fine at this scale. It matters only if the TTL is ever shortened to
+  something on the order of the skew.
+
+## The general rule
+
+For any rule expressed as a duration — attribution windows, grace periods,
+appeal deadlines, token lifetimes — **pass the duration in rather than
+reading a constant at the point of comparison.** The test then compresses
+time instead of mocking it, and the production value stays a single
+inspectable constant at the call site. Where the duration is also published
+to users, add a guard test that the published figure and the enforced figure
+are the same number.
