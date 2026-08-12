@@ -124,7 +124,7 @@ VALUES ($1, $2, 'github_link', $3)
 		// - repo: access private repos + read repo metadata
 		// - admin:repo_hook: create webhooks
 		// - read:org: helps when dealing with org-owned repos
-		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, []string{"read:user", "user:email", "repo", "admin:repo_hook", "read:org"})
+		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, githubLoginScopes)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "auth_url_failed"})
 		}
@@ -200,8 +200,7 @@ VALUES ($1, NULL, 'github_login', $2, $3, $4)
 			"encoded_state", state,
 		)
 
-		// Login scopes: identity + email + repo access for later project verification.
-		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, []string{"read:user", "user:email", "repo", "admin:repo_hook", "read:org"})
+		authURL, err := github.AuthorizeURL(h.cfg.GitHubOAuthClientID, effectiveGitHubRedirect(h.cfg), state, githubLoginScopes)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "auth_url_failed"})
 		}
@@ -618,6 +617,30 @@ func randomState(n int) string {
 
 // nullIfEmpty converts "" to nil so an optional query param stores as SQL
 // NULL rather than an empty string.
+// githubLoginScopes is the exact set every user grants at sign-in, and it is
+// deliberately narrow. Each entry is here because a specific call needs it:
+//
+//	read:user    - GetUser at login (handlers/auth.go)
+//	user:email   - GetPrimaryEmail at login, since email can be private
+//	read:org     - IsOrgMember, used by org ratings to check membership
+//	public_repo  - syncPRs lists pull requests on a project's repository
+//
+// **Do not add "repo" back.** It grants read/write on PRIVATE repositories,
+// and nothing here reads one - github_app.go marks private repos deleted and
+// never inserts them, and the sign-in page tells users we do not touch them.
+// It was requested for years without being needed, which made that promise
+// false. If you are adding it to fix a permission error, the error is almost
+// certainly about something public_repo covers, or about a repo that should
+// be reached through the GitHub App installation token instead.
+//
+// **"admin:repo_hook" is deliberately absent.** Webhook creation happens only
+// in verifyAndWebhook, reached from POST /projects and /projects/:id/verify -
+// a maintainer registering a project, not a contributor signing up. Making
+// every contributor grant webhook administration over all their repositories
+// for a path they will never take is an authorisation they cannot consent to
+// meaningfully. It belongs at maintainer time, as its own request.
+var githubLoginScopes = []string{"read:user", "user:email", "read:org", "public_repo"}
+
 func nullIfEmpty(s string) *string {
 	if s == "" {
 		return nil
