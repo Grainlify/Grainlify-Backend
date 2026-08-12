@@ -30,20 +30,38 @@ type hackathonDTO struct {
 	StartsAt               *time.Time `json:"starts_at"`
 	EndsAt                 *time.Time `json:"ends_at"`
 	MergeGracePeriodHours  int        `json:"merge_grace_period_hours"`
-	ContributorPrizePool   *string    `json:"contributor_prize_pool"`
-	MaintainerPrizePool    *string    `json:"maintainer_prize_pool"`
-	CreatedAt              time.Time  `json:"created_at"`
+	// All three published together, never net alone. Disclosure is the whole
+	// justification for taking a fee - showing only the net pool would make it
+	// a skim, and a reader could not tell the difference.
+	SponsorTotalUSDC *string `json:"sponsor_total_usdc"`
+	PlatformFeeUSDC  *string `json:"platform_fee_usdc"`
+	// Net, i.e. what actually pays people. These are the same columns every
+	// payout path divides.
+	ContributorPrizePool *string `json:"contributor_prize_pool"`
+	MaintainerPrizePool  *string `json:"maintainer_prize_pool"`
+	NetPoolUSDC          *string `json:"net_pool_usdc"`
+	PlatformFeeRatePct   *string `json:"platform_fee_rate_pct"`
+
+	CreatedAt time.Time `json:"created_at"`
 }
 
 const hackathonSelectCols = `
 id, name, phase, announced_at, application_period_start, application_period_end, issue_prep_start,
-starts_at, ends_at, merge_grace_period_hours, contributor_prize_pool::text, maintainer_prize_pool::text, created_at
+starts_at, ends_at, merge_grace_period_hours,
+sponsor_total_usdc::text, platform_fee_usdc::text,
+contributor_prize_pool::text, maintainer_prize_pool::text,
+(COALESCE(contributor_prize_pool,0) + COALESCE(maintainer_prize_pool,0))::text,
+platform_fee_rate_pct::text,
+created_at
 `
 
 func scanHackathon(row interface{ Scan(...any) error }) (hackathonDTO, error) {
 	var h hackathonDTO
 	err := row.Scan(&h.ID, &h.Name, &h.Phase, &h.AnnouncedAt, &h.ApplicationPeriodStart, &h.ApplicationPeriodEnd,
-		&h.IssuePrepStart, &h.StartsAt, &h.EndsAt, &h.MergeGracePeriodHours, &h.ContributorPrizePool, &h.MaintainerPrizePool, &h.CreatedAt)
+		&h.IssuePrepStart, &h.StartsAt, &h.EndsAt, &h.MergeGracePeriodHours,
+		&h.SponsorTotalUSDC, &h.PlatformFeeUSDC,
+		&h.ContributorPrizePool, &h.MaintainerPrizePool, &h.NetPoolUSDC, &h.PlatformFeeRatePct,
+		&h.CreatedAt)
 	return h, err
 }
 

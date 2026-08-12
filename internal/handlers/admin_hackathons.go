@@ -132,8 +132,13 @@ type updateHackathonRequest struct {
 	StartsAt               *time.Time `json:"starts_at"`
 	EndsAt                 *time.Time `json:"ends_at"`
 	MergeGracePeriodHours  *int       `json:"merge_grace_period_hours"`
-	ContributorPrizePool   *float64   `json:"contributor_prize_pool"`
-	MaintainerPrizePool    *float64   `json:"maintainer_prize_pool"`
+
+	// What the sponsor is putting in. The pools are DERIVED from this - the
+	// platform fee comes off first, and the remainder splits - so an admin
+	// never types a pool figure directly. Letting them set a pool would let
+	// the recorded fee and the recorded pools disagree, which is exactly the
+	// ambiguity the stored breakdown exists to remove.
+	SponsorTotalUSDC *float64 `json:"sponsor_total_usdc"`
 }
 
 // Update handles PUT /admin/hackathons/:id. Every field is optional - only
@@ -159,6 +164,44 @@ func (h *AdminHackathonsHandler) Update() fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
 
+		// The fee is applied here, at record time, and nowhere else.
+		//
+		// The obvious place would be where the pools are committed to escrow -
+		// but nothing writes a chain pool row and FundAllEscrows has no
+		// caller, so a fee applied there would never execute. Every payout
+		// that can actually happen reads the columns written below.
+		var (
+			sponsorTotal *float64
+			feeUSDC      *float64
+			feeRatePct   *float64
+			maintPct     *float64
+			contributor  *float64
+			maintainer   *float64
+		)
+		if req.SponsorTotalUSDC != nil {
+			cfg, cfgErr := hackathon.EffectiveValues(c.Context(), h.db.Pool, &id)
+			if cfgErr != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "config_load_failed"})
+			}
+			split, splitErr := hackathon.SplitSponsorTotal(*req.SponsorTotalUSDC, cfg)
+			if splitErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_sponsor_total"})
+			}
+			// Refuse rather than store a breakdown that does not add up. A fee
+			// that silently fails to reconcile is indistinguishable from a
+			// skim, and the database CHECK would reject it anyway - failing
+			// here gives the caller a reason instead of a constraint error.
+			if !split.Reconciles() {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "fee_split_does_not_reconcile"})
+			}
+			sponsorTotal = &split.SponsorTotal
+			feeUSDC = &split.PlatformFee
+			feeRatePct = &split.FeeRatePct
+			maintPct = &split.MaintainerSharePct
+			contributor = &split.ContributorPool
+			maintainer = &split.MaintainerPool
+		}
+
 		tag, err := h.db.Pool.Exec(c.Context(), `
 UPDATE hackathons SET
   name = COALESCE($2, name),
@@ -169,13 +212,18 @@ UPDATE hackathons SET
   starts_at = COALESCE($7, starts_at),
   ends_at = COALESCE($8, ends_at),
   merge_grace_period_hours = COALESCE($9, merge_grace_period_hours),
-  contributor_prize_pool = COALESCE($10, contributor_prize_pool),
-  maintainer_prize_pool = COALESCE($11, maintainer_prize_pool),
-  updated_by = $12,
+  sponsor_total_usdc = COALESCE($10, sponsor_total_usdc),
+  platform_fee_usdc = COALESCE($11, platform_fee_usdc),
+  platform_fee_rate_pct = COALESCE($12, platform_fee_rate_pct),
+  maintainer_share_pct = COALESCE($13, maintainer_share_pct),
+  contributor_prize_pool = COALESCE($14, contributor_prize_pool),
+  maintainer_prize_pool = COALESCE($15, maintainer_prize_pool),
+  updated_by = $16,
   updated_at = now()
 WHERE id = $1
 `, id, req.Name, req.AnnouncedAt, req.ApplicationPeriodStart, req.ApplicationPeriodEnd, req.IssuePrepStart,
-			req.StartsAt, req.EndsAt, req.MergeGracePeriodHours, req.ContributorPrizePool, req.MaintainerPrizePool,
+			req.StartsAt, req.EndsAt, req.MergeGracePeriodHours,
+			sponsorTotal, feeUSDC, feeRatePct, maintPct, contributor, maintainer,
 			actorID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "hackathon_update_failed"})

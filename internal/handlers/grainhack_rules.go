@@ -156,7 +156,41 @@ ORDER BY p.chain_id`, *hackathonID)
 			}
 		}
 
+		// The fee, published as three separate numbers rather than a net-only
+		// figure. A rules page that shows only what is left after a deduction
+		// is not disclosing the deduction - and disclosure is the entire
+		// justification for taking one.
+		var feeBreakdown fiber.Map
+		if hackathonID != nil {
+			var total, fee, contributor, maintainer, ratePct *float64
+			if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT sponsor_total_usdc::float8, platform_fee_usdc::float8,
+       contributor_prize_pool::float8, maintainer_prize_pool::float8,
+       platform_fee_rate_pct::float8
+FROM hackathons WHERE id = $1
+`, *hackathonID).Scan(&total, &fee, &contributor, &maintainer, &ratePct); err != nil {
+				slog.Warn("rules: fee breakdown", "error", err)
+			} else if total != nil {
+				net := 0.0
+				if contributor != nil {
+					net += *contributor
+				}
+				if maintainer != nil {
+					net += *maintainer
+				}
+				feeBreakdown = fiber.Map{
+					"sponsor_total_usdc":    *total,
+					"platform_fee_usdc":     fee,
+					"platform_fee_rate_pct": ratePct,
+					"net_pool_usdc":         net,
+					"contributor_pool_usdc": contributor,
+					"maintainer_pool_usdc":  maintainer,
+				}
+			}
+		}
+
 		return c.JSON(fiber.Map{
+			"fee_breakdown":  feeBreakdown,
 			"source":         source,
 			"hackathon_id":   hackathonID,
 			"hackathon_name": hackathonName,

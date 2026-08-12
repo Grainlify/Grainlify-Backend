@@ -304,10 +304,18 @@ SELECT count(*) FROM hackathon_appeals WHERE hackathon_id = $1 AND status = 'pen
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: read config: %w", err)
 	}
 
+	// poolAmount is the NET contributor pool - the platform fee was taken at
+	// record time and this column has held net ever since, which is why the
+	// arithmetic below needs no fee handling of its own.
+	//
+	// The gross and the fee are read only to be recorded on the run, so a run
+	// can never be ambiguous later about which figure it divided.
 	var poolAmount float64
+	var sponsorTotal, platformFee *float64
 	if err := pool.QueryRow(ctx, `
-SELECT COALESCE(contributor_prize_pool, 0) FROM hackathons WHERE id = $1
-`, hackathonID).Scan(&poolAmount); err != nil {
+SELECT COALESCE(contributor_prize_pool, 0), sponsor_total_usdc::float8, platform_fee_usdc::float8
+FROM hackathons WHERE id = $1
+`, hackathonID).Scan(&poolAmount, &sponsorTotal, &platformFee); err != nil {
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: read prize pool: %w", err)
 	}
 
@@ -384,12 +392,14 @@ SELECT id FROM hackathon_payout_runs WHERE hackathon_id = $1 ORDER BY created_at
 INSERT INTO hackathon_payout_runs (
   hackathon_id, contributor_prize_pool, total_units, unit_value,
   floor_applied, payout_floor, unfunded_count, computed_by, trigger,
-  supersedes_run_id, curve_applied, curve
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'appeal_recompute',$9,$10,$11)
+  supersedes_run_id, curve_applied, curve,
+  sponsor_total_usdc, platform_fee_usdc
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'appeal_recompute',$9,$10,$11,$12,$13)
 RETURNING id
 `, hackathonID, plan.Pool, plan.TotalUnits, plan.UnitValue,
 		plan.FloorApplied, plan.PayoutFloor, plan.UnfundedCount, actorID, priorRun,
-		plan.CurveApplied, curveJSON).Scan(&runID); err != nil {
+		plan.CurveApplied, curveJSON,
+		sponsorTotal, platformFee).Scan(&runID); err != nil {
 		return nil, fmt.Errorf("hackathon.CloseAppealsAndRecompute: insert payout run: %w", err)
 	}
 

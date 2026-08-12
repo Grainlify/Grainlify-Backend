@@ -59,6 +59,7 @@ var SectionOrder = []string{
 	"Draw weights",
 	"Judging and payout",
 	"Maintainer pool",
+	"Platform fee",
 	"Founding pool",
 	"Chains",
 	"Models",
@@ -173,6 +174,19 @@ var Definitions = map[string]SettingDef{
 	"maintainer_activity_full_prs":      {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
 	"maintainer_partial_release_pct":    {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
 	"maintainer_withheld_destination":   {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
+	// Platform fee, taken once off a sponsor's total before the remainder is
+	// split into the contributor and maintainer pools.
+	//
+	// **The default is 0, and that is deliberately the opposite of how
+	// judging_shadow_mode defaults.** Shadow mode defaults to ON because the
+	// unsafe direction there is publishing something you did not mean to.
+	// Here the unsafe direction is taking money nobody agreed to: an event
+	// that runs before anyone sets a rate must take nothing, not quietly skim
+	// a built-in percentage. If you are "fixing" this to a non-zero default,
+	// you are changing every future event's economics by editing a constant.
+	"platform_fee_pct":     {Key: "platform_fee_pct", Type: "float", Default: "0", Section: "Platform fee", Description: "Percentage of a sponsor's total taken as the platform fee, before the remainder is split into contributor and maintainer pools. Applied once, when the event's pools are recorded, and published alongside the total and the net pool.", ValidRange: "0-100", Active: true},
+	"maintainer_share_pct": {Key: "maintainer_share_pct", Type: "float", Default: "20", Section: "Platform fee", Description: "Share of the net pool (after the platform fee) allocated to the maintainer pool. The contributor pool takes the remainder, so the parts always sum to the sponsor's total.", ValidRange: "0-100", Active: true},
+
 	// Founding Contributor Pool. One fixed pool, announced up front,
 	// distributed once at the first GrainHack's settlement. Share values are
 	// config rather than constants for the same reason every other rule here
