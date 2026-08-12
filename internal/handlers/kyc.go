@@ -116,6 +116,38 @@ func NewKYCHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *
 }
 
 // Start initiates a KYC verification session for the authenticated user
+// canStartNewKYCSession reports whether a user in this state may open a new
+// verification session.
+//
+// Extracted from Start() so the rule can be tested directly: the handler needs
+// a configured Didit client to reach this point, and the test suite
+// deliberately never contacts Didit.
+//
+//	nil          no session has ever been created
+//	expired      the session was deleted in the Didit dashboard
+//	not_started  a session exists but the user never opened the link
+//
+// The third is the one that changed. It reads as "in progress" and is the
+// opposite: the link was created and never followed, so there is no in-flight
+// verification to interrupt and no result to lose. Treating it as active left
+// users permanently unable to start - the only exit was an admin deleting the
+// session by hand - and it is the state you land in by clicking "verify" once
+// and closing the tab.
+//
+// pending, in_review, verified and rejected all represent real progress and
+// are still protected.
+func canStartNewKYCSession(status *string) bool {
+	if status == nil {
+		return true
+	}
+	switch *status {
+	case "", "expired", "not_started":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *KYCHandler) Start() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -146,12 +178,22 @@ WHERE id = $1
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_lookup_failed"})
 		}
 
-		// Only allow new session if:
-		// 1. No session exists (status is NULL)
-		// 2. Previous session was manually deleted in Didit dashboard and marked as 'expired'
-		// Do NOT allow new session if status is: not_started, pending, in_review, verified, or rejected
-		// Note: "not_started" means session exists but user hasn't clicked the link yet - still active
-		if existingSessionID != nil && existingStatus != nil {
+		// A new session is allowed when there is nothing worth protecting:
+		//
+		//   NULL         no session has ever been created
+		//   expired      the session was deleted in the Didit dashboard
+		//   not_started  a session exists but the user never opened the link
+		//
+		// "not_started" used to be treated as an active session and blocked. It
+		// is the opposite: it means the link was created and never followed, so
+		// there is no in-flight verification to interrupt and no result to lose.
+		// Blocking it left users permanently unable to start - the only way out
+		// was an admin deleting the session by hand - and it is the state a user
+		// lands in simply by clicking "verify" once and closing the tab.
+		//
+		// Anything else (pending, in_review, verified, rejected) represents real
+		// progress and is still protected.
+		if existingSessionID != nil && !canStartNewKYCSession(existingStatus) {
 			// Get stored KYC data to find session URL
 			var kycDataBytes []byte
 			_ = h.db.Pool.QueryRow(c.Context(), `
@@ -233,8 +275,9 @@ WHERE id = $1
 					return c.Status(fiber.StatusConflict).JSON(response)
 				}
 			} else {
-				// No Didit client - check status directly
-				// Only allow new session if status is expired (session was deleted)
+				// No Didit client - check status directly. Same rule as above:
+				// expired means the session is gone, and not_started is filtered
+				// out before we get here.
 				if *existingStatus != "expired" {
 					response := fiber.Map{
 						"error":      "kyc_session_exists",
