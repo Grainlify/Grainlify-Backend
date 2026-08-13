@@ -405,3 +405,40 @@ time instead of mocking it, and the production value stays a single
 inspectable constant at the call site. Where the duration is also published
 to users, add a guard test that the published figure and the enforced figure
 are the same number.
+
+# Operating rule: rolling back a local migration means dropping the database
+
+Not testing debt so much as a trap that has now been fallen into twice in one
+day, an hour apart, by someone who had already written the rule down.
+
+golang-migrate records `(version, dirty)` in `schema_migrations`, and that row
+must agree with what the files actually applied. Running a `.down.sql` by hand
+and then deleting the row **does not roll back**. It leaves the recorded
+version describing a state the files disagree with, and the next `migrate.Up`
+fails with
+
+```
+Dirty database version 58. Fix and force version.
+```
+
+at some unrelated earlier version — which reads as database corruption rather
+than as the self-inflicted edit it is, and costs more time to diagnose than the
+shortcut ever saved.
+
+**The rule: to roll back a local migration, drop the database.**
+
+```
+psql -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='<db>' AND pid<>pg_backend_pid();"
+dropdb <db> && createdb <db>
+```
+
+It is a local test database. It holds nothing anyone needs, and `migrate.Up`
+rebuilds it in seconds. Never `DELETE FROM schema_migrations`.
+
+## Corollary: one test database per worktree
+
+Parallel worktrees must not share one. A worktree carrying migration N+1
+migrates the shared database to N+1; a second worktree without that file then
+fails with `no migration found for version N+1: file does not exist` — a
+failure in code that has nothing to do with the change being tested. Give each
+worktree its own (`grainlify_test_admin`, `grainlify_test_calib`, …).
