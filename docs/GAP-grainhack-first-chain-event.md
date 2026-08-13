@@ -139,3 +139,28 @@ None of the above pays anyone even off-chain, because nothing disburses at all
 — see `GAP-grainhack-payout-release.md`. A chain-running event would escrow
 funds correctly and still have no path to a contributor's hands on the
 off-chain side. That gap is the more urgent of the two.
+
+## Recorded decisions that no contract honours
+
+Separate from the five pieces above, because these are not missing work so much
+as claims that outrun the code. Both are published — §11's decision table is
+rendered by the public rules page — so the gap is between what a reader is told
+and what exists.
+
+**Contract upgradeability.** §11-#4 settles it: upgradeable, behind multisig and
+a timelock exceeding the claim window. The Soroban contract implements no
+upgrade path at all — there is no `upgrade` entrypoint, no admin-settable Wasm
+hash, nothing. `contract_upgrade_policy` is one of the four Chains config keys
+declared `Active: false`, so the rules page labels it *"not in effect yet"*,
+which is accurate about the config and silent about the contract. The Solidity
+port must either implement the recorded policy or the policy must change; what
+it must not do is inherit the same silence on a second chain.
+
+**The other three inactive Chains keys** — `empty_chain_pool_disposition`,
+`unclaimed_sweep_days`, `unclaimed_sweep_destination` — are in the same
+position. `unclaimed_sweep_days` is the sharpest of them: the contract has a
+`sweep_delay` fixed at initialisation, and nothing reads the config key that is
+supposed to govern it, so the published number and the enforced number are
+independent by construction. That is the same class of problem as the referral
+window before it was served from the constant that enforces it, and it wants the
+same fix.
