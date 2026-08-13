@@ -20,12 +20,14 @@ import (
 // guard reads the handler corpus. It fails on any admin route that does not
 // name the shared requireAdmin middleware.
 //
-// The one deliberate exemption is /bootstrap, which by definition runs for a
-// caller who is not yet an admin. It is listed explicitly so adding a second
-// exemption is a visible edit to this list rather than a silent omission.
-var adminRouteExemptions = map[string]string{
-	"/bootstrap": "grants the first admin on a fresh install; the caller is not an admin yet by definition",
-}
+// **There are no exemptions.** /bootstrap used to be one - it ran for a caller
+// who was not yet an admin, by definition - and it has been removed entirely.
+// The recovery path is a direct database UPDATE, not an endpoint.
+//
+// The map stays, empty, so that adding an exemption is a visible edit here
+// rather than a silent omission. An empty map is also the stronger assertion:
+// every admin route, without exception, names the shared check.
+var adminRouteExemptions = map[string]string{}
 
 func TestEveryAdminRouteEnforcesLiveRole(t *testing.T) {
 	src, err := os.ReadFile("api.go")
@@ -100,5 +102,32 @@ func TestAdminRoutesAreAllUnderTheGroup(t *testing.T) {
 	stray := regexp.MustCompile(`app\.(Get|Post|Put|Patch|Delete)\("/admin`)
 	if m := stray.FindAllString(string(src), -1); len(m) > 0 {
 		t.Errorf("admin-path routes registered outside adminGroup: %v", m)
+	}
+}
+
+// TestBootstrapRouteIsGone is a regression guard for a removal.
+//
+// /admin/bootstrap granted the first admin to whoever presented a shared
+// environment token. It already refused once any admin existed, so it was shut
+// in practice - but "shut" depended on the admin count staying above zero,
+// which meant a variable could reopen a permanent grant path. The route was
+// removed so that no configuration can bring it back.
+//
+// This asserts against the route table itself rather than against behaviour,
+// because the failure being guarded against is somebody re-adding the
+// endpoint - at which point a behavioural test would simply start testing the
+// thing that should not exist.
+func TestBootstrapRouteIsGone(t *testing.T) {
+	src, err := os.ReadFile("api.go")
+	if err != nil {
+		t.Fatalf("read api.go: %v", err)
+	}
+	if strings.Contains(string(src), "/bootstrap") {
+		t.Error("api.go registers a /bootstrap route again. First-admin recovery is a database UPDATE " +
+			"(see internal/handlers/break_glass_test.go), deliberately not an endpoint that an environment " +
+			"variable can arm.")
+	}
+	if strings.Contains(string(src), "BootstrapAdmin") {
+		t.Error("api.go references BootstrapAdmin again; the handler was removed with the route")
 	}
 }

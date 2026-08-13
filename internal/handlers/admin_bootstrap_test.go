@@ -17,13 +17,14 @@ import (
 )
 
 const bootstrapSecret = "bootstrap-suite-secret"
-const bootstrapToken = "the-shared-bootstrap-token"
 
 func bootstrapApp(d *db.DB) *fiber.App {
-	cfg := config.Config{JWTSecret: bootstrapSecret, AdminBootstrapToken: bootstrapToken}
+	cfg := config.Config{JWTSecret: bootstrapSecret}
 	h := handlers.NewAdminHandler(cfg, d)
 	app := fiber.New()
-	app.Post("/admin/bootstrap", auth.RequireAuth(bootstrapSecret), h.BootstrapAdmin())
+	// No bootstrap route: it was removed. Granting a role is an attributed
+	// action by an existing admin, and first-admin recovery is a database
+	// write - see break_glass_test.go.
 	app.Put("/admin/users/:id/role", auth.RequireAuth(bootstrapSecret),
 		auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin"), h.SetUserRole())
 	return app
@@ -66,75 +67,6 @@ func doWithBootstrapToken(t *testing.T, app *fiber.App, jwt, token string) (int,
 // TestBootstrap_GrantsTheFirstAdminAndRecordsItsOrigin. A first admin with no
 // origin record is the same gap one step earlier - the one grant nobody can
 // trace.
-func TestBootstrap_GrantsTheFirstAdminAndRecordsItsOrigin(t *testing.T) {
-	d := testDB(t)
-	clearAdmins(t, d)
-	app := bootstrapApp(d)
-
-	userID := adminSuiteInsertUser(t, d, "contributor")
-	code, body := doWithBootstrapToken(t, app, bootstrapToken4(t, userID, "contributor"), bootstrapToken)
-	if code != fiber.StatusOK {
-		t.Fatalf("status = %d, want 200 on a fresh install; body = %s", code, body)
-	}
-
-	var role string
-	if err := d.Pool.QueryRow(context.Background(), `SELECT role FROM users WHERE id = $1`, userID).Scan(&role); err != nil {
-		t.Fatalf("read role: %v", err)
-	}
-	if role != "admin" {
-		t.Errorf("role = %q, want admin", role)
-	}
-
-	var source, newRole string
-	var actor uuid.UUID
-	if err := d.Pool.QueryRow(context.Background(), `
-SELECT source, new_role, actor_user_id FROM admin_role_audit WHERE subject_user_id = $1
-`, userID).Scan(&source, &newRole, &actor); err != nil {
-		t.Fatalf("no origin record for the first admin: %v", err)
-	}
-	if source != "bootstrap" || newRole != "admin" {
-		t.Errorf("audit = %s/%s, want bootstrap/admin", source, newRole)
-	}
-	// actor == subject is the property worth being able to see: nobody else
-	// authorised this.
-	if actor != userID {
-		t.Errorf("actor = %s, want the self-promoting user %s", actor, userID)
-	}
-}
-
-// TestBootstrap_RefusesOnceAnAdminExists closes the self-service escalation.
-func TestBootstrap_RefusesOnceAnAdminExists(t *testing.T) {
-	d := testDB(t)
-	clearAdmins(t, d)
-	app := bootstrapApp(d)
-
-	_ = adminSuiteInsertUser(t, d, "admin") // an admin already exists
-	other := adminSuiteInsertUser(t, d, "contributor")
-
-	code, body := doWithBootstrapToken(t, app, bootstrapToken4(t, other, "contributor"), bootstrapToken)
-	if code != fiber.StatusForbidden {
-		t.Fatalf("status = %d, want %d once an admin exists; body = %s", code, fiber.StatusForbidden, body)
-	}
-
-	var role string
-	d.Pool.QueryRow(context.Background(), `SELECT role FROM users WHERE id = $1`, other).Scan(&role)
-	if role == "admin" {
-		t.Error("bootstrap promoted a user after it should have closed")
-	}
-
-	// A correct token presented after closure means somebody has the shared
-	// secret and tried it. That is the signal worth recording.
-	var n int
-	d.Pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM admin_role_audit WHERE subject_user_id = $1 AND source = 'bootstrap'`, other).Scan(&n)
-	if n == 0 {
-		t.Error("a refused bootstrap attempt was not recorded")
-	}
-}
-
-// TestSetUserRole_RecordsBeforeAndAfter. "Alice changed Bob's role" is much
-// less useful than "Alice promoted Bob from contributor to admin", and a
-// demotion matters as much as a promotion.
 func TestSetUserRole_RecordsBeforeAndAfter(t *testing.T) {
 	d := testDB(t)
 	clearAdmins(t, d)

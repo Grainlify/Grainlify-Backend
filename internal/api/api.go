@@ -382,7 +382,6 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	requireAdmin := auth.RequireLiveRole(liveRole, "admin")
 
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
-	adminGroup.Post("/bootstrap", admin.BootstrapAdmin())
 	adminGroup.Get("/users", requireAdmin, admin.ListUsers())
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
 

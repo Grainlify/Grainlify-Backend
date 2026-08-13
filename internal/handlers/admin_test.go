@@ -123,15 +123,14 @@ func adminSuiteDo(t *testing.T, app *fiber.App, method, path, token string, body
 	return resp.StatusCode, decoded
 }
 
-// newAdminRoutesTestApp mounts /admin/bootstrap, /admin/users and
-// /admin/users/:id/role exactly as internal/api/api.go wires AdminHandler:
-// RequireAuth only for bootstrap (self-service), RequireAuth+RequireRole
-// admin for the rest.
+// newAdminRoutesTestApp mounts /admin/users and /admin/users/:id/role exactly
+// as internal/api/api.go wires AdminHandler: RequireAuth plus an admin role
+// check on every route, with no self-service exception. There used to be a
+// /admin/bootstrap here, mounted with RequireAuth alone; it was removed.
 func newAdminRoutesTestApp(cfg config.Config, d *db.DB) *fiber.App {
 	app := fiber.New()
 	h := handlers.NewAdminHandler(cfg, d)
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
-	adminGroup.Post("/bootstrap", h.BootstrapAdmin())
 	adminGroup.Get("/users", auth.RequireRole("admin"), h.ListUsers())
 	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), h.SetUserRole())
 	return app
@@ -245,156 +244,14 @@ func TestAdminSetUserRole_RBAC(t *testing.T) {
 // BootstrapAdmin
 // ---------------------------------------------------------------------------
 
-func TestAdminBootstrapAdmin(t *testing.T) {
-	d := testDB(t)
-	const goodToken = "admin-suite-bootstrap-token-xyz"
-	app := newAdminRoutesTestApp(adminSuiteConfig(goodToken), d)
-
-	t.Run("unauthenticated caller is rejected before token check", func(t *testing.T) {
-		status, _ := adminSuiteDo(t, app, "POST", "/admin/bootstrap", "", nil)
-		if status != fiber.StatusUnauthorized {
-			t.Errorf("status = %d, want %d", status, fiber.StatusUnauthorized)
-		}
-	})
-
-	t.Run("promotes only while no admin exists, and refuses afterwards", func(t *testing.T) {
-		// Bootstrap used to promote any authenticated caller who presented the
-		// shared token, permanently and unrecorded - a self-service admin
-		// grant. It now only ever creates the FIRST admin.
-		if _, err := d.Pool.Exec(context.Background(),
-			`UPDATE users SET role = 'contributor' WHERE role = 'admin'`); err != nil {
-			t.Fatalf("clear admins: %v", err)
-		}
-
-		uid := adminSuiteInsertUser(t, d, "contributor")
-		tok := adminSuiteToken(t, uid, "contributor")
-		bootstrap := func() int {
-			req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-			req.Header.Set("Authorization", "Bearer "+tok)
-			req.Header.Set("X-Admin-Bootstrap-Token", goodToken)
-			resp, err := app.Test(req, -1)
-			if err != nil {
-				t.Fatalf("app.Test: %v", err)
-			}
-			defer resp.Body.Close()
-			return resp.StatusCode
-		}
-
-		if got := bootstrap(); got != fiber.StatusOK {
-			t.Fatalf("first bootstrap status = %d, want %d on an install with no admin", got, fiber.StatusOK)
-		}
-
-		// The same caller, the same correct token, immediately after: refused,
-		// because an admin now exists. Further admins come from an existing
-		// admin's attributed decision.
-		second := adminSuiteInsertUser(t, d, "contributor")
-		tok = adminSuiteToken(t, second, "contributor")
-		if got := bootstrap(); got != fiber.StatusForbidden {
-			t.Errorf("second bootstrap status = %d, want %d once an admin exists", got, fiber.StatusForbidden)
-		}
-	})
-
-	t.Run("wrong token is rejected and does not promote", func(t *testing.T) {
-		uid := adminSuiteInsertUser(t, d, "contributor")
-		tok := adminSuiteToken(t, uid, "contributor")
-
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("X-Admin-Bootstrap-Token", "totally-wrong-token")
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != fiber.StatusUnauthorized {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusUnauthorized)
-		}
-		var body map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if body["error"] != "invalid_bootstrap_token" {
-			t.Errorf("error = %v, want invalid_bootstrap_token", body["error"])
-		}
-		if role := adminSuiteUserRole(t, d, uid); role != "contributor" {
-			t.Errorf("role in DB = %q, want contributor (should not be promoted on wrong token)", role)
-		}
-	})
-
-	t.Run("missing token header is rejected same as wrong token", func(t *testing.T) {
-		uid := adminSuiteInsertUser(t, d, "contributor")
-		tok := adminSuiteToken(t, uid, "contributor")
-
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		// Deliberately no X-Admin-Bootstrap-Token header.
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != fiber.StatusUnauthorized {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusUnauthorized)
-		}
-		if role := adminSuiteUserRole(t, d, uid); role != "contributor" {
-			t.Errorf("role in DB = %q, want contributor (should not be promoted on missing token)", role)
-		}
-	})
-}
-
-// TestAdminBootstrapAdmin_EmptyConfiguredToken captures the ACTUAL behavior
-// of BootstrapAdmin when cfg.AdminBootstrapToken is configured as an empty
-// string. Read internal/handlers/admin.go:112-114: the handler checks
-// `h.cfg.AdminBootstrapToken == ""` and returns 503 bootstrap_not_configured
-// BEFORE it ever compares the submitted header token (admin.go:118-122).
-// That means an empty submitted token can NEVER "match" an empty configured
-// token over HTTP - the early-return guard closes that gap. This test
-// documents/locks in that safe behavior; if this test ever starts failing
-// because the guard was removed or reordered, that would reintroduce a
-// free-admin-promotion vulnerability.
-func TestAdminBootstrapAdmin_EmptyConfiguredToken(t *testing.T) {
-	d := testDB(t)
-	app := newAdminRoutesTestApp(adminSuiteConfig(""), d)
-
-	uid := adminSuiteInsertUser(t, d, "contributor")
-	tok := adminSuiteToken(t, uid, "contributor")
-
-	t.Run("empty submitted token against empty configured token is refused, not granted", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		// Deliberately omitted: X-Admin-Bootstrap-Token header ends up "".
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d (bootstrap_not_configured guard)", resp.StatusCode, fiber.StatusServiceUnavailable)
-		}
-		var body map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if body["error"] != "bootstrap_not_configured" {
-			t.Errorf("error = %v, want bootstrap_not_configured", body["error"])
-		}
-		if role := adminSuiteUserRole(t, d, uid); role != "contributor" {
-			t.Errorf("role in DB = %q, want contributor (must not be silently promoted for free)", role)
-		}
-	})
-
-	t.Run("explicit empty-string token header against empty configured token is also refused", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/admin/bootstrap", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("X-Admin-Bootstrap-Token", "")
-		resp, err := app.Test(req, -1)
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d (bootstrap_not_configured guard)", resp.StatusCode, fiber.StatusServiceUnavailable)
-		}
-		if role := adminSuiteUserRole(t, d, uid); role != "contributor" {
-			t.Errorf("role in DB = %q, want contributor (must not be silently promoted for free)", role)
-		}
-	})
-}
+// The two bootstrap suites that lived here were removed with the endpoint.
+//
+// They covered a real thing carefully - first grant, wrong token, missing
+// header, and an empty configured token not being a free promotion - but all
+// four described an endpoint that no longer exists. Keeping them would have
+// meant reinstating /admin/bootstrap to make the suite compile, which is the
+// tail wagging the dog.
+//
+// What replaced them: TestBootstrapRouteIsGone in internal/api asserts the
+// route cannot come back, and break_glass_test.go verifies the recovery path
+// that replaced it against a real database.
