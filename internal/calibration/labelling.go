@@ -87,7 +87,7 @@ SELECT sp.id, sp.project_full_name, sp.pr_number,
 FROM calibration_sample_prs sp
 JOIN calibration_samples s ON s.id = sp.sample_id
 JOIN calibration_pr_snapshots snap ON snap.sample_pr_id = sp.id
-WHERE s.name = $1 AND NOT sp.held_back
+WHERE s.name = $1 AND (NOT sp.held_back OR sp.released_at IS NOT NULL)
 ORDER BY sp.created_at
 `, sampleName, labellerID)
 	if err != nil {
@@ -140,6 +140,16 @@ type PRForLabelling struct {
 	IssueTitle  string `json:"issue_title,omitempty"`
 	IssueBody   string `json:"issue_body,omitempty"`
 
+	// Framing is the question this row is to be labelled under, when it is not
+	// the default one. Empty means the original framing: judge the
+	// contribution as a whole.
+	//
+	// It is stored on the row and rendered above the diff rather than being
+	// something a labeller is told once and expected to hold in mind. Two
+	// batches labelled under two questions, with the difference living only in
+	// someone's memory, is how the two get pooled later.
+	Framing string `json:"framing,omitempty"`
+
 	// MyLabel is this labeller's own previous verdict, if any, so a returning
 	// labeller can see what they said. Never anyone else's.
 	MyLabel *Label `json:"my_label,omitempty"`
@@ -171,17 +181,18 @@ SELECT sp.id, sp.project_full_name, sp.pr_number,
        snap.title, COALESCE(snap.body, ''), COALESCE(snap.author_login, ''), COALESCE(snap.url, ''),
        snap.additions, snap.deletions, snap.changed_files,
        snap.files, snap.diff, snap.diff_truncated,
-       snap.issue_number, snap.issue_title, snap.issue_body
+       snap.issue_number, snap.issue_title, snap.issue_body,
+       COALESCE(sp.labelling_framing, '')
 FROM calibration_sample_prs sp
 JOIN calibration_samples s ON s.id = sp.sample_id
 JOIN calibration_pr_snapshots snap ON snap.sample_pr_id = sp.id
-WHERE s.name = $1 AND sp.id = $2 AND NOT sp.held_back
+WHERE s.name = $1 AND sp.id = $2 AND (NOT sp.held_back OR sp.released_at IS NOT NULL)
 `, sampleName, samplePRID).Scan(
 		&p.SamplePRID, &p.Project, &p.Number,
 		&p.Title, &p.Body, &p.Author, &p.URL,
 		&p.Additions, &p.Deletions, &p.ChangedFiles,
 		&filesJSON, &p.Diff, &p.DiffTruncated,
-		&issueNumber, &issueTitle, &issueBody,
+		&issueNumber, &issueTitle, &issueBody, &p.Framing,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, ErrNotInSample

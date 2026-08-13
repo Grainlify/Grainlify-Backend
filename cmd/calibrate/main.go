@@ -34,6 +34,7 @@ func main() {
 	snapshot := flag.Bool("snapshot", false, "fetch and freeze the diff and linked issue for a drawn sample")
 	status := flag.Bool("status", false, "report how complete a sample's snapshots are")
 	serve := flag.String("serve", "", "run the labelling screen locally, e.g. -serve 127.0.0.1:842")
+	release := flag.Bool("release-heldback", false, "release the held-back rows for labelling under the judge's own question")
 	flag.Parse()
 
 	if *name == "" {
@@ -43,7 +44,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  calibrate -name set-1 -status                     report snapshot coverage")
 		os.Exit(2)
 	}
-	if !*snapshot && !*status && *serve == "" && *seed == 0 {
+	if !*snapshot && !*status && *serve == "" && !*release && *seed == 0 {
 		fmt.Fprintln(os.Stderr, "drawing requires -seed")
 		os.Exit(2)
 	}
@@ -72,6 +73,10 @@ func main() {
 	}
 	if *snapshot {
 		runSnapshots(ctx, local, *name)
+		return
+	}
+	if *release {
+		releaseHeldBack(ctx, local, *name)
 		return
 	}
 	if *serve != "" {
@@ -265,4 +270,47 @@ func githubToken() string {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// heldBackFraming is the question the released rows are labelled under.
+//
+// It is production's judge's actual question. The first 20 were labelled as
+// "should this contribution have been accepted", which folds in coordination -
+// whether the author was assigned the issue - and that is a fact the frozen
+// snapshots cannot express, so a model can never see it. Scoring against it
+// measures a missing input, not judgement.
+const heldBackFraming = "Assume coordination already passed: this contributor was assigned this issue, the pull request is linked to it, the author did not open the issue and is not a repository admin. Judge ONLY the work itself against the issue's criteria."
+
+// releaseHeldBack opens the held-back rows for labelling, once, and records
+// the question they are to be labelled under.
+//
+// held_back stays true. Only released_at changes, so the record that these
+// rows were withheld - and when they stopped being - survives. Releasing a
+// second time is refused rather than silently re-stamped: the hold-back is
+// worth exactly one honest use.
+func releaseHeldBack(ctx context.Context, local db.DBPool, name string) {
+	var already int
+	if err := local.QueryRow(ctx, `
+SELECT count(*) FROM calibration_sample_prs sp JOIN calibration_samples s ON s.id = sp.sample_id
+WHERE s.name = $1 AND sp.held_back AND sp.released_at IS NOT NULL`, name).Scan(&already); err != nil {
+		fatal("%v", err)
+	}
+	if already > 0 {
+		fatal("held-back rows in %q were already released; refusing to release again. The hold-back is worth one use, and re-releasing after seeing a result is how it stops being one.", name)
+	}
+
+	tag, err := local.Exec(ctx, `
+UPDATE calibration_sample_prs sp SET released_at = now(), labelling_framing = $2
+FROM calibration_samples s
+WHERE s.id = sp.sample_id AND s.name = $1 AND sp.held_back AND sp.released_at IS NULL
+`, name, heldBackFraming)
+	if err != nil {
+		fatal("release: %v", err)
+	}
+	fmt.Printf("released %d held-back pull requests in %q for labelling.\n\n", tag.RowsAffected(), name)
+	fmt.Println("They are labelled under this question, which the screen states above each diff:")
+	fmt.Printf("\n  %s\n\n", heldBackFraming)
+	fmt.Println("The first 20 keep their original framing and are NOT re-labelled: they are a")
+	fmt.Println("valid record of a different question, and rewriting them to fit a better")
+	fmt.Println("result is the trap this hold-back exists to avoid.")
 }

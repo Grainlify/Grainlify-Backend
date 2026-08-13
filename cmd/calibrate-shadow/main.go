@@ -36,6 +36,7 @@ func main() {
 	name := flag.String("name", "set-1", "sample name")
 	models := flag.String("models", "gpt-5.6-luna,gpt-5-mini,gpt-5", "comma-separated models, run in this order")
 	reportOnly := flag.Bool("report", false, "re-report the most recent run per model without calling anything")
+	scope := flag.String("scope", "main", `which rows to score: "main" (the originally labelled set) or "held-back" (the released hold-back, labelled under the judge's own question)`)
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
@@ -52,7 +53,11 @@ func main() {
 		fatal("sample %q: %v", *name, err)
 	}
 
-	prs, err := calibration.LabelledPRs(ctx, local, *name)
+	sc := calibration.Scope(*scope)
+	if sc != calibration.ScopeMain && sc != calibration.ScopeHeldBack {
+		fatal("scope must be \"main\" or \"held-back\", not %q", *scope)
+	}
+	prs, err := calibration.LabelledPRs(ctx, local, *name, sc)
 	if err != nil {
 		fatal("load labelled: %v", err)
 	}
@@ -63,7 +68,12 @@ func main() {
 	version, sha := calibration.PromptFingerprint()
 
 	fmt.Printf("sample      %s (%s)\n", *name, sampleID)
-	fmt.Printf("labelled    %d pull requests, held-back excluded\n", len(prs))
+	fmt.Printf("scope       %s\n", sc)
+	if sc == calibration.ScopeHeldBack {
+		fmt.Println("            these rows were withheld until after the prompt was settled, and are")
+		fmt.Println("            labelled under the judge's own question - coordination assumed passed")
+	}
+	fmt.Printf("labelled    %d pull requests\n", len(prs))
 	fmt.Printf("prompt      %s  sha256 %s\n", version, sha[:16])
 	fmt.Printf("threshold   %d input tokens (long-context pricing above this)\n", calibration.LongContextThresholdTokens)
 	fmt.Printf("run at      %s\n\n", time.Now().Format(time.RFC3339))
@@ -120,7 +130,12 @@ ORDER BY started_at DESC LIMIT 1`, sampleID, model).Scan(&runID); err != nil {
 		scores = append(scores, score)
 	}
 
+	views, err := calibration.PrefilterViews(ctx, local, *name, sc == calibration.ScopeHeldBack)
+	if err != nil {
+		fatal("prefilter view: %v", err)
+	}
 	report(scores, baseline, len(prs), version, sha)
+	reportPrefilter(views)
 }
 
 func report(scores []calibration.RunScore, baseline float64, total int, version, sha string) {
@@ -131,13 +146,18 @@ This scores each model against ONE person's labels. It is NOT inter-rater
 agreement: there is no second human verdict in this set, so no claim of the
 form "humans agreed" is available at any confidence.
 
-The system prompt and output contract are the production judging ones, read
-from the same constants the hackathon pipeline uses. The USER CONTENT is
-assembled by the calibration harness from frozen snapshots, because production
-builds it from hackathon tables that do not exist here. So this is the
-production prompt, not the production code path.`)
+It uses the COMBINED calibration prompt, which asks one model to do both jobs:
+the coordination gates production enforces in deterministic code (Prefilter,
+AI-specs §5.1) and the quality judgement production asks a model for (§5.3).
 
-	fmt.Printf("\nprompt %s (sha256 %s)\n", version, sha[:16])
+It therefore answers "could one model do the whole job?" - and says NOTHING
+about how good production's judge is. In production those stages are separate
+on purpose, and only pull requests that already passed coordination ever reach
+a model.`)
+
+	prodV, _ := calibration.ProductionJudgingFingerprint()
+	fmt.Printf("\nprompt used     %s (sha256 %s)\n", version, sha[:16])
+	fmt.Printf("prompt NOT used %s  <- production's judging prompt; this run says nothing about it\n", prodV)
 	fmt.Printf("always-accept baseline: %.0f%% - a model that answers \"accept\" every time scores this\n", baseline)
 
 	fmt.Printf("\n%-14s %8s %8s %10s %9s %10s %8s %10s\n", "model", "agree", "vs base", "cost USD", "in tok", "out tok", "failed", "effort")
@@ -242,4 +262,63 @@ func wrap(s string, width int, indent string) string {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// reportPrefilter answers the question the agreement rate cannot: how many of
+// the human's rejections were coordination calls that plain code already
+// handles, and how many needed judgement about the work.
+func reportPrefilter(views []calibration.PrefilterView) {
+	line := strings.Repeat("=", 78)
+	fmt.Printf("\n%s\nWHAT PLAIN CODE ALREADY DECIDES\n%s\n", line, line)
+	fmt.Println(`
+Production rejects on deterministic rules before any model call. Below is what
+that code would say about these pull requests, using ONLY facts the frozen
+snapshot contains. Rules whose inputs were never captured are listed as
+unknowable and are NOT assumed either way.`)
+
+	s := calibration.SummarisePrefilter(views)
+
+	fmt.Printf("\nof %d labelled pull requests, you rejected %d:\n", s.Total, s.HumanRejected)
+	fmt.Printf("  %2d  coordination - a knowable prefilter rule rejects these too, no judgement needed\n", s.CoordinationRejections)
+	fmt.Printf("  %2d  judgement    - no knowable rule explains these; they required assessing the work\n", s.JudgementRejections)
+	if s.PrefilterRejectsHumanAccepted > 0 {
+		fmt.Printf("\n  %2d you ACCEPTED would be rejected by a knowable rule - worth reading, the code and you disagree\n", s.PrefilterRejectsHumanAccepted)
+	}
+
+	fmt.Println("\nby rule:")
+	for _, r := range calibration.KnowableRules {
+		fmt.Printf("  %-28s %d\n", r, s.ByRule[r])
+	}
+
+	fmt.Println("\nunknowable for this set, and therefore not applied:")
+	for rule, why := range calibration.UnknowableRules {
+		fmt.Printf("  %-42s %s\n", rule, why)
+	}
+	fmt.Println(`
+Two caveats on the knowable rules. "documentation only" has an exemption in
+production when the linked issue was itself a documentation issue, which the
+snapshot cannot decide - so it is reported as a rejection here. And meaningful
+lines are an upper bound, because per-file patches were not stored separately,
+so whitespace-only and banner-generated lines are not subtracted; that makes
+"no meaningful code" under-reject rather than over-reject.`)
+
+	fmt.Printf("\n%-38s %-8s %-26s %s\n", "pull request", "you", "prefilter (knowable rules)", "meaningful")
+	for _, v := range views {
+		verdict := "-"
+		if v.WouldReject {
+			verdict = "REJECT: " + v.Rule
+		} else {
+			verdict = "passes knowable rules"
+		}
+		fmt.Printf("%-38s %-8s %-26s %d\n",
+			fmt.Sprintf("%s#%d", shortProject(v.Project), v.Number), v.HumanVerdict, verdict, v.Stats.MeaningfulLines)
+	}
+	fmt.Printf("\n%s\n", line)
+}
+
+func shortProject(p string) string {
+	if i := strings.Index(p, "/"); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }

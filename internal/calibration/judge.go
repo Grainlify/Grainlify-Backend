@@ -141,7 +141,7 @@ func (j *OpenAIJudge) Judge(ctx context.Context, req JudgeRequest) (JudgeRespons
 
 	start := time.Now()
 	pTok, cTok, err := j.call.structured(ctx, j.model, j.effort,
-		hackathon.JudgingSystemPrompt, BuildJudgeUserContent(req),
+		combinedPrompt, BuildJudgeUserContent(req),
 		"record_judgement", calibrationToolSchema, &out)
 	resp := JudgeResponse{
 		DurationMS:       int(time.Since(start).Milliseconds()),
@@ -192,12 +192,16 @@ func BuildJudgeUserContent(r JudgeRequest) string {
 	return b.String()
 }
 
-// PromptFingerprint identifies the exact prompt text a run used.
+// PromptFingerprint identifies the prompt a shadow run used.
 //
-// The version string names it; the hash proves it. Two runs claiming one
-// version but disagreeing are then answerable from the log rather than from
-// memory.
-func PromptFingerprint() (version, sha string) {
+// This now returns the COMBINED calibration prompt, not production's judging
+// prompt - see combined_prompt.go for why they are different questions. The
+// namespace differs by construction so a recorded run cannot be misread.
+func PromptFingerprint() (version, sha string) { return CombinedPromptFingerprint() }
+
+// ProductionJudgingFingerprint identifies production's judging prompt, kept so
+// a report can state which prompt it did NOT use.
+func ProductionJudgingFingerprint() (version, sha string) {
 	sum := sha256.Sum256([]byte(hackathon.JudgingSystemPrompt))
 	full := hex.EncodeToString(sum[:])
 	return "hackathon-judging@" + full[:8], full

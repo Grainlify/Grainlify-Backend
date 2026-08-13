@@ -306,6 +306,13 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
     {{end}}
   </div>
 
+  {{if .Framing}}
+  <div class="card warn" style="border-left:4px solid #c9983a">
+    <h2>How to judge this one</h2>
+    <p><strong>{{.Framing}}</strong></p>
+  </div>
+  {{end}}
+
   <div class="card"><h2>Files</h2>
     <div class="files">{{range .Files}}{{.Filename}} <span class="muted">({{.Status}}, +{{.Additions}} -{{.Deletions}})</span><br>{{end}}</div>
   </div>

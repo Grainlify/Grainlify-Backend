@@ -28,7 +28,29 @@ type LabelledPR struct {
 	Request    JudgeRequest
 }
 
-// LabelledPRs returns the labelled, not-held-back rows in a fixed order.
+// Scope selects which rows a run scores. The two framings must never be
+// pooled: the first 20 were labelled as "should this contribution have been
+// accepted" (which folds in coordination), the released rows as "given
+// coordination passed, is the work acceptable". Averaging them would produce a
+// number that answers neither question.
+type Scope string
+
+const (
+	// ScopeMain is the originally labelled rows - never held back.
+	ScopeMain Scope = "main"
+	// ScopeHeldBack is the released hold-back, labelled under the judge's own
+	// question.
+	ScopeHeldBack Scope = "held-back"
+)
+
+func (sc Scope) clause() string {
+	if sc == ScopeHeldBack {
+		return "AND sp.held_back AND sp.released_at IS NOT NULL"
+	}
+	return "AND NOT sp.held_back"
+}
+
+// LabelledPRs returns the labelled rows for one scope, in a fixed order.
 //
 // Ordered by created_at so every model sees the same pull requests in the same
 // order. Model is meant to be the only variable between runs; presentation
@@ -37,7 +59,7 @@ type LabelledPR struct {
 // Held-back rows are excluded here as everywhere: they are unreleased, and a
 // comparison that quietly included them would spend the one honest check the
 // hold-back exists to provide.
-func LabelledPRs(ctx context.Context, local db.DBPool, sampleName string) ([]LabelledPR, error) {
+func LabelledPRs(ctx context.Context, local db.DBPool, sampleName string, scope Scope) ([]LabelledPR, error) {
 	rows, err := local.Query(ctx, `
 SELECT sp.id, sp.project_full_name, sp.pr_number, sp.size_band, sp.merged,
        l.verdict, l.confidence, l.reason,
@@ -53,7 +75,7 @@ JOIN LATERAL (
   WHERE sample_pr_id = sp.id
   ORDER BY created_at DESC LIMIT 1
 ) l ON true
-WHERE s.name = $1 AND NOT sp.held_back
+WHERE s.name = $1 `+scope.clause()+`
 ORDER BY sp.created_at
 `, sampleName)
 	if err != nil {
