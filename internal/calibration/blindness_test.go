@@ -186,34 +186,29 @@ func TestALabellerCannotSeeAnothersVerdictBeforeSubmitting(t *testing.T) {
 		}
 	}
 
-	// Agreement is not computable for Bob yet either - that endpoint exists to
-	// show other people's answers, so it is the one that most needs the rule.
-	rowsBefore, err := calibration.Agreement(ctx, f.d.Pool, f.sampleName, f.bob.ID)
-	if err != nil {
-		t.Fatalf("agreement before: %v", err)
-	}
-	ab, _ := json.Marshal(rowsBefore)
-	if strings.Contains(string(ab), otherSentinel) || len(rowsBefore) != 0 {
-		t.Fatalf("agreement leaked before Bob submitted: %s", ab)
-	}
-
-	// After Bob submits, comparison becomes available - which is the point.
+	// The agreement assertions that used to close this test are gone with the
+	// function. Inter-rater agreement is not computed at all any more: this set
+	// has one labeller, so there is no second human verdict and any rate would
+	// be a number with nothing on the other side of it.
+	//
+	// The blindness rule itself still matters and is still asserted above,
+	// because it is what makes a second labeller's work usable if one is ever
+	// added - and because the same query shape is what keeps a labeller's own
+	// re-label honest during a self-consistency check.
 	if _, err := calibration.SubmitLabel(ctx, f.d.Pool, f.samplePRID, f.bob.ID,
 		"reject", "the tests do not cover the criterion", "borderline"); err != nil {
 		t.Fatalf("bob submits: %v", err)
 	}
-	rowsAfter, err := calibration.Agreement(ctx, f.d.Pool, f.sampleName, f.bob.ID)
+	prAfter, err := calibration.GetPRForLabelling(ctx, f.d.Pool, f.sampleName, f.samplePRID, f.bob.ID)
 	if err != nil {
-		t.Fatalf("agreement after: %v", err)
+		t.Fatalf("bob detail after: %v", err)
 	}
-	if len(rowsAfter) != 1 {
-		t.Fatalf("agreement rows = %d, want 1 once both have submitted", len(rowsAfter))
+	afterBytes, _ := json.Marshal(prAfter)
+	if strings.Contains(string(afterBytes), otherSentinel) {
+		t.Error("Alice's reason reached Bob even after he submitted; only his own label may be returned")
 	}
-	if rowsAfter[0].Agree {
-		t.Error("accept vs reject was reported as agreement")
-	}
-	if len(rowsAfter[0].Verdicts) != 2 {
-		t.Errorf("verdicts = %v, want both labellers", rowsAfter[0].Verdicts)
+	if prAfter.MyLabel == nil || prAfter.MyLabel.Verdict != "reject" {
+		t.Errorf("Bob should see his own label, got %+v", prAfter.MyLabel)
 	}
 }
 

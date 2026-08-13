@@ -1,5 +1,20 @@
 -- Internal calibration labelling. Not part of the product.
 --
+-- **This is a SINGLE-LABELLER BENCHMARK, not inter-rater agreement.**
+--
+-- One person labels; a model is scored against that one person's judgement.
+-- That is a weaker claim than inter-rater agreement and must never be written
+-- up, exported or charted as the stronger one. There is no second human
+-- verdict here, so no "humans agreed" statement is available at any
+-- confidence.
+--
+-- The schema supports more than one labeller because the blindness rule is
+-- cheaper to build in than to retrofit - not because more than one exists.
+-- The only integrity check available with one labeller is self-consistency:
+-- re-labelling rows already decided and comparing a person to their own
+-- earlier self. Append-only makes that possible, since the original label
+-- survives the re-label.
+--
 -- This exists so PRs can be hand-labelled by people, and the AI judged against
 -- those labels later. Everything here is deliberately separate from the product
 -- tables: nothing in the product reads these, and nothing here writes to

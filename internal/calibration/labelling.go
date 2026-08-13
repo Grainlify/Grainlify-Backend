@@ -247,82 +247,19 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
 	return id, err
 }
 
-// AgreementRow is one pull request both labellers have decided.
-type AgreementRow struct {
-	Project  string            `json:"project"`
-	Number   int               `json:"number"`
-	Verdicts map[string]string `json:"verdicts"`
-	Agree    bool              `json:"agree"`
-}
-
-// Agreement compares labellers, and only on pull requests where every one of
-// them has already submitted.
+// Inter-rater agreement is deliberately not computed here.
 //
-// The requesting labeller must have submitted too - so a labeller cannot reach
-// another's verdict by asking for the agreement view on a pull request they
-// have not yet decided. That is the same rule as the queue's, applied to the
-// one endpoint whose whole purpose is to show other people's answers.
-func Agreement(ctx context.Context, local db.DBPool, sampleName string, requesterID uuid.UUID) ([]AgreementRow, error) {
-	rows, err := local.Query(ctx, `
-WITH latest AS (
-  SELECT DISTINCT ON (l.sample_pr_id, l.labeller_id)
-         l.sample_pr_id, l.labeller_id, l.verdict
-  FROM calibration_labels l
-  ORDER BY l.sample_pr_id, l.labeller_id, l.created_at DESC
-),
-both_done AS (
-  SELECT sample_pr_id
-  FROM latest
-  GROUP BY sample_pr_id
-  HAVING count(DISTINCT labeller_id) >= 2
-     AND bool_or(labeller_id = $2)
-)
-SELECT sp.project_full_name, sp.pr_number, lb.handle, latest.verdict
-FROM latest
-JOIN both_done ON both_done.sample_pr_id = latest.sample_pr_id
-JOIN calibration_sample_prs sp ON sp.id = latest.sample_pr_id
-JOIN calibration_samples s ON s.id = sp.sample_id
-JOIN calibration_labellers lb ON lb.id = latest.labeller_id
-WHERE s.name = $1
-ORDER BY sp.created_at, lb.handle
-`, sampleName, requesterID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	byPR := map[string]*AgreementRow{}
-	var order []string
-	for rows.Next() {
-		var project, handle, verdict string
-		var number int
-		if err := rows.Scan(&project, &number, &handle, &verdict); err != nil {
-			return nil, err
-		}
-		key := fmt.Sprintf("%s#%d", project, number)
-		if _, ok := byPR[key]; !ok {
-			byPR[key] = &AgreementRow{Project: project, Number: number, Verdicts: map[string]string{}}
-			order = append(order, key)
-		}
-		byPR[key].Verdicts[handle] = verdict
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	out := make([]AgreementRow, 0, len(order))
-	for _, k := range order {
-		r := byPR[k]
-		seen := ""
-		r.Agree = true
-		for _, v := range r.Verdicts {
-			if seen == "" {
-				seen = v
-			} else if seen != v {
-				r.Agree = false
-			}
-		}
-		out = append(out, *r)
-	}
-	return out, nil
-}
+// It was, and the function is gone. This set has ONE labeller, so there is no
+// second human verdict to agree with and any "agreement rate" would be a
+// number with nothing on the other side of it. A UI that showed 0%, or 100%,
+// or "n/a" would all invite the same misreading - that humans were compared
+// and something was learned.
+//
+// What this set supports is a single-labeller benchmark: one person's
+// judgement, against which a model can be scored. That is a weaker claim than
+// inter-rater agreement and must never be presented as the stronger one.
+//
+// The only integrity check available with one labeller is self-consistency -
+// re-labelling rows already decided, and comparing a person against their own
+// earlier self. The append-only table already supports it: a re-label is a new
+// row with supersedes_id set, and the original stays.

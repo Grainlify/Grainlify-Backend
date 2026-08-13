@@ -36,7 +36,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/pr/", s.handlePR)
 	mux.HandleFunc("/submit", s.handleSubmit)
-	mux.HandleFunc("/agreement", s.handleAgreement)
 	return mux
 }
 
@@ -208,43 +207,21 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func (s *Server) handleAgreement(w http.ResponseWriter, r *http.Request) {
-	lab, err := s.labeller(r)
-	if err != nil {
-		http.Redirect(w, r, "/", http.StatusFound)
-		return
-	}
-	rows, err := Agreement(r.Context(), s.Local, s.SampleName, lab.ID)
-	if err != nil {
-		httpError(w, err)
-		return
-	}
-	agree := 0
-	for _, row := range rows {
-		if row.Agree {
-			agree++
-		}
-	}
-	renderPage(w, pageData{Title: "Agreement", Labeller: lab, Agreement: rows, AgreeCount: agree})
-}
-
 func httpError(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 type pageData struct {
-	Title      string
-	Blocked    string
-	Labeller   Labeller
-	Labellers  []Labeller
-	Queue      []QueueItem
-	PR         *PRForLabelling
-	Position   int
-	Total      int
-	Done       int
-	NextID     string
-	Agreement  []AgreementRow
-	AgreeCount int
+	Title     string
+	Blocked   string
+	Labeller  Labeller
+	Labellers []Labeller
+	Queue     []QueueItem
+	PR        *PRForLabelling
+	Position  int
+	Total     int
+	Done      int
+	NextID    string
 }
 
 func renderPage(w http.ResponseWriter, d pageData) {
@@ -281,7 +258,7 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 </style></head><body>
 <header>
   <strong>calibration</strong>
-  <a href="/">queue</a><a href="/agreement">agreement</a>
+  <a href="/">queue</a>
   {{if .Labeller.Handle}}<span class="who">labelling as {{.Labeller.DisplayName}} ({{.Labeller.Handle}})</span>{{end}}
 </header>
 <main>
@@ -357,21 +334,6 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
     </form>
   </div>
 {{end}}
-
-{{if .Agreement}}
-  <div class="card"><h1>Agreement</h1>
-    <p class="muted">{{.AgreeCount}} of {{len .Agreement}} pull requests agree. Only pull
-    requests you and another labeller have both submitted on appear here.</p>
-    <ul class="q">{{range .Agreement}}
-      <li>{{.Project}}#{{.Number}} - {{json .Verdicts}} {{if .Agree}}<span class="done">agree</span>{{else}}<strong>disagree</strong>{{end}}</li>
-    {{end}}</ul>
-  </div>
-{{else}}{{if eq .Title "Agreement"}}
-  <div class="card"><h1>Agreement</h1><p class="muted">Nothing to compare yet. A pull
-  request appears here once you and another labeller have both submitted on it -
-  never before, because seeing another verdict first would make the number
-  measure influence rather than agreement.</p></div>
-{{end}}{{end}}
 
 </main></body></html>`))
 
