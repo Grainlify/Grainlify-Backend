@@ -28,36 +28,61 @@ func main() {
 	}
 
 	name := flag.String("name", "", "sample name, e.g. set-1")
-	seed := flag.Int64("seed", 0, "PRNG seed; required, and recorded with the draw")
+	seed := flag.Int64("seed", 0, "PRNG seed; required to draw, and recorded with the draw")
 	dry := flag.Bool("dry-run", false, "draw and print the composition without writing anything")
+	snapshot := flag.Bool("snapshot", false, "fetch and freeze the diff and linked issue for a drawn sample")
+	status := flag.Bool("status", false, "report how complete a sample's snapshots are")
 	flag.Parse()
 
-	if *name == "" || *seed == 0 {
-		fmt.Fprintln(os.Stderr, "usage: calibrate -name set-1 -seed 20260813 [-dry-run]")
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "usage:")
+		fmt.Fprintln(os.Stderr, "  calibrate -name set-1 -seed 20260813 [-dry-run]   draw a sample")
+		fmt.Fprintln(os.Stderr, "  calibrate -name set-1 -snapshot                   freeze diffs and linked issues")
+		fmt.Fprintln(os.Stderr, "  calibrate -name set-1 -status                     report snapshot coverage")
+		os.Exit(2)
+	}
+	if !*snapshot && !*status && *seed == 0 {
+		fmt.Fprintln(os.Stderr, "drawing requires -seed")
 		os.Exit(2)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	sourceDSN := os.Getenv("CALIBRATION_SOURCE_DB_URL")
+	// The local database is always needed. The product database is needed only
+	// to draw - snapshotting and status work entirely from what the draw
+	// already recorded, which is the point of copying pr_number onto the
+	// sample row.
 	localDSN := os.Getenv("CALIBRATION_DB_URL")
-	if sourceDSN == "" || localDSN == "" {
-		fmt.Fprintln(os.Stderr, "CALIBRATION_SOURCE_DB_URL (read-only, product) and CALIBRATION_DB_URL (local) are both required")
+	if localDSN == "" {
+		fmt.Fprintln(os.Stderr, "CALIBRATION_DB_URL (local) is required")
 		os.Exit(2)
 	}
-
-	source, err := pgxpool.New(ctx, sourceDSN)
-	if err != nil {
-		fatal("connect source: %v", err)
-	}
-	defer source.Close()
-
 	local, err := pgxpool.New(ctx, localDSN)
 	if err != nil {
 		fatal("connect local: %v", err)
 	}
 	defer local.Close()
+
+	if *status {
+		reportCoverage(ctx, local, *name)
+		return
+	}
+	if *snapshot {
+		runSnapshots(ctx, local, *name)
+		return
+	}
+
+	sourceDSN := os.Getenv("CALIBRATION_SOURCE_DB_URL")
+	if sourceDSN == "" {
+		fmt.Fprintln(os.Stderr, "CALIBRATION_SOURCE_DB_URL (read-only, product) is required to draw a sample")
+		os.Exit(2)
+	}
+	source, err := pgxpool.New(ctx, sourceDSN)
+	if err != nil {
+		fatal("connect source: %v", err)
+	}
+	defer source.Close()
 
 	candidates, err := calibration.LoadCandidates(ctx, source)
 	if err != nil {
@@ -91,6 +116,74 @@ func main() {
 		fatal("persist: %v", err)
 	}
 	fmt.Printf("\nwritten: sample %s (%s)\ncandidate pool hash: %s\n", *name, id, draw.CandidateHash)
+}
+
+// runSnapshots freezes every outstanding pull request in a sample.
+//
+// Resumable and honest about incompleteness: it fetches only what is missing,
+// and if anything fails it names each one and exits non-zero. A sample that is
+// 20 of 25 must never look finished - a labeller who starts on a subset
+// produces a partial set that reads like a whole one.
+func runSnapshots(ctx context.Context, local *pgxpool.Pool, name string) {
+	pending, err := calibration.PendingSnapshots(ctx, local, name)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if len(pending) == 0 {
+		fmt.Println("nothing to fetch; every pull request in this sample is already snapshotted")
+		reportCoverage(ctx, local, name)
+		return
+	}
+	fmt.Printf("fetching %d snapshots\n\n", len(pending))
+
+	gh := calibration.NewGitHubClient(githubToken())
+	var failures []calibration.SnapshotResult
+	for i, p := range pending {
+		res := calibration.FetchAndStore(ctx, local, gh, p)
+		switch {
+		case res.Err != nil:
+			fmt.Printf("  %2d/%d  %-36s #%-6d FAILED: %v\n", i+1, len(pending), p.ProjectFullName, p.Number, res.Err)
+			failures = append(failures, res)
+		default:
+			note := "no linked issue"
+			if res.HasIssue {
+				note = "issue frozen"
+			}
+			if res.Truncated {
+				note += ", diff truncated"
+			}
+			fmt.Printf("  %2d/%d  %-36s #%-6d ok (%s)\n", i+1, len(pending), p.ProjectFullName, p.Number, note)
+		}
+	}
+
+	fmt.Println()
+	reportCoverage(ctx, local, name)
+
+	if len(failures) > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d snapshot(s) failed. Re-run with -snapshot to retry only those.\n", len(failures))
+		os.Exit(1)
+	}
+}
+
+func reportCoverage(ctx context.Context, local *pgxpool.Pool, name string) {
+	c, err := calibration.Coverage(ctx, local, name)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("snapshots: %d of %d", c.Snapshot, c.Total)
+	if c.Complete {
+		fmt.Printf("  COMPLETE - ready to label\n")
+	} else {
+		fmt.Printf("  INCOMPLETE - not ready to label\n")
+	}
+	fmt.Printf("linked issues frozen: %d of %d snapshotted (%d have none, which the screen states plainly)\n",
+		c.WithIssue, c.Snapshot, c.Snapshot-c.WithIssue)
+	if len(c.Missing) > 0 {
+		fmt.Println("missing:")
+		for _, m := range c.Missing {
+			fmt.Printf("  - %s\n", m)
+		}
+	}
 }
 
 func printComposition(d calibration.Draw) {

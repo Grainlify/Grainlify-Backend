@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS calibration_sample_prs (
   -- database it deliberately does not follow.
   pull_request_id UUID NOT NULL,
 
+  -- The pull request number, copied at draw time.
+  --
+  -- Stored so the local tool never needs the product database again after the
+  -- draw: everything the snapshot fetch and the screen need is here or in the
+  -- snapshot beside it. Without it, fetching a diff would mean reopening a
+  -- connection to production to translate an id into a number.
+  pr_number INT NOT NULL,
+
   -- Which strata this row was drawn to fill, so the sample's composition is
   -- inspectable without re-deriving it.
   project_full_name TEXT NOT NULL,

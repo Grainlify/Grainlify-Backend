@@ -126,9 +126,9 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
 	for _, s := range d.Selected {
 		_, err := tx.Exec(ctx, `
 INSERT INTO calibration_sample_prs
-  (sample_id, pull_request_id, project_full_name, merged, size_band, held_back)
-VALUES ($1, $2, $3, $4, $5, $6)
-`, sampleID, s.PullRequestID, s.ProjectFullName, s.Merged, string(s.Band), s.HeldBack)
+  (sample_id, pull_request_id, pr_number, project_full_name, merged, size_band, held_back)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`, sampleID, s.PullRequestID, s.Number, s.ProjectFullName, s.Merged, string(s.Band), s.HeldBack)
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("insert sample pr %s: %w", s.PullRequestID, err)
 		}

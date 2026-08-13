@@ -51,8 +51,8 @@ VALUES ($1, 42, $2, 'deadbeef', '{}'::jsonb) RETURNING id
 	}
 
 	err = d.Pool.QueryRow(ctx, `
-INSERT INTO calibration_sample_prs (sample_id, pull_request_id, project_full_name, merged, size_band)
-VALUES ($1, $2, 'calib/repo', true, 'small') RETURNING id
+INSERT INTO calibration_sample_prs (sample_id, pull_request_id, pr_number, project_full_name, merged, size_band)
+VALUES ($1, $2, 1, 'calib/repo', true, 'small') RETURNING id
 `, sampleID, prID).Scan(&samplePRID)
 	if err != nil {
 		t.Fatalf("insert sample pr: %v", err)
