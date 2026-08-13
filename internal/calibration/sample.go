@@ -254,8 +254,66 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 		{honourBands: true},
 		{relaxationMsg: "size band targets relaxed: the pool could not fill every band within the per-project cap"},
 	}
+	// (see seedOneOfEachBand below)
+	// An EMPTY band is worse than an under-filled one. Missing three of six
+	// "small" rows changes the balance; missing every one-liner means the set
+	// does not test the trivial-change boundary at all, which is one of the
+	// things stratifying by size is for. So before giving up on a band, the
+	// walk looks specifically for it.
+	//
+	// This runs before the relaxing pass, so a band is only abandoned once the
+	// pool genuinely has nothing left to fill it with - and it is deterministic
+	// for a seed, because it walks the same shuffled order.
+	seedBand := func(band SizeBand) {
+		{
+			if perBand[band] > 0 || len(d.Selected) >= plan.Total {
+				return
+			}
+			for _, c := range pool {
+				if len(d.Selected) >= plan.Total {
+					break
+				}
+				if perProject[c.ProjectFullName] >= plan.PerProjectCap || containsID(d.Selected, c.PullRequestID) {
+					continue
+				}
+				if !c.Merged && plan.UnmergedCeiling > 0 && unmerged >= plan.UnmergedCeiling {
+					continue
+				}
+				lines, err := size(ctx, c)
+				if err != nil {
+					continue
+				}
+				d.Examined++
+				if lines == 0 || ClassifySize(lines) != band {
+					continue
+				}
+				d.Selected = append(d.Selected, Selected{Candidate: c, Band: band, ChangedLines: lines})
+				perProject[c.ProjectFullName]++
+				perBand[band]++
+				if !c.Merged {
+					unmerged++
+				}
+				break
+			}
+		}
+	}
+
+	// Seed one of each band FIRST. Running this later cannot work: by the time
+	// the general passes finish, every slot is taken, and a fill pass with no
+	// room to fill is a pass that silently does nothing - which is exactly what
+	// set-2's first draw did, coming out with zero one-liners while reporting
+	// only a generic relaxation.
+	//
+	// Bands are seeded in a fixed order so the draw stays deterministic.
+	for _, band := range []SizeBand{BandTiny, BandSmall, BandMedium, BandLarge, BandHuge} {
+		if _, wanted := plan.BandTargets[band]; wanted {
+			seedBand(band)
+		}
+	}
 
 	for _, ps := range passes {
+		// Between the band-honouring pass and the relaxing one, make sure no
+		// band is empty.
 		if len(d.Selected) >= plan.Total {
 			break
 		}
@@ -320,6 +378,12 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 
 	if len(d.Selected) < plan.Total {
 		return d, fmt.Errorf("%w: drew %d of %d after examining %d candidates", ErrPlanImpossible, len(d.Selected), plan.Total, d.Examined)
+	}
+	for band := range plan.BandTargets {
+		if perBand[band] == 0 {
+			d.Relaxations = append(d.Relaxations,
+				fmt.Sprintf("band %q is EMPTY - the pool has no such pull request left within the per-project cap, so this set does not exercise that size at all", band))
+		}
 	}
 	if unmerged < plan.UnmergedFloor {
 		d.Relaxations = append(d.Relaxations,

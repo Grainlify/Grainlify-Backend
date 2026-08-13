@@ -336,17 +336,24 @@ ORDER BY sp.created_at
 }
 
 // AlwaysAcceptBaseline is what a model scores by answering "accept" every
-// time. Reported next to every agreement rate, because a rate without its
-// baseline is not interpretable: on this set, doing no work scores 60%.
-func AlwaysAcceptBaseline(prs []LabelledPR) float64 {
-	if len(prs) == 0 {
-		return 0
+// time, computed over EXACTLY the rows being scored.
+//
+// Per scope, never carried across. The held-back run reported "+40 vs base"
+// against a 60% baseline computed on the main 20; on those five the baseline
+// happened to be 60% too, so the arithmetic was right by coincidence. A
+// coincidence is not a method, and the next set will not be so obliging.
+//
+// Returned with its denominator so a report can say what it was computed on.
+// A baseline whose sample size is invisible invites the same mistake again.
+func AlwaysAcceptBaseline(prs []LabelledPR) (pct float64, accepts, total int) {
+	total = len(prs)
+	if total == 0 {
+		return 0, 0, 0
 	}
-	accepts := 0
 	for _, p := range prs {
 		if p.Verdict == "accept" {
 			accepts++
 		}
 	}
-	return 100 * float64(accepts) / float64(len(prs))
+	return 100 * float64(accepts) / float64(total), accepts, total
 }

@@ -355,3 +355,55 @@ func TestDrawSample_SkipsPullRequestsThatChangeNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestAlwaysAcceptBaseline_IsComputedPerScope is the regression test for a
+// reporting bug caught before it changed a decision, not after.
+//
+// The held-back run printed "+40 vs base" against a 60% baseline computed on
+// the main 20. On those five the baseline was also 60%, so the number was
+// right by coincidence - and a coincidence is not a method. The baseline must
+// come from exactly the rows being scored, and must carry its denominator so a
+// reader can see how coarse it is.
+func TestAlwaysAcceptBaseline_IsComputedPerScope(t *testing.T) {
+	main := []LabelledPR{
+		{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"},
+		{Verdict: "reject"}, {Verdict: "reject"},
+	}
+	held := []LabelledPR{{Verdict: "reject"}, {Verdict: "reject"}, {Verdict: "reject"}, {Verdict: "accept"}}
+
+	if pct, acc, total := AlwaysAcceptBaseline(main); pct != 60 || acc != 3 || total != 5 {
+		t.Errorf("main baseline = %.0f%% (%d/%d), want 60%% (3/5)", pct, acc, total)
+	}
+	// A scope with a different mix must produce a different baseline. If this
+	// ever returns the main set's number, the baseline is being carried.
+	if pct, acc, total := AlwaysAcceptBaseline(held); pct != 25 || acc != 1 || total != 4 {
+		t.Errorf("held-back baseline = %.0f%% (%d/%d), want 25%% (1/4)", pct, acc, total)
+	}
+	if pct, _, total := AlwaysAcceptBaseline(nil); pct != 0 || total != 0 {
+		t.Errorf("empty scope = %.0f%% of %d, want 0 of 0", pct, total)
+	}
+}
+
+// TestDrawSample_FillsEmptyBandsBeforeRelaxing.
+//
+// An empty band is worse than an under-filled one: missing three of six
+// "small" rows changes the balance, but missing every one-liner means the set
+// does not test the trivial-change boundary at all. Set-2's first draw came
+// out with zero in the tiny band, which is what prompted this.
+func TestDrawSample_FillsEmptyBandsBeforeRelaxing(t *testing.T) {
+	pool, size := fakePool(t)
+	plan := DefaultPlan()
+	plan.Total = 28
+	plan.HoldBack = 7
+
+	d, err := DrawSample(context.Background(), pool, plan, 20260814, size, nil)
+	if err != nil {
+		t.Fatalf("draw: %v", err)
+	}
+	_, byBand, _, _, _ := d.Composition()
+	for _, b := range []SizeBand{BandTiny, BandSmall, BandMedium, BandLarge, BandHuge} {
+		if byBand[b] == 0 {
+			t.Errorf("band %s is empty; the fill pass should have found one before relaxing (relaxations: %v)", b, d.Relaxations)
+		}
+	}
+}

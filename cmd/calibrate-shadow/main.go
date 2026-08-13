@@ -64,7 +64,7 @@ func main() {
 	if len(prs) == 0 {
 		fatal("no labelled pull requests in %q", *name)
 	}
-	baseline := calibration.AlwaysAcceptBaseline(prs)
+	baseline, baseAccepts, baseTotal := calibration.AlwaysAcceptBaseline(prs)
 	version, sha := calibration.PromptFingerprint()
 
 	fmt.Printf("sample      %s (%s)\n", *name, sampleID)
@@ -134,11 +134,11 @@ ORDER BY started_at DESC LIMIT 1`, sampleID, model).Scan(&runID); err != nil {
 	if err != nil {
 		fatal("prefilter view: %v", err)
 	}
-	report(scores, baseline, len(prs), version, sha)
+	report(scores, baseline, baseAccepts, baseTotal, version, sha)
 	reportPrefilter(views)
 }
 
-func report(scores []calibration.RunScore, baseline float64, total int, version, sha string) {
+func report(scores []calibration.RunScore, baseline float64, baseAccepts, baseTotal int, version, sha string) {
 	line := strings.Repeat("=", 78)
 	fmt.Printf("\n%s\nSHADOW COMPARISON - SINGLE-LABELLER BENCHMARK\n%s\n", line, line)
 	fmt.Println(`
@@ -158,7 +158,13 @@ a model.`)
 	prodV, _ := calibration.ProductionJudgingFingerprint()
 	fmt.Printf("\nprompt used     %s (sha256 %s)\n", version, sha[:16])
 	fmt.Printf("prompt NOT used %s  <- production's judging prompt; this run says nothing about it\n", prodV)
-	fmt.Printf("always-accept baseline: %.0f%% - a model that answers \"accept\" every time scores this\n", baseline)
+	fmt.Printf("always-accept baseline: %.0f%% (%d accept of %d) - computed on THESE rows, not carried\n",
+		baseline, baseAccepts, baseTotal)
+	fmt.Printf("                       from another scope. A model answering \"accept\" every time scores this.\n")
+	if baseTotal < 10 {
+		fmt.Printf("                       NOTE: %d rows. Each row is %.0f points, so this figure is coarse.\n",
+			baseTotal, 100/float64(baseTotal))
+	}
 
 	fmt.Printf("\n%-14s %8s %8s %10s %9s %10s %8s %10s\n", "model", "agree", "vs base", "cost USD", "in tok", "out tok", "failed", "effort")
 	for _, s := range scores {

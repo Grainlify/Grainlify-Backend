@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jagadeesh/grainlify/backend/internal/calibration"
@@ -35,6 +36,10 @@ func main() {
 	status := flag.Bool("status", false, "report how complete a sample's snapshots are")
 	serve := flag.String("serve", "", "run the labelling screen locally, e.g. -serve 127.0.0.1:842")
 	release := flag.Bool("release-heldback", false, "release the held-back rows for labelling under the judge's own question")
+	poolFrom := flag.String("pool-from", "", "draw against the candidate pool another sample recorded, e.g. -pool-from set-1")
+	judgeFraming := flag.Bool("judge-framing", false, "label every row under the judge's question (coordination assumed passed) from the start")
+	total := flag.Int("total", 25, "how many pull requests to draw")
+	holdBack := flag.Int("hold-back", 5, "how many of them to withhold")
 	flag.Parse()
 
 	if *name == "" {
@@ -110,8 +115,36 @@ func main() {
 	}
 	fmt.Printf("candidates: %d   already sampled (excluded): %d\n", len(candidates), len(exclude))
 
+	// Draw against a recorded pool when asked, so two sets come from the same
+	// population rather than from a corpus that grew between them.
+	if *poolFrom != "" {
+		ids, hash, err := calibration.RecordedPool(ctx, local, *poolFrom)
+		if err != nil {
+			fatal("recorded pool from %q: %v", *poolFrom, err)
+		}
+		keep := map[uuid.UUID]bool{}
+		for _, id := range ids {
+			keep[id] = true
+		}
+		filtered := candidates[:0]
+		for _, c := range candidates {
+			if keep[c.PullRequestID] {
+				filtered = append(filtered, c)
+			}
+		}
+		fmt.Printf("pool        restricted to %s's recorded pool: %d of %d candidates still present (hash %s)\n",
+			*poolFrom, len(filtered), len(ids), hash[:16])
+		candidates = filtered
+	}
+
 	gh := calibration.NewGitHubClient(githubToken())
 	plan := calibration.DefaultPlan()
+	plan.Total = *total
+	plan.HoldBack = *holdBack
+	// Scale the unmerged target with the set, keeping the same deliberate
+	// over-sampling against a corpus that is 17% unmerged.
+	plan.UnmergedFloor = *total * 10 / 25
+	plan.UnmergedCeiling = *total * 12 / 25
 
 	start := time.Now()
 	draw, err := calibration.DrawSample(ctx, candidates, plan, *seed, gh.SizeFnFor(), exclude)
@@ -127,11 +160,18 @@ func main() {
 		fmt.Println("\ndry run: nothing written")
 		return
 	}
-	id, err := calibration.PersistDraw(ctx, local, *name, draw)
+	framing := ""
+	if *judgeFraming {
+		framing = heldBackFraming
+	}
+	id, err := calibration.PersistDraw(ctx, local, *name, draw, framing)
 	if err != nil {
 		fatal("persist: %v", err)
 	}
 	fmt.Printf("\nwritten: sample %s (%s)\ncandidate pool hash: %s\n", *name, id, draw.CandidateHash)
+	if framing != "" {
+		fmt.Printf("\nevery row is labelled under the judge's question, from the start:\n  %s\n", framing)
+	}
 }
 
 // runSnapshots freezes every outstanding pull request in a sample.
