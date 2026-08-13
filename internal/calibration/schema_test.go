@@ -183,7 +183,6 @@ func TestLabels_RejectUnknownVerdictAndConfidence(t *testing.T) {
 	}
 }
 
-
 // TestLabellers_AreIndependentOfUsersAndRoles is the separation, asserted.
 //
 // A labeller is someone who runs the tool locally. The admin role approves

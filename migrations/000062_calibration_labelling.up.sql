@@ -72,7 +72,19 @@ CREATE TABLE IF NOT EXISTS calibration_samples (
 CREATE TABLE IF NOT EXISTS calibration_sample_prs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   sample_id UUID NOT NULL REFERENCES calibration_samples(id) ON DELETE CASCADE,
-  pull_request_id UUID NOT NULL REFERENCES github_pull_requests(id) ON DELETE CASCADE,
+  -- The product's pull request id, referenced but NOT foreign-keyed.
+  --
+  -- The tool reads candidates from the product database and writes everything
+  -- else locally, so the row this points at is in a different database. A
+  -- foreign key here would force a copy of production pull requests into the
+  -- local one purely to satisfy it - and the snapshot below already holds
+  -- everything a labeller needs, frozen, so the copy would buy nothing.
+  --
+  -- The consequence, accepted: nothing stops a sample naming a pull request
+  -- that no longer exists upstream. That is fine for a labelling set, which is
+  -- about what was true at draw time, not about staying in step with a
+  -- database it deliberately does not follow.
+  pull_request_id UUID NOT NULL,
 
   -- Which strata this row was drawn to fill, so the sample's composition is
   -- inspectable without re-deriving it.
