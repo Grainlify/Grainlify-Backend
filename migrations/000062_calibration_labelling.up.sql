@@ -11,6 +11,33 @@
 -- void. That is enforced in the query layer and in tests; the schema's job is
 -- to make the honest version possible - which is why snapshots are frozen and
 -- labels are append-only.
+--
+-- **A labeller is not a user, and not a role.** Labelling needs someone to run
+-- the tool locally; it does not need production admin, which approves payouts,
+-- verdicts and role changes. Hanging labelling off users.role would mean
+-- granting that authority to get a judgement task done, and conflating the two
+-- is what raises the question in the first place. So labellers have their own
+-- table, their own ids, and no relationship to users at all.
+
+-- Who may label. Deliberately independent of users and of users.role.
+--
+-- A row here is created by whoever runs the tool locally, against their own
+-- database. It grants nothing in the product: no session, no API access, no
+-- role. It exists so a label can be attributed to a person and so two people's
+-- labels can be told apart for the agreement calculation.
+--
+-- No foreign key to users. A labeller need not have a Grainlify account, and
+-- someone who has one gains nothing here from it.
+CREATE TABLE IF NOT EXISTS calibration_labellers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Short handle used to select who is labelling when the tool starts.
+  handle TEXT NOT NULL UNIQUE CHECK (length(trim(handle)) >= 2),
+  display_name TEXT NOT NULL,
+  -- Set when someone stops labelling, so their existing labels stay
+  -- attributed and interpretable while they drop out of the queue.
+  retired_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- One draw of PRs to label. Reproducible: the seed and the candidate pool are
 -- both recorded, so the same draw can be re-derived later.
@@ -37,7 +64,7 @@ CREATE TABLE IF NOT EXISTS calibration_samples (
   strata JSONB NOT NULL,
   -- Free text: what this set is for, and what it cannot measure.
   notes TEXT,
-  drawn_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  drawn_by UUID REFERENCES calibration_labellers(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -116,7 +143,8 @@ CREATE TABLE IF NOT EXISTS calibration_pr_snapshots (
 CREATE TABLE IF NOT EXISTS calibration_labels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   sample_pr_id UUID NOT NULL REFERENCES calibration_sample_prs(id) ON DELETE CASCADE,
-  labeller_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- The labeller, not a user. See calibration_labellers above.
+  labeller_id UUID NOT NULL REFERENCES calibration_labellers(id) ON DELETE RESTRICT,
 
   verdict TEXT NOT NULL CHECK (verdict IN ('accept', 'reject')),
   -- Required, and required to be substantive. A verdict without a reason is

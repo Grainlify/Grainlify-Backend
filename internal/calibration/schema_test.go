@@ -58,11 +58,13 @@ VALUES ($1, $2, 'calib/repo', true, 'small') RETURNING id
 		t.Fatalf("insert sample pr: %v", err)
 	}
 
+	// A labeller, not a user. Labelling needs someone to run the tool, not a
+	// production role - so there is no users row here and no role involved.
 	err = d.Pool.QueryRow(ctx, `
-INSERT INTO users (display_name) VALUES ($1) RETURNING id
-`, "labeller-"+uuid.NewString()[:8]).Scan(&labellerID)
+INSERT INTO calibration_labellers (handle, display_name) VALUES ($1, $2) RETURNING id
+`, "lbl-"+uuid.NewString()[:8], "A Labeller").Scan(&labellerID)
 	if err != nil {
-		t.Fatalf("insert user: %v", err)
+		t.Fatalf("insert labeller: %v", err)
 	}
 	return samplePRID, labellerID
 }
@@ -178,5 +180,59 @@ func TestLabels_RejectUnknownVerdictAndConfidence(t *testing.T) {
 	}
 	if _, err := insertLabel(t, d, samplePRID, labellerID, "accept", "a perfectly good reason string", "fairly sure"); err == nil {
 		t.Error("confidence 'fairly sure' was accepted")
+	}
+}
+
+
+// TestLabellers_AreIndependentOfUsersAndRoles is the separation, asserted.
+//
+// A labeller is someone who runs the tool locally. The admin role approves
+// payouts, verdicts and role changes, and that is not a labelling permission -
+// so labelling must not require it, must not confer it, and must not be
+// reachable through it. The schema holds that by having no relationship
+// between the two tables at all.
+func TestLabellers_AreIndependentOfUsersAndRoles(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+
+	// A labeller can exist with no users row anywhere in sight.
+	var labellerID uuid.UUID
+	err := d.Pool.QueryRow(ctx, `
+INSERT INTO calibration_labellers (handle, display_name) VALUES ($1, $2) RETURNING id
+`, "solo-"+uuid.NewString()[:8], "No Account").Scan(&labellerID)
+	if err != nil {
+		t.Fatalf("a labeller could not be created without a user: %v", err)
+	}
+
+	// And the column genuinely does not point at users: a users id is not a
+	// valid labeller id.
+	var someUserID uuid.UUID
+	if err := d.Pool.QueryRow(ctx, `
+INSERT INTO users (display_name, role) VALUES ($1, 'admin') RETURNING id
+`, "an-admin-"+uuid.NewString()[:8]).Scan(&someUserID); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	samplePRID, _ := seedLabelRow(t, d)
+	if _, err := insertLabel(t, d, samplePRID, someUserID, "accept", "an admin id should not work as a labeller id", "certain"); err == nil {
+		t.Error("a users id was accepted as a labeller id; the two identities are not separate")
+	}
+
+	// The foreign key names the labeller table, so there is no path from
+	// users.role to labelling at all.
+	var refTable string
+	err = d.Pool.QueryRow(ctx, `
+SELECT ccu.table_name
+FROM information_schema.table_constraints tc
+JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name
+JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
+WHERE tc.table_name = 'calibration_labels' AND tc.constraint_type = 'FOREIGN KEY'
+  AND kcu.column_name = 'labeller_id'
+`).Scan(&refTable)
+	if err != nil {
+		t.Fatalf("look up the foreign key: %v", err)
+	}
+	if refTable != "calibration_labellers" {
+		t.Errorf("labeller_id references %q, want calibration_labellers", refTable)
 	}
 }

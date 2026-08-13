@@ -4,3 +4,4 @@ DROP TABLE IF EXISTS calibration_labels;
 DROP TABLE IF EXISTS calibration_pr_snapshots;
 DROP TABLE IF EXISTS calibration_sample_prs;
 DROP TABLE IF EXISTS calibration_samples;
+DROP TABLE IF EXISTS calibration_labellers;
