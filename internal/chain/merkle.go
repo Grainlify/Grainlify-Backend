@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 )
@@ -68,44 +69,120 @@ func IdentityHash(githubLogin string, salt []byte) ([32]byte, error) {
 	return out, nil
 }
 
-// ClaimLeaf is one contributor's entitlement on one chain for one event.
+// PoolKind is which of an event's two budgets an entitlement is drawn from.
+//
+// Named PoolKind, not Pool, because this package already uses Pool for one
+// chain's sub-pool of one event (pools.go). The word carries two meanings in
+// this system - "the Flare sub-pool" and "the contributor budget" - and the
+// contract's own enum is the second. Colliding them in Go would make the leaf
+// construction read as though it hashed the chain sub-pool, which it does not.
+//
+// The byte value is inside the leaf, so a contributor leaf cannot verify
+// against the maintainer root. §5.1 requires that separation to be structural
+// rather than an accounting convention, and the hash is where it becomes
+// structural for claims. The values match the contract's enum ordering.
+type PoolKind uint8
+
+const (
+	PoolKindContributor PoolKind = 0
+	PoolKindMaintainer  PoolKind = 1
+)
+
+func (p PoolKind) String() string {
+	if p == PoolKindMaintainer {
+		return "maintainer"
+	}
+	return "contributor"
+}
+
+// ClaimLeaf is one contributor's entitlement in one pool of one event's escrow.
 type ClaimLeaf struct {
+	// Pool the entitlement is drawn from. Part of the digest.
+	Pool PoolKind
 	// IdentityHash, never the login itself.
 	IdentityHash [32]byte
-	// ClaimAddress is the address the contributor registered for this chain.
+	// ClaimAddress is the address the contributor registered for this chain,
+	// in that chain's canonical string form - a Stellar strkey, an EVM
+	// 0x-address. The string is what is hashed, on both sides.
 	ClaimAddress string
 	// AmountMinor is exact integer minor units (§9): all decimal arithmetic
-	// happens off-chain and only integers are published.
-	AmountMinor int64
-	ChainID     string
-	EventID     string
+	// happens off-chain and only integers are published. Arbitrary precision
+	// because Soroban accepts i128 and EVM expresses uint256; an int64 here
+	// narrowed both and wrapped silently on a negative.
+	AmountMinor *big.Int
 }
 
 // Hash computes the leaf digest.
 //
-//	leaf = H( 0x00 || identity_hash || claim_address || amount_be || chain_id || event_id )
+//	leaf = H( 0x00 || pool || len(address) || address || identity_hash || amount_be32 )
 //
-// chain_id and event_id are inside the hash so a leaf is bound to one chain of
-// one event. Without them, a leaf from a contributor's Soroban entitlement
-// could be replayed against their Flare root, or against the same chain in a
-// later event - and §2 requires that money never moves between chains for any
-// reason.
+// This is the canonical construction, identical in field order and encoding to
+// GrainhackEscrow::leaf_hash. It is pinned from both sides against
+// testdata/leaf_vector.json; the two implementations drifted once already,
+// which is what that vector exists to prevent.
 //
-// The amount is fixed-width big-endian rather than a decimal string, because
-// "10" and "10.0" would otherwise produce different leaves for the same
-// entitlement.
+// Four decisions worth keeping:
+//
+// **The pool is in the leaf.** Without it a contributor leaf verifies against
+// the maintainer root if the two are ever confused, and §5.1's separation
+// stops being structural.
+//
+// **The address is hashed as its canonical string, length-prefixed.** The
+// contract previously hashed Stellar's XDR encoding, which forced every
+// off-chain builder to implement XDR - the chain-specific leakage §3.1 exists
+// to prevent - and has no meaning at all on EVM. The two-byte length prefix is
+// what makes the field boundary recoverable: without it, concatenated
+// variable-length fields collide, and this construction demonstrably did.
+//
+// **The amount is 32-byte big-endian.** Fixed width so "10" and "10.0" cannot
+// differ, and wide enough for uint256 so no chain narrows it.
+//
+// **chain_id and event_id are deliberately absent.** They were in this
+// construction and are removed. One deployed escrow is one event on one chain,
+// and the root a proof verifies against lives inside that contract - so a leaf
+// built for another event or another chain has nowhere to be replayed. Putting
+// them back would mean the contract must store and canonicalise two strings it
+// cannot otherwise verify, on every chain, to re-derive scoping it already has
+// structurally. That cost is the portability this construction is buying. Do
+// not re-add them.
 func (l ClaimLeaf) Hash() [32]byte {
 	h := sha256.New()
 	h.Write([]byte{leafPrefix})
+	h.Write([]byte{byte(l.Pool)})
+
+	addr := []byte(l.ClaimAddress)
+	var addrLen [2]byte
+	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
+	h.Write(addrLen[:])
+	h.Write(addr)
+
 	h.Write(l.IdentityHash[:])
-	h.Write([]byte(l.ClaimAddress))
-	var amt [8]byte
-	binary.BigEndian.PutUint64(amt[:], uint64(l.AmountMinor))
-	h.Write(amt[:])
-	h.Write([]byte(l.ChainID))
-	h.Write([]byte(l.EventID))
+	h.Write(amountBytes32(l.AmountMinor))
+
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// amountBytes32 renders an amount as 32-byte big-endian, right-aligned.
+//
+// A nil or negative amount is rendered as zero rather than panicking or
+// wrapping: a leaf is built from judged payout rows, and the guard that keeps
+// those positive belongs at that boundary. What must never happen here is a
+// negative silently becoming an enormous positive, which is exactly what the
+// previous uint64 conversion did.
+func amountBytes32(v *big.Int) []byte {
+	out := make([]byte, 32)
+	if v == nil || v.Sign() <= 0 {
+		return out
+	}
+	b := v.Bytes()
+	if len(b) > 32 {
+		// Unreachable for any real asset; truncating silently would be worse
+		// than the most significant bytes being dropped loudly in a test.
+		b = b[len(b)-32:]
+	}
+	copy(out[32-len(b):], b)
 	return out
 }
 
@@ -230,10 +307,15 @@ func VerifyProof(root, leaf [32]byte, proof [][32]byte) bool {
 // TotalMinor sums a leaf set. §9 requires asserting a chain's leaf total
 // equals its escrowed amount before publishing that chain's root, and this is
 // the number to assert against.
-func TotalMinor(leaves []ClaimLeaf) int64 {
-	var total int64
+//
+// Arbitrary precision for the same reason the leaf carries it: the sum of a
+// large event's entitlements is the one number that must not silently wrap.
+func TotalMinor(leaves []ClaimLeaf) *big.Int {
+	total := new(big.Int)
 	for _, l := range leaves {
-		total += l.AmountMinor
+		if l.AmountMinor != nil {
+			total.Add(total, l.AmountMinor)
+		}
 	}
 	return total
 }

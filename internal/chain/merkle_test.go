@@ -2,6 +2,7 @@ package chain
 
 import (
 	"encoding/hex"
+	"math/big"
 	"testing"
 )
 
@@ -12,15 +13,22 @@ import (
 // privacy mechanism.
 var goldenSalt = []byte("grainhack-golden-fixture-salt-do-not-use-in-production")
 
+// leafFor builds a leaf for tests. chainID and eventID are no longer part of
+// the construction (spec §13.1: one escrow is one event on one chain, so the
+// scoping is structural), but the parameters are kept so call sites still read
+// as "this contributor, on this chain, in this event" - they simply do not
+// reach the digest.
 func leafFor(t *testing.T, login, addr string, amount int64, chainID, eventID string) ClaimLeaf {
 	t.Helper()
+	_ = chainID
+	_ = eventID
 	id, err := IdentityHash(login, goldenSalt)
 	if err != nil {
 		t.Fatalf("IdentityHash: %v", err)
 	}
 	return ClaimLeaf{
-		IdentityHash: id, ClaimAddress: addr, AmountMinor: amount,
-		ChainID: chainID, EventID: eventID,
+		Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: addr,
+		AmountMinor: big.NewInt(amount),
 	}
 }
 
@@ -42,14 +50,17 @@ func TestClaimLeaf_GoldenFixture(t *testing.T) {
 	}
 
 	leaf := ClaimLeaf{
+		Pool:         PoolKindContributor,
 		IdentityHash: id,
 		ClaimAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		AmountMinor:  1_500_000,
-		ChainID:      "soroban",
-		EventID:      "event-1",
+		AmountMinor:  big.NewInt(1_500_000),
 	}
 	h := leaf.Hash()
-	const wantLeaf = "e9ff2a2093d251a3a3b1bcecbc84e39af66959576b547ead2f4521843d9be402"
+	// Updated deliberately when the construction became canonical (§13.1):
+	// pool binding added, address length-prefixed, amount widened to 32 bytes,
+	// chain_id and event_id removed. Cross-checked against the contract in
+	// leaf_vector_test.go - this fixture and that vector must move together.
+	const wantLeaf = "15d462f4992ae05c96b7fa934de9cc42de96738980c0c42c71ea030abf97bf52"
 	if got := hex.EncodeToString(h[:]); got != wantLeaf {
 		t.Errorf("leaf construction changed:\n  got  %s\n  want %s\n"+
 			"This is the value a deployed contract verifies against. Changing it invalidates "+
@@ -64,11 +75,13 @@ func TestClaimLeaf_GoldenFixture(t *testing.T) {
 
 	// Every field is bound into the hash. If any of these collide, that field
 	// could be altered without invalidating a proof.
+	// chain and event variants are gone: those fields left the construction
+	// deliberately (§13.1). What remains must each be bound.
 	variants := map[string]ClaimLeaf{
-		"different amount":  {IdentityHash: id, ClaimAddress: leaf.ClaimAddress, AmountMinor: 1_500_001, ChainID: "soroban", EventID: "event-1"},
-		"different address": {IdentityHash: id, ClaimAddress: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", AmountMinor: 1_500_000, ChainID: "soroban", EventID: "event-1"},
-		"different chain":   {IdentityHash: id, ClaimAddress: leaf.ClaimAddress, AmountMinor: 1_500_000, ChainID: "flare", EventID: "event-1"},
-		"different event":   {IdentityHash: id, ClaimAddress: leaf.ClaimAddress, AmountMinor: 1_500_000, ChainID: "soroban", EventID: "event-2"},
+		"different amount":   {Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: leaf.ClaimAddress, AmountMinor: big.NewInt(1_500_001)},
+		"different address":  {Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", AmountMinor: big.NewInt(1_500_000)},
+		"different pool":     {Pool: PoolKindMaintainer, IdentityHash: id, ClaimAddress: leaf.ClaimAddress, AmountMinor: big.NewInt(1_500_000)},
+		"different identity": {Pool: PoolKindContributor, IdentityHash: [32]byte{0xff}, ClaimAddress: leaf.ClaimAddress, AmountMinor: big.NewInt(1_500_000)},
 	}
 	for name, v := range variants {
 		if v.Hash() == h {
@@ -100,32 +113,49 @@ func TestIdentityHash_SameLoginIsUnrelatedAcrossEvents(t *testing.T) {
 
 	// And the resulting leaves differ too, even with identical address and
 	// amount.
-	la := ClaimLeaf{IdentityHash: a, ClaimAddress: "GADDR", AmountMinor: 100, ChainID: "soroban", EventID: "event-a"}
-	lb := ClaimLeaf{IdentityHash: b, ClaimAddress: "GADDR", AmountMinor: 100, ChainID: "soroban", EventID: "event-b"}
+	la := ClaimLeaf{Pool: PoolKindContributor, IdentityHash: a, ClaimAddress: "GADDR", AmountMinor: big.NewInt(100)}
+	lb := ClaimLeaf{Pool: PoolKindContributor, IdentityHash: b, ClaimAddress: "GADDR", AmountMinor: big.NewInt(100)}
 	if la.Hash() == lb.Hash() {
 		t.Error("leaves for the same contributor in two events are identical")
 	}
 }
 
-// A contributor earning on two chains has two independent leaves. Nothing is
-// aggregated across chains (§5.4), and one chain's leaf must never verify
-// against another chain's root.
+// A contributor earning on two chains has two independent entitlements, and
+// one chain's leaf must never be claimable against another chain's root (§5.4).
+//
+// **How that property is held changed.** chain_id used to be inside the leaf,
+// so replay was blocked by the digest. It is now blocked structurally: one
+// deployed escrow is one event on one chain, and a proof verifies against the
+// root stored inside that contract, so a leaf presented anywhere else has no
+// root to verify against. The digest no longer carries the chain, and it does
+// not need to.
+//
+// The consequence is deliberate and asserted below: with the same registered
+// address, the same entitlement on two chains now produces the *same* leaf.
+// That is safe, because the two roots live in two contracts on two chains. It
+// would not be safe if one contract ever held two events' roots, which is why
+// the escrow is one-event-per-deployment and why publish_root is write-once.
 func TestClaimLeaf_PerChainLeavesAreIndependent(t *testing.T) {
 	soroban := leafFor(t, "octocat", "GADDR", 500, "soroban", "event-1")
 	flare := leafFor(t, "octocat", "0xADDR", 500, "flare", "event-1")
 
+	// Different registered addresses - the realistic case - still differ,
+	// because the address is bound.
 	if soroban.Hash() == flare.Hash() {
-		t.Fatal("the same contributor's leaves on two chains are identical")
+		t.Fatal("the same contributor's leaves on two chains are identical despite different addresses")
 	}
 
-	// Even with the identical registered address - which is unrealistic, but
-	// it isolates chain_id as the binding field.
+	// The same address on two chains now produces the same leaf by design.
+	// Pinned so that re-adding chain_id to the construction is a deliberate
+	// act that fails a test, rather than a quiet reversal of §13.1.
 	sameAddr := leafFor(t, "octocat", "GADDR", 500, "flare", "event-1")
-	if soroban.Hash() == sameAddr.Hash() {
-		t.Error("chain_id is not bound into the leaf; a Soroban leaf could be replayed against a Flare root")
+	if soroban.Hash() != sameAddr.Hash() {
+		t.Error("the leaf is chain-dependent again; §13.1 removed chain_id deliberately - scoping is the contract's, not the digest's")
 	}
 
-	// A tree per chain, and neither leaf verifies against the other's root.
+	// A tree per chain. With distinct addresses the leaves differ, so neither
+	// verifies against the other's root - the case that matters in practice,
+	// since a contributor registers a different address per chain.
 	sorobanTree, err := BuildMerkleTree([]ClaimLeaf{soroban})
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -170,7 +200,7 @@ func TestMerkleTree_ProofsVerifyAndForgeriesDoNot(t *testing.T) {
 		}
 		// The same proof must not verify a tampered amount.
 		tampered := l
-		tampered.AmountMinor = l.AmountMinor + 1
+		tampered.AmountMinor = new(big.Int).Add(l.AmountMinor, big.NewInt(1))
 		if VerifyProof(tree.Root, tampered.Hash(), proof) {
 			t.Errorf("a proof verified an inflated amount for %s", l.ClaimAddress)
 		}
@@ -251,7 +281,7 @@ func TestTotalMinor_SumsForTheEscrowAssertion(t *testing.T) {
 		leafFor(t, "alice", "GA1", 100, "soroban", "e"),
 		leafFor(t, "bob", "GB2", 250, "soroban", "e"),
 	}
-	if got := TotalMinor(leaves); got != 350 {
-		t.Errorf("TotalMinor = %d, want 350", got)
+	if got := TotalMinor(leaves); got.Cmp(big.NewInt(350)) != 0 {
+		t.Errorf("TotalMinor = %s, want 350", got)
 	}
 }

@@ -3,23 +3,22 @@ package chain
 import (
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"os"
 	"testing"
 )
 
 // leafVector is the cross-implementation pin shared with the Soroban contract.
-// See testdata/leaf_vector.json for what each field means and why two digests
-// are currently recorded rather than one.
+// The identical vector is asserted from the contract side, so whichever
+// implementation moves, one of the two test suites goes red.
 type leafVector struct {
 	Inputs struct {
 		IdentityHashHex string `json:"identity_hash_hex"`
 		ClaimAddress    string `json:"claim_address"`
 		AmountMinor     int64  `json:"amount_minor"`
-		ChainID         string `json:"chain_id"`
-		EventID         string `json:"event_id"`
 	} `json:"inputs"`
-	ContractLeafContributor string `json:"contract_leaf_contributor"`
-	BackendLeafCurrent      string `json:"backend_leaf_current"`
+	LeafContributor string `json:"leaf_contributor"`
+	LeafMaintainer  string `json:"leaf_maintainer"`
 }
 
 func loadLeafVector(t *testing.T) leafVector {
@@ -35,7 +34,7 @@ func loadLeafVector(t *testing.T) leafVector {
 	return v
 }
 
-func (v leafVector) leaf(t *testing.T) ClaimLeaf {
+func (v leafVector) leaf(t *testing.T, pool PoolKind) ClaimLeaf {
 	t.Helper()
 	idBytes, err := hex.DecodeString(v.Inputs.IdentityHashHex)
 	if err != nil || len(idBytes) != 32 {
@@ -44,74 +43,95 @@ func (v leafVector) leaf(t *testing.T) ClaimLeaf {
 	var id [32]byte
 	copy(id[:], idBytes)
 	return ClaimLeaf{
+		Pool:         pool,
 		IdentityHash: id,
 		ClaimAddress: v.Inputs.ClaimAddress,
-		AmountMinor:  v.Inputs.AmountMinor,
-		ChainID:      v.Inputs.ChainID,
-		EventID:      v.Inputs.EventID,
+		AmountMinor:  big.NewInt(v.Inputs.AmountMinor),
 	}
 }
 
-// TestClaimLeafHash_MatchesPinnedVector pins what this builder produces today.
+// TestClaimLeafHash_MatchesTheContract is the cross-implementation check the
+// contract's exported leaf() was always meant to enable.
 //
-// It exists so a change to the construction cannot be silent. The same vector
-// is asserted from the contract side, so whichever implementation moves, one of
-// the two tests goes red.
-func TestClaimLeafHash_MatchesPinnedVector(t *testing.T) {
+// The two implementations drifted before this existed - the contract hashed
+// pool, XDR address, identity and a 16-byte amount, while this hashed identity,
+// UTF-8 address, an 8-byte amount, chain id and event id. They agreed on
+// nothing, so a root built here could not be claimed against the contract.
+// Both now compute the canonical construction of spec §13.1 and are asserted
+// against the same digests.
+//
+// If this fails, one side changed. Fix the side that moved; do not update the
+// vector to make it pass.
+func TestClaimLeafHash_MatchesTheContract(t *testing.T) {
 	v := loadLeafVector(t)
-	got := v.leaf(t).Hash()
-	if hex.EncodeToString(got[:]) != v.BackendLeafCurrent {
-		t.Errorf("leaf digest changed\n got  %s\n want %s\nUpdate testdata/leaf_vector.json AND the copy in the contract tests deliberately, never to make a test pass",
-			hex.EncodeToString(got[:]), v.BackendLeafCurrent)
+
+	for _, tc := range []struct {
+		pool PoolKind
+		want string
+	}{
+		{PoolKindContributor, v.LeafContributor},
+		{PoolKindMaintainer, v.LeafMaintainer},
+	} {
+		got := v.leaf(t, tc.pool).Hash()
+		if hex.EncodeToString(got[:]) != tc.want {
+			t.Errorf("%s leaf digest\n got  %s\n want %s", tc.pool, hex.EncodeToString(got[:]), tc.want)
+		}
 	}
 }
 
-// TestClaimLeafHash_DivergesFromTheContract records the defect rather than
-// hiding it.
+// TestClaimLeafHash_PoolIsBoundIntoTheLeaf is §5.1 enforced in the digest: the
+// same entitlement in the other pool is a different leaf, so a contributor
+// proof cannot verify against the maintainer root.
 //
-// The contract exports leaf() precisely so this builder could be checked
-// against it; that was never wired up, and the two constructions drifted. They
-// hash different field sets - the contract binds the pool and encodes the
-// address as XDR, this binds chain and event ids and encodes the address as
-// UTF-8 - so no choice of inputs makes them agree.
-//
-// A root built here cannot be claimed against the deployed contract. Nothing
-// in production depends on it yet: claim_leaves does not exist and no chain
-// pool has ever been created.
-//
-// **This test is expected to fail once the two are aligned.** When it does,
-// delete it and assert equality against the single canonical digest instead.
-// It is written as an assertion rather than a comment so alignment cannot be
-// declared done while the digests still differ.
-func TestClaimLeafHash_DivergesFromTheContract(t *testing.T) {
+// This builder had no pool binding at all before alignment - the property
+// existed in the contract and was absent here.
+func TestClaimLeafHash_PoolIsBoundIntoTheLeaf(t *testing.T) {
 	v := loadLeafVector(t)
-	got := v.leaf(t).Hash()
-	if hex.EncodeToString(got[:]) == v.ContractLeafContributor {
-		t.Fatal("the builder now agrees with the contract - alignment has landed; replace this test with an equality assertion against the canonical digest and drop backend_leaf_current from the vector")
+	if v.leaf(t, PoolKindContributor).Hash() == v.leaf(t, PoolKindMaintainer).Hash() {
+		t.Fatal("contributor and maintainer leaves collide; the pool is not in the digest")
 	}
 }
 
-// TestClaimLeafHash_ConcatenationIsAmbiguous demonstrates a second defect in
-// the current construction, independent of the divergence.
+// TestClaimLeafHash_FieldBoundariesAreRecoverable is the regression test for a
+// defect the alignment fixed.
 //
-// The address, chain id and event id are variable-length and concatenated with
-// no length prefix or separator, so the boundaries between them are not
-// recoverable from the digest input. Two different entitlements therefore hash
-// to the same leaf.
+// The address, chain id and event id used to be concatenated with no length
+// prefix, so the boundaries between them were not recoverable and distinct
+// entitlements collided: chain_id="flare" with event_id="evt-1" hashed
+// identically to "flareevt" with "-1". chain_id and event_id are gone from the
+// leaf entirely now, and the one variable-length field left carries its length.
 //
-// Not currently exploitable - chain ids come from a fixed internal set and
-// event ids are UUIDs - but it is a canonicalisation bug, and the fix (length
-// prefixes) belongs in the same change that aligns the two constructions.
-func TestClaimLeafHash_ConcatenationIsAmbiguous(t *testing.T) {
-	base := ClaimLeaf{AmountMinor: 1, ChainID: "flare", EventID: "evt-1"}
-	shifted := base
-	// One character moved across the boundary: "flare"+"evt-1" and
-	// "flareevt"+"-1" are different entitlements with the same digest input.
-	shifted.ChainID = "flareevt"
-	shifted.EventID = "-1"
-
-	if base.Hash() != shifted.Hash() {
-		t.Skip("construction now disambiguates its fields; fold this into the canonical test")
+// Two addresses that differ only in where a shared prefix ends must not
+// collide.
+func TestClaimLeafHash_FieldBoundariesAreRecoverable(t *testing.T) {
+	var id [32]byte
+	base := ClaimLeaf{
+		Pool:         PoolKindContributor,
+		IdentityHash: id,
+		ClaimAddress: "GABC",
+		AmountMinor:  big.NewInt(1),
 	}
-	t.Log("confirmed: chain_id and event_id boundaries are not recoverable, so distinct entitlements collide")
+	longer := base
+	longer.ClaimAddress = "GABCD"
+
+	if base.Hash() == longer.Hash() {
+		t.Fatal("addresses of different lengths collide; the length prefix is not in the digest")
+	}
+}
+
+// TestClaimLeafHash_NegativeAmountDoesNotWrap covers the other silent failure
+// the old construction had: the amount went through uint64(), so a negative
+// became an enormous positive rather than being rejected or zeroed.
+func TestClaimLeafHash_NegativeAmountDoesNotWrap(t *testing.T) {
+	var id [32]byte
+	neg := ClaimLeaf{Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: "GABC", AmountMinor: big.NewInt(-1)}
+	zero := ClaimLeaf{Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: "GABC", AmountMinor: big.NewInt(0)}
+	huge := ClaimLeaf{Pool: PoolKindContributor, IdentityHash: id, ClaimAddress: "GABC", AmountMinor: new(big.Int).Lsh(big.NewInt(1), 200)}
+
+	if neg.Hash() != zero.Hash() {
+		t.Error("a negative amount should render as zero, not as its own value")
+	}
+	if huge.Hash() == zero.Hash() {
+		t.Error("a 200-bit amount collided with zero; 32 bytes should carry it")
+	}
 }

@@ -1,33 +1,38 @@
 {
   "_comment": [
-    "Cross-implementation leaf vector. The identical file lives at",
-    "Stellar-Contracts/contracts/grainhack-escrow/src/test.rs (inline constants,",
-    "test `leaf_matches_the_pinned_cross_implementation_vector`). The two must",
-    "stay byte-identical.",
+    "Cross-implementation leaf vector for the canonical construction (spec §13.1):",
     "",
-    "The contract exports leaf() so an off-chain builder can be tested against",
-    "it rather than against a second implementation of the same rules that can",
-    "drift. That check was never wired up and the two did drift: for these",
-    "inputs the contract produces contract_leaf_contributor below, and the Go",
-    "builder in merkle.go produces backend_leaf_current. They hash different",
-    "field sets, so no choice of inputs makes them agree.",
+    "  leaf = H( 0x00 || pool || len(address) || address || identity_hash || amount_be32 )",
     "",
-    "Both digests are recorded here on purpose. Once a canonical construction is",
-    "chosen and both sides implement it, this collapses to one `leaf_contributor`",
-    "value asserted from Go and from Rust, and the two `*_current` fields go."
+    "H is sha256 on Soroban and keccak256 on EVM, so digests are per chain by",
+    "design - what is identical across chains is the construction rule, not the",
+    "bytes. These values are the Soroban/sha256 ones.",
+    "",
+    "The identical vector is asserted from the contract side, in",
+    "Stellar-Contracts/contracts/grainhack-escrow/src/test.rs, test",
+    "`leaf_matches_the_pinned_cross_implementation_vector`. The two copies must",
+    "stay byte-identical. If one side changes, its own test goes red first.",
+    "",
+    "History worth keeping: these two implementations drifted before this vector",
+    "existed. The contract hashed pool, XDR address, identity and a 16-byte",
+    "amount; the backend hashed identity, UTF-8 address, an 8-byte amount, chain",
+    "id and event id. A root built by the backend could not be claimed against",
+    "the contract. Neither construction was correct - the contract's XDR address",
+    "forced Stellar encoding into chain-agnostic code, and the backend had no",
+    "pool binding, an int64 that wrapped on negatives, and unprefixed",
+    "variable-length fields that collided. Both were replaced by the above.",
+    "",
+    "chain_id and event_id are deliberately absent. One escrow is one event on",
+    "one chain and the root lives inside that contract, so a leaf has nowhere",
+    "else to be replayed. Do not re-add them."
   ],
+  "construction": "H(0x00 || pool_u8 || addr_len_u16_be || address_utf8 || identity_hash_32 || amount_be32)",
+  "hash": "sha256",
   "inputs": {
     "identity_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
     "claim_address": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-    "amount_minor": 1500000,
-    "chain_id": "stellar",
-    "event_id": "evt-1"
+    "amount_minor": 1500000
   },
-  "contract_leaf_contributor": "5b28103d10e8dd709b2c7d257bb212cdec80fac5b4f2aedecb41e24955acb6a3",
-  "contract_leaf_maintainer": "e5d16d25eacfff66968552c19b07fc8e16f3fc22b09e4c1aa6e583a8488a2395",
-  "backend_leaf_current": "4058d072cd76ba70d60006eb202c53131f94ee09bf7ab5eaf698580ec0b868a4",
-  "constructions": {
-    "contract": "sha256(0x00 || pool_u8 || address_xdr || identity_hash || amount_i128_be16)",
-    "backend": "sha256(0x00 || identity_hash || address_utf8 || amount_i64_be8 || chain_id_utf8 || event_id_utf8)"
-  }
+  "leaf_contributor": "a12f90c9b723389726f63f70b9dd6f815b45c6707b22b5fc6da22def738055fe",
+  "leaf_maintainer": "1729f8ad8f47e8fcf015b077093111f5e14f20a664373baf6d49041f5967bcea"
 }
