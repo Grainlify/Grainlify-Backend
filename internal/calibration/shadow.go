@@ -112,7 +112,7 @@ ORDER BY sp.created_at
 //
 // A failed call is recorded with its error rather than dropped, so a run of 18
 // successes out of 20 can never be reported as 18 of 18.
-func RunShadow(ctx context.Context, local db.DBPool, sampleID uuid.UUID, sampleName string,
+func RunShadow(ctx context.Context, local db.DBPool, sampleID uuid.UUID, sampleName string, scope Scope,
 	j Judge, pricing ModelPricing, prs []LabelledPR, progress func(i int, p LabelledPR, r JudgeResponse, err error),
 ) (uuid.UUID, error) {
 	version, sha := PromptFingerprint()
@@ -121,10 +121,10 @@ func RunShadow(ctx context.Context, local db.DBPool, sampleID uuid.UUID, sampleN
 	err := local.QueryRow(ctx, `
 INSERT INTO calibration_model_runs
   (sample_id, provider, model, prompt_version, prompt_sha256, long_context_threshold,
-   input_price_per_mtok, output_price_per_mtok, reasoning_effort, notes)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id
+   input_price_per_mtok, output_price_per_mtok, reasoning_effort, scope, notes)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id
 `, sampleID, j.Provider(), j.Model(), version, sha, LongContextThresholdTokens,
-		pricing.InputPerMTok, pricing.OutputPerMTok, effortOf(j),
+		pricing.InputPerMTok, pricing.OutputPerMTok, effortOf(j), string(scope),
 		"Single-labeller benchmark. Shadow run: the model is scored against one person's labels, and this is not inter-rater agreement. System prompt and output contract are the production judging ones; the user content is assembled by the calibration harness from frozen snapshots.",
 	).Scan(&runID)
 	if err != nil {
@@ -196,6 +196,7 @@ type RunScore struct {
 	PromptSHA        string
 	StartedAt        time.Time
 	ReasoningEffort  string
+	Scope            string
 	Total            int
 	Scored           int
 	Failed           int
@@ -209,6 +210,17 @@ type RunScore struct {
 	MaxPromptTokens  int
 	CostUSD          float64
 	Disagreements    []Disagreement
+
+	// The always-accept baseline for THIS run, computed from the same as-of
+	// labels the agreement is, so the two are the same vintage.
+	//
+	// Computed here rather than passed in. When it was passed in, it came from
+	// today's labels while agreement came from run-time labels, so a corrected
+	// label moved "vs base" on a historical run while leaving the agreement
+	// alone - a report whose two halves disagreed about which day it was.
+	BaselinePct     float64
+	BaselineAccepts int
+	BaselineTotal   int
 }
 
 // AgreementPct is agreement over the calls that produced a verdict.
@@ -234,9 +246,9 @@ func ScoreRun(ctx context.Context, local db.DBPool, runID uuid.UUID) (RunScore, 
 	var inPrice, outPrice float64
 	err := local.QueryRow(ctx, `
 SELECT provider, model, prompt_version, prompt_sha256, started_at, input_price_per_mtok, output_price_per_mtok,
-       COALESCE(reasoning_effort, '')
+       COALESCE(reasoning_effort, ''), COALESCE(scope, '')
 FROM calibration_model_runs WHERE id = $1
-`, runID).Scan(&s.Provider, &s.Model, &s.PromptVersion, &s.PromptSHA, &s.StartedAt, &inPrice, &outPrice, &s.ReasoningEffort)
+`, runID).Scan(&s.Provider, &s.Model, &s.PromptVersion, &s.PromptSHA, &s.StartedAt, &inPrice, &outPrice, &s.ReasoningEffort, &s.Scope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, fmt.Errorf("no such run %s", runID)
 	}
@@ -244,6 +256,18 @@ FROM calibration_model_runs WHERE id = $1
 		return s, err
 	}
 
+	// **Scored against the label as it stood WHEN THE RUN HAPPENED**, not the
+	// latest one.
+	//
+	// Labels are append-only and a labeller may correct themselves later - and
+	// one did: a superseding label was added after a model disagreed and turned
+	// out to be right. Reading the latest label would silently move a recorded
+	// run's score every time that happens, so a number quoted last week would
+	// not be the number the same command printed today.
+	//
+	// Constraining to created_at <= the run's start makes a historical run
+	// reproducible by construction. Future runs pick up the correction, which
+	// is what a correction is for.
 	rows, err := local.Query(ctx, `
 SELECT sp.project_full_name, sp.pr_number, sp.size_band, sp.merged,
        l.verdict, l.confidence, l.reason,
@@ -251,9 +275,11 @@ SELECT sp.project_full_name, sp.pr_number, sp.size_band, sp.merged,
        COALESCE(mv.prompt_tokens,0), COALESCE(mv.completion_tokens,0), mv.long_context
 FROM calibration_model_verdicts mv
 JOIN calibration_sample_prs sp ON sp.id = mv.sample_pr_id
+JOIN calibration_model_runs r ON r.id = mv.run_id
 JOIN LATERAL (
   SELECT verdict, confidence, reason FROM calibration_labels
-  WHERE sample_pr_id = sp.id ORDER BY created_at DESC LIMIT 1
+  WHERE sample_pr_id = sp.id AND created_at <= r.started_at
+  ORDER BY created_at DESC LIMIT 1
 ) l ON true
 WHERE mv.run_id = $1
 ORDER BY sp.created_at
@@ -289,6 +315,10 @@ ORDER BY sp.created_at
 			continue
 		}
 		s.Scored++
+		s.BaselineTotal++
+		if humanVerdict == "accept" {
+			s.BaselineAccepts++
+		}
 
 		agree := *modelVerdict == humanVerdict
 		bump := func(m map[SizeBand][2]int, k SizeBand) {
@@ -328,6 +358,9 @@ ORDER BY sp.created_at
 		return s, err
 	}
 
+	if s.BaselineTotal > 0 {
+		s.BaselinePct = 100 * float64(s.BaselineAccepts) / float64(s.BaselineTotal)
+	}
 	s.CostUSD = float64(s.PromptTokens)/1_000_000*inPrice + float64(s.CompletionTokens)/1_000_000*outPrice
 	sort.Slice(s.Disagreements, func(i, j int) bool {
 		return s.Disagreements[i].Project < s.Disagreements[j].Project

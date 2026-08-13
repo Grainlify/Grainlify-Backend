@@ -94,9 +94,10 @@ func main() {
 		var runID uuid.UUID
 		if *reportOnly {
 			if err := local.QueryRow(ctx, `
-SELECT id FROM calibration_model_runs WHERE sample_id = $1 AND model = $2
-ORDER BY started_at DESC LIMIT 1`, sampleID, model).Scan(&runID); err != nil {
-				fatal("no recorded run for %s: %v", model, err)
+SELECT id FROM calibration_model_runs
+WHERE sample_id = $1 AND model = $2 AND COALESCE(scope, '') = $3
+ORDER BY started_at DESC LIMIT 1`, sampleID, model, string(sc)).Scan(&runID); err != nil {
+				fatal("no recorded %s-scope run for %s: %v", sc, model, err)
 			}
 		} else {
 			if apiKey == "" {
@@ -104,7 +105,7 @@ ORDER BY started_at DESC LIMIT 1`, sampleID, model).Scan(&runID); err != nil {
 			}
 			fmt.Printf("--- %s\n", model)
 			judge := calibration.NewOpenAIJudge(apiKey, model)
-			runID, err = calibration.RunShadow(ctx, local, sampleID, *name, judge, price, prs,
+			runID, err = calibration.RunShadow(ctx, local, sampleID, *name, sc, judge, price, prs,
 				func(i int, p calibration.LabelledPR, r calibration.JudgeResponse, jerr error) {
 					status := r.Verdict
 					if jerr != nil {
@@ -158,9 +159,14 @@ a model.`)
 	prodV, _ := calibration.ProductionJudgingFingerprint()
 	fmt.Printf("\nprompt used     %s (sha256 %s)\n", version, sha[:16])
 	fmt.Printf("prompt NOT used %s  <- production's judging prompt; this run says nothing about it\n", prodV)
-	fmt.Printf("always-accept baseline: %.0f%% (%d accept of %d) - computed on THESE rows, not carried\n",
+	if len(scores) > 0 {
+		// Per run, from the same as-of labels the agreement uses, so both
+		// halves of the report describe the same day.
+		baseline, baseAccepts, baseTotal = scores[0].BaselinePct, scores[0].BaselineAccepts, scores[0].BaselineTotal
+	}
+	fmt.Printf("always-accept baseline: %.0f%% (%d accept of %d) - computed on THESE rows as they were\n",
 		baseline, baseAccepts, baseTotal)
-	fmt.Printf("                       from another scope. A model answering \"accept\" every time scores this.\n")
+	fmt.Printf("                       labelled AT RUN TIME, not carried from another scope or a later correction.\n")
 	if baseTotal < 10 {
 		fmt.Printf("                       NOTE: %d rows. Each row is %.0f points, so this figure is coarse.\n",
 			baseTotal, 100/float64(baseTotal))
@@ -169,7 +175,7 @@ a model.`)
 	fmt.Printf("\n%-14s %8s %8s %10s %9s %10s %8s %10s\n", "model", "agree", "vs base", "cost USD", "in tok", "out tok", "failed", "effort")
 	for _, s := range scores {
 		fmt.Printf("%-14s %7.0f%% %+8.0f %10.4f %9d %10d %8d %10s\n",
-			s.Model, s.AgreementPct(), s.AgreementPct()-baseline, s.CostUSD,
+			s.Model, s.AgreementPct(), s.AgreementPct()-s.BaselinePct, s.CostUSD,
 			s.PromptTokens, s.CompletionTokens, s.Failed, s.ReasoningEffort)
 	}
 	fmt.Println(`
