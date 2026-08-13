@@ -39,6 +39,11 @@ type ruleDTO struct {
 	// complete when it isn't - but flagged so nobody plans around a value
 	// that currently does nothing.
 	Active bool `json:"active"`
+	// Unenforced explains why Value is blank: the rule is real and published,
+	// but its authority is a contract that does not exist yet, so there is no
+	// number to show. The key and its description still appear - a reader
+	// should know the rule exists and that we cannot yet quote it.
+	Unenforced string `json:"unenforced,omitempty"`
 }
 
 // Rules handles GET /grainhack/rules?hackathon_id=. Public, no auth: these
@@ -103,10 +108,24 @@ SELECT name, phase, config_snapshot FROM hackathons WHERE id = $1 AND phase <> '
 				rules = append(rules, ruleDTO{Key: key, Value: value, Section: "Other", Active: false})
 				continue
 			}
-			rules = append(rules, ruleDTO{
+			dto := ruleDTO{
 				Key: key, Value: value, Type: def.Type, Section: def.Section,
 				Description: def.Description, ValidRange: def.ValidRange, Active: def.Active,
-			})
+			}
+			// A setting whose authority is a deployed contract must not be
+			// published as a number until it can be read back from that
+			// contract. Showing 180 here while the escrow's own timelock is
+			// whatever it was initialised with is the referral-window problem
+			// again: a published rule the backend does not enforce.
+			//
+			// No escrow is deployed on any chain, so this suppresses
+			// unconditionally today. When deployment exists, the value is
+			// written here from the contract and this branch stops firing.
+			if def.EnforcedOnChain {
+				dto.Value = ""
+				dto.Unenforced = "fixed in the escrow contract at deployment; no escrow is deployed yet, so there is no value to publish"
+			}
+			rules = append(rules, dto)
 		}
 
 		// §2.3: publish each chain's pool size from Phase 3, with issue and

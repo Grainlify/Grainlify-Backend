@@ -41,6 +41,21 @@ type SettingDef struct {
 	// slice (§3.4 onward) - stored and shown in the settings UI, so admins
 	// can see/publish the full rule set early, but nothing reads them.
 	Active bool
+	// EnforcedOnChain marks a setting whose authority is a deployed contract,
+	// not this table. The escrow's sweep timelock is fixed at initialise();
+	// the row here is a description of it, and the two are connected by
+	// nothing today.
+	//
+	// The referral window had exactly this shape - a published figure and an
+	// enforced figure that could drift because nothing tied them - and the fix
+	// was to serve the published number from the constant that enforces it.
+	// The same fix is not yet available here, because there is no deployment
+	// to read from. So until there is, the rules endpoint publishes no number
+	// for these keys rather than a number nothing enforces.
+	//
+	// When a deployment exists, the deploy script reads the value out of the
+	// contract and writes it here, and this flag stops suppressing.
+	EnforcedOnChain bool
 }
 
 // Definitions is every config key from AI-specs.md §3.1-§3.12, in spec
@@ -169,11 +184,11 @@ var Definitions = map[string]SettingDef{
 	// conditional on the thing it measures - "a maintainer farming an event is
 	// gone the next day; one genuinely growing a project is still there". A
 	// timer alone pays the farmer three months late.
-	"maintainer_activity_window_days":   {Key: "maintainer_activity_window_days", Type: "int", Default: "60", Section: "Maintainer pool", Description: "Days after the event closes over which continued repo activity is measured for holdback release.", ValidRange: ">= 1", Active: true},
-	"maintainer_activity_full_commits":  {Key: "maintainer_activity_full_commits", Type: "int", Default: "5", Section: "Maintainer pool", Description: "Commits in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
-	"maintainer_activity_full_prs":      {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
-	"maintainer_partial_release_pct":    {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
-	"maintainer_withheld_destination":   {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
+	"maintainer_activity_window_days":  {Key: "maintainer_activity_window_days", Type: "int", Default: "60", Section: "Maintainer pool", Description: "Days after the event closes over which continued repo activity is measured for holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_activity_full_commits": {Key: "maintainer_activity_full_commits", Type: "int", Default: "5", Section: "Maintainer pool", Description: "Commits in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_activity_full_prs":     {Key: "maintainer_activity_full_prs", Type: "int", Default: "2", Section: "Maintainer pool", Description: "Merged PRs in the activity window that qualify for full holdback release.", ValidRange: ">= 1", Active: true},
+	"maintainer_partial_release_pct":   {Key: "maintainer_partial_release_pct", Type: "int", Default: "50", Section: "Maintainer pool", Description: "% of the holdback released when a repo shows some activity but below the full-release bar.", ValidRange: "0-100", Active: true},
+	"maintainer_withheld_destination":  {Key: "maintainer_withheld_destination", Type: "enum", Default: "next_event_pool", Section: "Maintainer pool", Description: "Where a withheld holdback goes. Published in advance so it is a decision rather than an accident.", ValidRange: "next_event_pool|returned_to_treasury", Active: true},
 	// Platform fee, taken once off a sponsor's total before the remainder is
 	// split into the contributor and maintainer pools.
 	//
@@ -210,7 +225,7 @@ var Definitions = map[string]SettingDef{
 	"founding_multiplier_open":              {Key: "founding_multiplier_open", Type: "float", Default: "1.0", Section: "Founding pool", Description: "Multiplier for everyone joining after Wave 2 fills. Nobody is turned away - the open wave earns fully from merged pull requests.", ValidRange: "> 0", Active: true},
 	"founding_require_social_follow":        {Key: "founding_require_social_follow", Type: "bool", Default: "true", Section: "Founding pool", Description: "Whether following the social accounts is required to receive a share. An eligibility gate worth zero shares, re-checked at settlement rather than when earned.", Active: true},
 
-	"unclaimed_sweep_days":              {Key: "unclaimed_sweep_days", Type: "int", Default: "180", Section: "Chains", Description: "Days after settlement before unclaimed on-chain funds may be swept. Sweeping is time-locked and multisig-gated.", ValidRange: ">= 1"},
+	"unclaimed_sweep_days":              {Key: "unclaimed_sweep_days", Type: "int", Default: "180", Section: "Chains", Description: "Days after settlement before unclaimed on-chain funds may be swept. Sweeping is time-locked and multisig-gated. The timelock is fixed inside the escrow contract at deployment; this value is published from that contract, never independently of it.", ValidRange: ">= 1", EnforcedOnChain: true},
 	"unclaimed_sweep_destination":       {Key: "unclaimed_sweep_destination", Type: "enum", Default: "next_event_pool_same_chain", Section: "Chains", Description: "Where unclaimed funds go, always on the same chain. Published in advance.", ValidRange: "next_event_pool_same_chain|refund_to_sponsor"},
 	"empty_chain_pool_disposition":      {Key: "empty_chain_pool_disposition", Type: "enum", Default: "refund_to_sponsor", Section: "Chains", Description: "What happens to a chain's pool that ends with no accepted PRs. Refunded to that chain's sponsor via the same multisig, time-locked path as a cancelled event - not a separate mechanism.", ValidRange: "refund_to_sponsor|next_event_pool_same_chain"},
 	"contract_upgrade_policy":           {Key: "contract_upgrade_policy", Type: "enum", Default: "multisig_timelock_exceeding_claim_window", Section: "Chains", Description: "Upgrades require multisig plus a timelock longer than the claim window, so a contributor always has time to exit before any change takes effect.", ValidRange: "multisig_timelock_exceeding_claim_window|immutable"},
