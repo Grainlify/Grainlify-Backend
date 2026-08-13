@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 // Snapshotting freezes what a labeller sees.
@@ -41,7 +41,7 @@ type PendingSnapshot struct {
 // The query is the resumability: re-running after a failure picks up exactly
 // what is missing, so a half-finished run is a state the tool can leave and
 // return to rather than a mess someone has to unpick.
-func PendingSnapshots(ctx context.Context, local *pgxpool.Pool, sampleName string) ([]PendingSnapshot, error) {
+func PendingSnapshots(ctx context.Context, local db.DBPool, sampleName string) ([]PendingSnapshot, error) {
 	rows, err := local.Query(ctx, `
 SELECT sp.id, sp.project_full_name, sp.pr_number
 FROM calibration_sample_prs sp
@@ -83,7 +83,7 @@ type SnapshotResult struct {
 // same instant. Fetching the issue later - at label time, or in a second run -
 // would mean the criteria could have been edited after the diff was frozen,
 // which is the failure this whole table exists to prevent.
-func FetchAndStore(ctx context.Context, local *pgxpool.Pool, gh *GitHubClient, p PendingSnapshot) SnapshotResult {
+func FetchAndStore(ctx context.Context, local db.DBPool, gh *GitHubClient, p PendingSnapshot) SnapshotResult {
 	res := SnapshotResult{SamplePRID: p.SamplePRID, ProjectFullName: p.ProjectFullName, Number: p.Number}
 
 	pr, err := gh.GetPR(ctx, p.ProjectFullName, p.Number)
@@ -199,7 +199,7 @@ type SnapshotCoverage struct {
 // A sample that is 20 of 25 snapshotted must never look ready. The screen
 // refuses to open on an incomplete set, so a labeller cannot begin on a subset
 // and produce a partial set that looks like a whole one.
-func Coverage(ctx context.Context, local *pgxpool.Pool, sampleName string) (SnapshotCoverage, error) {
+func Coverage(ctx context.Context, local db.DBPool, sampleName string) (SnapshotCoverage, error) {
 	var c SnapshotCoverage
 	rows, err := local.Query(ctx, `
 SELECT sp.project_full_name, sp.pr_number, (snap.sample_pr_id IS NOT NULL) AS has_snapshot,

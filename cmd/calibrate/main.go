@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jagadeesh/grainlify/backend/internal/calibration"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 	dry := flag.Bool("dry-run", false, "draw and print the composition without writing anything")
 	snapshot := flag.Bool("snapshot", false, "fetch and freeze the diff and linked issue for a drawn sample")
 	status := flag.Bool("status", false, "report how complete a sample's snapshots are")
+	serve := flag.String("serve", "", "run the labelling screen locally, e.g. -serve 127.0.0.1:842")
 	flag.Parse()
 
 	if *name == "" {
@@ -41,7 +43,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  calibrate -name set-1 -status                     report snapshot coverage")
 		os.Exit(2)
 	}
-	if !*snapshot && !*status && *seed == 0 {
+	if !*snapshot && !*status && *serve == "" && *seed == 0 {
 		fmt.Fprintln(os.Stderr, "drawing requires -seed")
 		os.Exit(2)
 	}
@@ -70,6 +72,15 @@ func main() {
 	}
 	if *snapshot {
 		runSnapshots(ctx, local, *name)
+		return
+	}
+	if *serve != "" {
+		d := &db.DB{Pool: local}
+		fmt.Printf("labelling %q at http://%s\n", *name, *serve)
+		reportCoverage(context.Background(), local, *name)
+		if err := calibration.Serve(context.Background(), d.Pool, *name, *serve); err != nil {
+			fatal("serve: %v", err)
+		}
 		return
 	}
 
@@ -124,7 +135,7 @@ func main() {
 // and if anything fails it names each one and exits non-zero. A sample that is
 // 20 of 25 must never look finished - a labeller who starts on a subset
 // produces a partial set that reads like a whole one.
-func runSnapshots(ctx context.Context, local *pgxpool.Pool, name string) {
+func runSnapshots(ctx context.Context, local db.DBPool, name string) {
 	pending, err := calibration.PendingSnapshots(ctx, local, name)
 	if err != nil {
 		fatal("%v", err)
@@ -165,7 +176,7 @@ func runSnapshots(ctx context.Context, local *pgxpool.Pool, name string) {
 	}
 }
 
-func reportCoverage(ctx context.Context, local *pgxpool.Pool, name string) {
+func reportCoverage(ctx context.Context, local db.DBPool, name string) {
 	c, err := calibration.Coverage(ctx, local, name)
 	if err != nil {
 		fatal("%v", err)

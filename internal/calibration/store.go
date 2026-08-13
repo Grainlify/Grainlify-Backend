@@ -6,7 +6,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
 
 // Storage for the labelling tool.
@@ -27,7 +28,7 @@ func pct(n, total int) float64 {
 // LoadCandidates reads the indexed pull requests eligible for sampling.
 //
 // Read-only, and the only query this tool runs against the product database.
-func LoadCandidates(ctx context.Context, source *pgxpool.Pool) ([]Candidate, error) {
+func LoadCandidates(ctx context.Context, source db.DBPool) ([]Candidate, error) {
 	rows, err := source.Query(ctx, `
 SELECT pr.id, p.github_full_name, pr.number, COALESCE(pr.merged, false)
 FROM github_pull_requests pr
@@ -56,7 +57,7 @@ ORDER BY pr.id
 
 // AlreadySampled returns every pull request any previous draw took, so a new
 // draw can exclude them and the two sets never overlap.
-func AlreadySampled(ctx context.Context, local *pgxpool.Pool) (map[uuid.UUID]bool, error) {
+func AlreadySampled(ctx context.Context, local db.DBPool) (map[uuid.UUID]bool, error) {
 	rows, err := local.Query(ctx, `SELECT pull_request_id FROM calibration_sample_prs`)
 	if err != nil {
 		return nil, fmt.Errorf("load sampled ids: %w", err)
@@ -78,7 +79,7 @@ func AlreadySampled(ctx context.Context, local *pgxpool.Pool) (map[uuid.UUID]boo
 //
 // All or nothing: a half-written sample would have a recorded seed and pool
 // that no longer describe the rows beside it, which is worse than no sample.
-func PersistDraw(ctx context.Context, local *pgxpool.Pool, name string, d Draw) (uuid.UUID, error) {
+func PersistDraw(ctx context.Context, local db.DBPool, name string, d Draw) (uuid.UUID, error) {
 	unmerged := 0
 	for _, s := range d.Selected {
 		if !s.Merged {
@@ -106,7 +107,7 @@ func PersistDraw(ctx context.Context, local *pgxpool.Pool, name string, d Draw) 
 		return uuid.Nil, err
 	}
 
-	tx, err := local.Begin(ctx)
+	tx, err := local.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return uuid.Nil, err
 	}
