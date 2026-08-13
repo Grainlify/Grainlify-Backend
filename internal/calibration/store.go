@@ -17,6 +17,13 @@ import (
 // harmful, but because "it only reads" is a property worth being structural
 // rather than remembered.
 
+func pct(n, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(int(1000*float64(n)/float64(total))) / 10
+}
+
 // LoadCandidates reads the indexed pull requests eligible for sampling.
 //
 // Read-only, and the only query this tool runs against the product database.
@@ -72,10 +79,28 @@ func AlreadySampled(ctx context.Context, local *pgxpool.Pool) (map[uuid.UUID]boo
 // All or nothing: a half-written sample would have a recorded seed and pool
 // that no longer describe the rows beside it, which is worse than no sample.
 func PersistDraw(ctx context.Context, local *pgxpool.Pool, name string, d Draw) (uuid.UUID, error) {
+	unmerged := 0
+	for _, s := range d.Selected {
+		if !s.Merged {
+			unmerged++
+		}
+	}
+	// The mix is recorded next to the corpus it was drawn from, so an
+	// agreement rate read later sits beside what it was measured against.
 	strata, err := json.Marshal(map[string]any{
 		"plan":        d.Plan,
 		"relaxations": d.Relaxations,
 		"examined":    d.Examined,
+		"mix": map[string]any{
+			"total":               len(d.Selected),
+			"unmerged":            unmerged,
+			"merged":              len(d.Selected) - unmerged,
+			"unmerged_pct":        pct(unmerged, len(d.Selected)),
+			"corpus_total":        d.CorpusTotal,
+			"corpus_unmerged":     d.CorpusUnmerged,
+			"corpus_unmerged_pct": pct(d.CorpusUnmerged, d.CorpusTotal),
+			"note":                "Unmerged is deliberately over-sampled against the corpus proportion: that is where human and model disagree. An agreement rate from this set is not comparable to one measured on a proportional sample.",
+		},
 	})
 	if err != nil {
 		return uuid.Nil, err

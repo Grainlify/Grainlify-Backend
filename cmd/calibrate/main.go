@@ -114,7 +114,13 @@ func printComposition(d calibration.Draw) {
 		fmt.Printf("  %-8s %d (target %d)\n", b, byBand[b], d.Plan.BandTargets[b])
 	}
 
-	fmt.Printf("\noutcome:   merged %d, unmerged %d (floor %d)\n", merged, unmerged, d.Plan.MinUnmerged)
+	corpusPct := 0.0
+	if d.CorpusTotal > 0 {
+		corpusPct = 100 * float64(d.CorpusUnmerged) / float64(d.CorpusTotal)
+	}
+	fmt.Printf("\noutcome:   merged %d, unmerged %d  (target %d-%d)\n", merged, unmerged, d.Plan.UnmergedFloor, d.Plan.UnmergedCeiling)
+	fmt.Printf("           sample is %.0f%% unmerged against a corpus that is %.0f%% (%d of %d)\n",
+		100*float64(unmerged)/float64(len(d.Selected)), corpusPct, d.CorpusUnmerged, d.CorpusTotal)
 	fmt.Printf("held back: %d\n", held)
 
 	if len(d.Relaxations) > 0 {

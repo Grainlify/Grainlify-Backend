@@ -141,8 +141,11 @@ func TestDrawSample_RespectsTheStrata(t *testing.T) {
 			t.Errorf("%s contributed %d, over the cap of %d", p, n, plan.PerProjectCap)
 		}
 	}
-	if unmerged < plan.MinUnmerged {
-		t.Errorf("unmerged = %d, want at least %d (relaxations: %v)", unmerged, plan.MinUnmerged, d.Relaxations)
+	if unmerged < plan.UnmergedFloor {
+		t.Errorf("unmerged = %d, below the floor of %d (relaxations: %v)", unmerged, plan.UnmergedFloor, d.Relaxations)
+	}
+	if unmerged > plan.UnmergedCeiling {
+		t.Errorf("unmerged = %d, above the ceiling of %d - a target constrains both directions, and without the ceiling this drew 15 of 25", unmerged, plan.UnmergedCeiling)
 	}
 	if merged+unmerged != plan.Total {
 		t.Errorf("outcomes do not sum: %d + %d != %d", merged, unmerged, plan.Total)
@@ -258,5 +261,97 @@ func TestHashCandidates_IsOrderIndependent(t *testing.T) {
 	}
 	if HashCandidates(a) == HashCandidates(append(a, uuid.New())) {
 		t.Error("adding a candidate did not change the hash")
+	}
+}
+
+// TestDrawSample_UnmergedIsATargetNotAFloor is the regression test for the
+// distinction.
+//
+// The first version had a floor only. It satisfied "at least 10" and drew 15
+// of 25 - 60% unmerged against a corpus that is 17% - because after the floor
+// was met the later passes kept taking whichever candidate came next. The set
+// was not wrong, but an agreement rate measured on it would not be comparable
+// to the mix a model sees, which is the thing the sample exists to predict.
+func TestDrawSample_UnmergedIsATargetNotAFloor(t *testing.T) {
+	pool, size := fakePool(t)
+	plan := DefaultPlan()
+
+	// Several seeds, because one seed passing proves nothing about a bound.
+	for _, seed := range []int64{1, 2, 3, 20260813, 99999} {
+		d, err := DrawSample(context.Background(), pool, plan, seed, size, nil)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		_, _, _, unmerged, _ := d.Composition()
+		if unmerged < plan.UnmergedFloor || unmerged > plan.UnmergedCeiling {
+			t.Errorf("seed %d: unmerged = %d, outside the target %d-%d",
+				seed, unmerged, plan.UnmergedFloor, plan.UnmergedCeiling)
+		}
+	}
+}
+
+// A ceiling below the floor is a contradiction, not something to resolve
+// silently in one direction.
+func TestDrawSample_RejectsAContradictoryTarget(t *testing.T) {
+	pool, size := fakePool(t)
+	plan := DefaultPlan()
+	plan.UnmergedFloor, plan.UnmergedCeiling = 12, 10
+
+	if _, err := DrawSample(context.Background(), pool, plan, 1, size, nil); err == nil {
+		t.Error("a ceiling below the floor was accepted")
+	}
+}
+
+// The corpus proportion travels with the draw, so a number read later sits
+// next to what it was measured against.
+func TestDrawSample_RecordsTheCorpusProportion(t *testing.T) {
+	pool, size := fakePool(t)
+	d, err := DrawSample(context.Background(), pool, DefaultPlan(), 42, size, nil)
+	if err != nil {
+		t.Fatalf("draw: %v", err)
+	}
+	if d.CorpusTotal != len(pool) {
+		t.Errorf("CorpusTotal = %d, want %d", d.CorpusTotal, len(pool))
+	}
+	wantUnmerged := 0
+	for _, c := range pool {
+		if !c.Merged {
+			wantUnmerged++
+		}
+	}
+	if d.CorpusUnmerged != wantUnmerged {
+		t.Errorf("CorpusUnmerged = %d, want %d", d.CorpusUnmerged, wantUnmerged)
+	}
+	if d.CorpusUnmerged == 0 || d.CorpusUnmerged == d.CorpusTotal {
+		t.Error("fixture is degenerate; the proportion proves nothing")
+	}
+}
+
+// TestDrawSample_SkipsPullRequestsThatChangeNothing.
+//
+// A PR with no additions and no deletions gives a labeller nothing to judge,
+// so it burns a slot in a 25-row sample. Found in the first real draw:
+// MilestoneX-Backend#1 is merged and changes zero lines.
+func TestDrawSample_SkipsPullRequestsThatChangeNothing(t *testing.T) {
+	pool, size := fakePool(t)
+	empty := pool[3].PullRequestID
+	wrapped := func(ctx context.Context, c Candidate) (int, error) {
+		if c.PullRequestID == empty {
+			return 0, nil
+		}
+		return size(ctx, c)
+	}
+
+	d, err := DrawSample(context.Background(), pool, DefaultPlan(), 20260813, wrapped, nil)
+	if err != nil {
+		t.Fatalf("draw: %v", err)
+	}
+	for _, s := range d.Selected {
+		if s.PullRequestID == empty {
+			t.Error("a pull request changing zero lines was selected; there is nothing to label")
+		}
+		if s.ChangedLines == 0 {
+			t.Errorf("%s #%d was selected with 0 changed lines", s.ProjectFullName, s.Number)
+		}
 	}
 }

@@ -71,10 +71,23 @@ type Plan struct {
 	// repositories hold 97% of the indexed corpus, so without a cap the draw
 	// is a Stellopay draw with rounding errors.
 	PerProjectCap int `json:"per_project_cap"`
-	// MinUnmerged deliberately over-samples unmerged work. The pool is 83%
-	// merged; a proportional draw would be almost entirely accepted PRs, and
-	// the disagreements we need to measure live in the rejected ones.
-	MinUnmerged int `json:"min_unmerged"`
+	// UnmergedFloor and UnmergedCeiling are a TARGET, not a floor - the
+	// distinction is the whole reason both exist, and the names are chosen so
+	// the next person cannot read one as the other.
+	//
+	// A floor alone guarantees a minimum and constrains nothing above it. That
+	// is what this had first, and it drew 15 unmerged out of 25 - 60%, against
+	// a corpus that is 17% unmerged - because once the floor was met the later
+	// passes kept taking whichever candidate came next in the shuffle. The set
+	// was not wrong, but an agreement rate measured on it would not have been
+	// comparable to the mix a model actually sees.
+	//
+	// A target constrains both directions. Unmerged is still deliberately
+	// over-sampled against the true 17%, because that is where human and model
+	// disagree and where the hard middle lives - it just is not allowed to
+	// dominate.
+	UnmergedFloor   int `json:"unmerged_floor"`
+	UnmergedCeiling int `json:"unmerged_ceiling"`
 	// BandTargets is how many of each size band to aim for. They sum to Total.
 	BandTargets map[SizeBand]int `json:"band_targets"`
 	// HoldBack is how many of the drawn set are withheld from comparison runs
@@ -86,9 +99,10 @@ type Plan struct {
 // from any one project, at least 10 unmerged, 5 held back.
 func DefaultPlan() Plan {
 	return Plan{
-		Total:         25,
-		PerProjectCap: 6,
-		MinUnmerged:   10,
+		Total:           25,
+		PerProjectCap:   6,
+		UnmergedFloor:   10,
+		UnmergedCeiling: 12,
 		BandTargets: map[SizeBand]int{
 			BandTiny:   3,
 			BandSmall:  6,
@@ -131,6 +145,14 @@ type Draw struct {
 	// the cost of the draw in API calls, and it says how deep into the shuffle
 	// the constraints forced us.
 	Examined int
+	// CorpusTotal and CorpusUnmerged describe the pool the sample came out of.
+	//
+	// Recorded so an agreement rate read a year from now sits next to what it
+	// was measured against. "82% agreement" means something different on a set
+	// that is 17% unmerged and on one that is 48% unmerged, and nobody will
+	// reconstruct the difference later from the sample alone.
+	CorpusTotal    int
+	CorpusUnmerged int
 }
 
 var (
@@ -169,6 +191,9 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 	if plan.HoldBack > plan.Total {
 		return Draw{}, fmt.Errorf("%w: hold-back %d exceeds total %d", ErrPlanImpossible, plan.HoldBack, plan.Total)
 	}
+	if plan.UnmergedCeiling > 0 && plan.UnmergedCeiling < plan.UnmergedFloor {
+		return Draw{}, fmt.Errorf("%w: unmerged ceiling %d is below the floor %d", ErrPlanImpossible, plan.UnmergedCeiling, plan.UnmergedFloor)
+	}
 
 	// Canonical order before shuffling, so the draw does not inherit whatever
 	// order the query happened to return.
@@ -191,7 +216,12 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 	rng := rand.New(rand.NewSource(seed))
 	rng.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
 
-	d := Draw{Seed: seed, Plan: plan, CandidateIDs: ids, CandidateHash: HashCandidates(ids)}
+	d := Draw{Seed: seed, Plan: plan, CandidateIDs: ids, CandidateHash: HashCandidates(ids), CorpusTotal: len(pool)}
+	for _, c := range pool {
+		if !c.Merged {
+			d.CorpusUnmerged++
+		}
+	}
 
 	perProject := map[string]int{}
 	perBand := map[SizeBand]int{}
@@ -229,7 +259,7 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 		if len(d.Selected) >= plan.Total {
 			break
 		}
-		if ps.stopAtFloor && unmerged >= plan.MinUnmerged {
+		if ps.stopAtFloor && unmerged >= plan.UnmergedFloor {
 			continue
 		}
 		took := 0
@@ -237,10 +267,15 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 			if len(d.Selected) >= plan.Total {
 				break
 			}
-			if ps.stopAtFloor && unmerged >= plan.MinUnmerged {
+			if ps.stopAtFloor && unmerged >= plan.UnmergedFloor {
 				break
 			}
 			if ps.unmergedOnly && c.Merged {
+				continue
+			}
+			// The ceiling half of the target. Without it the floor is the only
+			// constraint and unmerged work accumulates unbounded.
+			if !c.Merged && plan.UnmergedCeiling > 0 && unmerged >= plan.UnmergedCeiling {
 				continue
 			}
 			if perProject[c.ProjectFullName] >= plan.PerProjectCap {
@@ -255,6 +290,13 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 				continue
 			}
 			d.Examined++
+			// A pull request that changes nothing cannot be labelled: there is
+			// no diff to judge, so a labeller can only guess and the slot is
+			// wasted. Real - the first draw took MilestoneX-Backend#1, merged
+			// with 0 additions and 0 deletions.
+			if lines == 0 {
+				continue
+			}
 			band := ClassifySize(lines)
 
 			if ps.honourBands {
@@ -279,9 +321,9 @@ func DrawSample(ctx context.Context, candidates []Candidate, plan Plan, seed int
 	if len(d.Selected) < plan.Total {
 		return d, fmt.Errorf("%w: drew %d of %d after examining %d candidates", ErrPlanImpossible, len(d.Selected), plan.Total, d.Examined)
 	}
-	if unmerged < plan.MinUnmerged {
+	if unmerged < plan.UnmergedFloor {
 		d.Relaxations = append(d.Relaxations,
-			fmt.Sprintf("unmerged floor missed: %d of %d - the pool ran out of unmerged candidates within the per-project cap", unmerged, plan.MinUnmerged))
+			fmt.Sprintf("unmerged floor missed: %d of %d - the pool ran out of unmerged candidates within the per-project cap", unmerged, plan.UnmergedFloor))
 	}
 
 	// Hold-back is chosen here, at draw time, before anybody sees a pull
