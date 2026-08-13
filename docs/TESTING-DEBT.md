@@ -442,3 +442,29 @@ migrates the shared database to N+1; a second worktree without that file then
 fails with `no migration found for version N+1: file does not exist` — a
 failure in code that has nothing to do with the change being tested. Give each
 worktree its own (`grainlify_test_admin`, `grainlify_test_calib`, …).
+
+# Calibration: the prompt is shared, the user content is not
+
+The shadow harness scores a model against hand labels using
+`hackathon.JudgingSystemPrompt` and the production output contract - one
+source, not a copy, so a change to the judging prompt cannot silently leave
+the calibration describing a system that no longer exists.
+
+**The user content is still separate.** Production's `buildJudgeUserContent`
+takes a `JudgeInput` assembled from hackathon tables that do not exist for a
+calibration sample, so the harness builds equivalent content from its frozen
+snapshots. The two are written to match - same fields, same order, same "no
+linked issue" sentence - and nothing enforces that they stay matching.
+
+The failure this leaves open: if production starts including a field the
+harness does not (or vice versa), the agreement number keeps being produced
+and quietly stops describing production. It will not fail loudly.
+
+The fix is to lift user-content assembly behind an interface both sides
+implement, so a new field has one place to be added. Not done because
+production's version reads from tables the calibration set has no rows in, and
+the adapter is more work than the sharing is worth tonight.
+
+Until then: the run report states in full that this is the production prompt
+and not the production code path, and each run records the prompt's sha256, so
+at least a *prompt* divergence is detectable from the run log.

@@ -655,3 +655,23 @@ func buildEscalationUserContent(in EscalationInput) string {
 	b.WriteString(buildJudgeUserContent(in.JudgeInput))
 	return b.String()
 }
+
+// JudgingSystemPrompt and JudgeToolSchema are exported so the calibration
+// harness scores a model against the same text and the same output contract
+// production would use, rather than against a copy.
+//
+// A copy is the failure this avoids: if the judging prompt changes here and a
+// duplicate in the calibration package does not, the calibration silently
+// stops describing production while continuing to produce confident numbers.
+// One source makes that impossible; the calibration run additionally records
+// a hash of this text, so a change is visible in the run log rather than only
+// in a diff nobody reads.
+//
+// The user-content assembly is deliberately NOT shared: buildJudgeUserContent
+// takes a JudgeInput built from hackathon tables that do not exist for a
+// calibration sample. The calibration harness assembles equivalent content
+// from its frozen snapshots and says so in its report.
+const JudgingSystemPrompt = judgingSystemPrompt
+
+// JudgeToolSchema is the forced-output contract for a judging call.
+var JudgeToolSchema = judgeToolSchema

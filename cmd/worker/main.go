@@ -11,4 +11,3 @@ import (
 func main() {
 	log.Println("worker is not implemented in this build")
 }
-
