@@ -405,3 +405,66 @@ time instead of mocking it, and the production value stays a single
 inspectable constant at the call site. Where the duration is also published
 to users, add a guard test that the published figure and the enforced figure
 are the same number.
+
+# Operating rule: rolling back a local migration means dropping the database
+
+Not testing debt so much as a trap that has now been fallen into twice in one
+day, an hour apart, by someone who had already written the rule down.
+
+golang-migrate records `(version, dirty)` in `schema_migrations`, and that row
+must agree with what the files actually applied. Running a `.down.sql` by hand
+and then deleting the row **does not roll back**. It leaves the recorded
+version describing a state the files disagree with, and the next `migrate.Up`
+fails with
+
+```
+Dirty database version 58. Fix and force version.
+```
+
+at some unrelated earlier version — which reads as database corruption rather
+than as the self-inflicted edit it is, and costs more time to diagnose than the
+shortcut ever saved.
+
+**The rule: to roll back a local migration, drop the database.**
+
+```
+psql -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='<db>' AND pid<>pg_backend_pid();"
+dropdb <db> && createdb <db>
+```
+
+It is a local test database. It holds nothing anyone needs, and `migrate.Up`
+rebuilds it in seconds. Never `DELETE FROM schema_migrations`.
+
+## Corollary: one test database per worktree
+
+Parallel worktrees must not share one. A worktree carrying migration N+1
+migrates the shared database to N+1; a second worktree without that file then
+fails with `no migration found for version N+1: file does not exist` — a
+failure in code that has nothing to do with the change being tested. Give each
+worktree its own (`grainlify_test_admin`, `grainlify_test_calib`, …).
+
+# Calibration: the prompt is shared, the user content is not
+
+The shadow harness scores a model against hand labels using
+`hackathon.JudgingSystemPrompt` and the production output contract - one
+source, not a copy, so a change to the judging prompt cannot silently leave
+the calibration describing a system that no longer exists.
+
+**The user content is still separate.** Production's `buildJudgeUserContent`
+takes a `JudgeInput` assembled from hackathon tables that do not exist for a
+calibration sample, so the harness builds equivalent content from its frozen
+snapshots. The two are written to match - same fields, same order, same "no
+linked issue" sentence - and nothing enforces that they stay matching.
+
+The failure this leaves open: if production starts including a field the
+harness does not (or vice versa), the agreement number keeps being produced
+and quietly stops describing production. It will not fail loudly.
+
+The fix is to lift user-content assembly behind an interface both sides
+implement, so a new field has one place to be added. Not done because
+production's version reads from tables the calibration set has no rows in, and
+the adapter is more work than the sharing is worth tonight.
+
+Until then: the run report states in full that this is the production prompt
+and not the production code path, and each run records the prompt's sha256, so
+at least a *prompt* divergence is detectable from the run log.

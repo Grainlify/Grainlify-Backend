@@ -1,0 +1,14 @@
+-- Record the reasoning effort each shadow run used.
+--
+-- Not a preference: the models disagree about the parameter, and the API
+-- forces the difference. gpt-5.6-luna refuses function tools unless
+-- reasoning_effort is 'none'; gpt-5 and gpt-5-mini reject 'none' outright and
+-- accept only 'minimal', 'low', 'medium' or 'high'. There is no single value
+-- all three accept, so "model is the only variable" cannot be literally true
+-- for this comparison.
+--
+-- The nearest honest thing is the minimum each model supports, recorded per
+-- run so the difference is visible in the data rather than buried in a
+-- harness. A later run at a different effort is then distinguishable from a
+-- run at the same effort with a different model.
+ALTER TABLE calibration_model_runs ADD COLUMN IF NOT EXISTS reasoning_effort TEXT;

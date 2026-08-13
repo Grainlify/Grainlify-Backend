@@ -1,0 +1,16 @@
+-- The question a row was labelled under.
+--
+-- The first 20 rows were labelled as "should this contribution have been
+-- accepted", which in practice includes coordination - was the author assigned
+-- this issue - and that is a fact the frozen snapshots cannot express. The
+-- models could not see it, so a quarter of the disagreements measured a
+-- missing input rather than a difference in judgement.
+--
+-- The held-back rows are labelled under the question production's judge is
+-- actually asked: coordination has already passed, so judge only the work.
+-- Two different questions, so the answers must not be pooled - and the
+-- framing has to travel with the data rather than living in someone's memory
+-- of which batch was which.
+--
+-- NULL means the original framing: judge the contribution as a whole.
+ALTER TABLE calibration_sample_prs ADD COLUMN IF NOT EXISTS labelling_framing TEXT;

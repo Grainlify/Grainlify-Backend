@@ -37,5 +37,3 @@ func main() {
 
 	slog.Info("migrations applied")
 }
-
-
