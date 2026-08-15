@@ -16,12 +16,13 @@ import (
 // optional files[0] part, with the embed's image.url referencing
 // attachment://<filename> so the screenshot renders inline.
 //
-// Two things changed when this moved behind SupportSink:
+// Three things changed when this moved behind SupportSink:
 //
 //   - The reporter's IP is gone from the payload. It was a field on the embed;
 //     it is now recorded on the row and sent nowhere.
 //   - The reporter login is resolved server-side rather than taken from the
 //     request body, so it can no longer be spoofed by whoever is posting.
+//   - KYC requests are not sent here AT ALL. See Handles.
 type discordSupportSink struct {
 	webhookURL string
 	httpClient *http.Client
@@ -37,6 +38,21 @@ func newDiscordSupportSink(webhookURL string) *discordSupportSink {
 func (s *discordSupportSink) Name() string     { return "discord" }
 func (s *discordSupportSink) Configured() bool { return s.webhookURL != "" }
 
+// Handles excludes KYC.
+//
+// The Telegram sink already refuses to post a verification request to a group
+// that can be read without joining. Sending the same thing to Discord - the
+// message, the page, and the reporter's GitHub login in a Reporter field, plus
+// any screenshot - would have made that refusal pointless, and left the
+// privacy of the whole category resting on a Discord channel permission
+// staying correct. A permission is configuration: it can be changed by anybody
+// with Manage Channels, at any time, without anyone noticing, and a check that
+// it is correct today says nothing about tomorrow.
+//
+// So this is held in code instead, with a test. A KYC request reaches exactly
+// two places: the support_requests row, and the admin's Telegram DM.
+func (s *discordSupportSink) Handles(category string) bool { return category != "kyc" }
+
 var supportCategoryTitles = map[string]string{
 	"bug":   "🐛 Bug report",
 	"kyc":   "🪪 KYC / verification",
@@ -46,6 +62,16 @@ var supportCategoryTitles = map[string]string{
 }
 
 func (s *discordSupportSink) Deliver(ctx context.Context, r SupportRequest) (SupportDeliveryResult, error) {
+	// The handler already consults Handles, so reaching here with a KYC
+	// request means something upstream changed. Refuse rather than post: a
+	// sink that would send the category if it were called anyway is one
+	// refactor away from sending it, and the whole point of moving this out of
+	// channel configuration was that it should not be possible to lose it by
+	// accident.
+	if !s.Handles(r.Category) {
+		return SupportDeliveryResult{}, fmt.Errorf("discord sink does not deliver category %q", r.Category)
+	}
+
 	title := supportCategoryTitles[r.Category]
 	if title == "" {
 		title = "💬 Support request"

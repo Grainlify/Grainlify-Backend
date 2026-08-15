@@ -32,6 +32,21 @@ type SupportSink interface {
 	// unconfigured sink is skipped quietly rather than counted as a failure -
 	// Telegram not being set up is not a Discord outage.
 	Configured() bool
+	// Handles reports whether this sink should receive this category at all.
+	//
+	// This exists so a category can be excluded by code rather than by
+	// configuration. Discord returns false for "kyc": the alternative was
+	// keeping the Discord channel private and trusting that it stays private,
+	// which makes the privacy of a verification request a property of a
+	// permission setting that anybody with Manage Channels can change without
+	// it being noticed. A sink that never receives the category cannot leak it
+	// whatever the channel is set to.
+	//
+	// Not handling a category is not a failure and not a delivery. The row's
+	// column for that sink stays NULL for ever, which is why supportDelivered
+	// has to know about it too - otherwise every KYC row looks permanently
+	// undelivered to any replay.
+	Handles(category string) bool
 }
 
 // SupportDeliveryResult describes a successful delivery.

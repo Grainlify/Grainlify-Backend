@@ -6,7 +6,7 @@ import (
 )
 
 // "Delivered" is category-dependent, and there are two copies of that rule:
-// supportTelegramDelivered in Go, and the predicate in the partial index.
+// the supportDelivered functions in Go, and the predicate in the partial index.
 // Two copies is how the leaderboard and the profile came to disagree about the
 // same contributor, so these tests exist to make the copies provably equal
 // rather than hopefully equal.
@@ -47,19 +47,51 @@ func TestSupportTelegramDelivered_OtherCategoriesCountTheTopicPost(t *testing.T)
 	}
 }
 
-func TestSupportFullyDelivered_RequiresBothSinks(t *testing.T) {
+// KYC is never sent to Discord, so discord_delivered_at stays NULL for ever on
+// those rows. Without this branch every KYC row would look permanently
+// undelivered and a replay would retry a send that is never going to happen.
+func TestSupportDiscordDelivered_KYCIsNeverSentSoNothingIsPending(t *testing.T) {
+	now := time.Now()
+
+	if !supportDiscordDelivered("kyc", nil) {
+		t.Error("kyc with a NULL discord column must not read as pending - it is never sent there")
+	}
+	// True regardless of the timestamp, because the question is "is anything
+	// outstanding", not "was something posted".
+	if !supportDiscordDelivered("kyc", ptr(now)) {
+		t.Error("kyc must read as having nothing outstanding for discord")
+	}
+
+	for _, cat := range []string{"bug", "idea", "help", "other"} {
+		if supportDiscordDelivered(cat, nil) {
+			t.Errorf("%s with a NULL discord column IS outstanding", cat)
+		}
+		if !supportDiscordDelivered(cat, ptr(now)) {
+			t.Errorf("%s with a stamped discord column is delivered", cat)
+		}
+	}
+}
+
+func TestSupportFullyDelivered_RequiresEveryRouteTheCategoryUses(t *testing.T) {
 	now := time.Now()
 	if supportFullyDelivered("bug", nil, ptr(now), nil) {
 		t.Error("a bug delivered to telegram but not discord is not fully delivered")
 	}
-	if supportFullyDelivered("kyc", ptr(now), nil, nil) {
-		t.Error("a kyc delivered to discord but not the admin DM is not fully delivered")
-	}
-	if !supportFullyDelivered("kyc", ptr(now), nil, ptr(now)) {
-		t.Error("kyc with discord and the admin DM is fully delivered")
-	}
 	if !supportFullyDelivered("bug", ptr(now), ptr(now), nil) {
 		t.Error("bug with discord and the topic post is fully delivered")
+	}
+
+	// The change that matters: a KYC request is complete on the admin DM
+	// alone. Requiring discord too would have left every one of them pending
+	// for ever, since it is deliberately never sent there.
+	if !supportFullyDelivered("kyc", nil, nil, ptr(now)) {
+		t.Error("kyc with the admin DM is fully delivered - discord is never part of its route")
+	}
+	if supportFullyDelivered("kyc", ptr(now), nil, nil) {
+		t.Error("a kyc without the admin DM is not fully delivered, whatever else is stamped")
+	}
+	if supportFullyDelivered("kyc", ptr(now), ptr(now), nil) {
+		t.Error("a kyc with a topic post but no DM reached nobody who can act on it")
 	}
 }
 
@@ -77,10 +109,11 @@ func TestSupportUndeliveredPredicate_IsNotAlwaysTrue(t *testing.T) {
 		wantUndelivered         bool
 	}{
 		{"bug fully delivered", "bug", ptr(now), ptr(now), nil, false},
-		{"kyc fully delivered", "kyc", ptr(now), nil, ptr(now), false},
+		{"kyc delivered, nothing else stamped", "kyc", nil, nil, ptr(now), false},
 		{"bug missing telegram", "bug", ptr(now), nil, nil, true},
-		{"kyc missing admin dm", "kyc", ptr(now), nil, nil, true},
-		{"kyc with only a topic post", "kyc", ptr(now), ptr(now), nil, true},
+		{"bug missing discord", "bug", nil, ptr(now), nil, true},
+		{"kyc missing admin dm", "kyc", nil, nil, nil, true},
+		{"kyc with only a topic post", "kyc", nil, ptr(now), nil, true},
 		{"nothing delivered", "other", nil, nil, nil, true},
 	}
 	sawDelivered := false

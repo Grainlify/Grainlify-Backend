@@ -30,6 +30,26 @@ import (
 // baseURL is not settable from the environment on purpose - a configurable API
 // host is a way to send the bot token somewhere else.
 
+// discordProbe stands in for the Discord webhook and counts what reaches it.
+// Used to assert a negative: that a KYC request reaches it zero times.
+func discordProbe(t *testing.T) (url string, hits func() int, bodies func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		mu.Lock()
+		seen = append(seen, string(buf[:n]))
+		mu.Unlock()
+		w.WriteHeader(204)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL,
+		func() int { mu.Lock(); defer mu.Unlock(); return len(seen) },
+		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string{}, seen...) }
+}
+
 func telegramSupportApp(t *testing.T, d *db.DB, respond func(chatID, threadID string) (int, string)) (*fiber.App, func() int) {
 	t.Helper()
 	var mu sync.Mutex
@@ -235,5 +255,89 @@ func TestSupportHandler_CleanTopicDeliveryIsNotMarkedAsFallback(t *testing.T) {
 	}
 	if row.RoutedToFallback {
 		t.Error("a correctly routed post was recorded as a fallback")
+	}
+}
+
+// The property the Discord skip exists for, asserted end to end with BOTH
+// sinks live: a verification request reaches the admin's DM and nothing else.
+//
+// Before this, routing KYC away from a public Telegram topic achieved nothing,
+// because the same message went to Discord anyway with the reporter's GitHub
+// login attached. The privacy of the category rested on the Discord channel's
+// permissions being right - configuration, changeable by anyone with Manage
+// Channels, with nothing that would notice. This test is what notices.
+func TestSupportHandler_KYCReachesTheDMAndNeitherPublicSink(t *testing.T) {
+	d := dbtest.DB(t)
+
+	discordURL, discordHits, discordBodies := discordProbe(t)
+	var mu sync.Mutex
+	telegramSends := []string{}
+	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		telegramSends = append(telegramSends, r.Form.Get("chat_id"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer tgSrv.Close()
+
+	h := NewSupportRequestsHandler(config.Config{
+		JWTSecret:                  "support-test-secret",
+		DiscordBugReportWebhookURL: discordURL,
+		TelegramBotToken:           "test-token",
+		TelegramChatID:             "-100999",
+		TelegramAdminUserID:        "42",
+		TelegramTopicBugs:          "1700",
+		TelegramTopicKYC:           "1701",
+	}, d)
+	for _, s := range h.sinks {
+		if tg, ok := s.(*telegramSupportSink); ok {
+			tg.baseURL = tgSrv.URL
+		}
+	}
+	app := fiber.New()
+	app.Post("/support-requests", h.Create())
+
+	// A bug report first, to prove Discord is genuinely wired up - otherwise
+	// "zero Discord hits" for the KYC case would pass for the wrong reason.
+	code, _ := postTelegramSupport(t, app, `{"category":"bug","message":"pagination resets"}`)
+	if code != fiber.StatusOK {
+		t.Fatalf("bug report returned %d", code)
+	}
+	if discordHits() != 1 {
+		t.Fatalf("discord received %d bug reports, want 1 - the sink is not actually live, so the kyc assertion below would prove nothing", discordHits())
+	}
+
+	code, id := postTelegramSupport(t, app,
+		`{"category":"kyc","message":"my verification was refused and I do not know why"}`)
+	if code != fiber.StatusOK {
+		t.Fatalf("kyc returned %d", code)
+	}
+
+	if discordHits() != 1 {
+		t.Errorf("discord received the kyc request: %v", discordBodies()[1:])
+	}
+	mu.Lock()
+	sends := append([]string{}, telegramSends...)
+	mu.Unlock()
+	if len(sends) != 2 || sends[1] != "42" {
+		t.Errorf("telegram sends = %v; the kyc request must go to the admin DM only", sends)
+	}
+
+	row := readDeliveryRow(t, d, id)
+	if row.DiscordAt != nil {
+		t.Error("discord_delivered_at was stamped for a kyc request that was never sent there")
+	}
+	if row.AdminDMAt == nil {
+		t.Error("telegram_admin_dm_delivered_at is NULL")
+	}
+	if row.TopicAt != nil {
+		t.Error("telegram_delivered_at was stamped for a kyc request")
+	}
+	// And the row must not read as pending, or a replay would retry a Discord
+	// send that is never going to happen.
+	if !supportFullyDelivered("kyc", row.DiscordAt, row.TopicAt, row.AdminDMAt) {
+		t.Error("the kyc row reads as undelivered despite reaching everywhere it was ever going to")
 	}
 }

@@ -253,6 +253,15 @@ func (h *SupportRequestsHandler) fanOut(ctx context.Context, req SupportRequest)
 				"sink", sink.Name(), "support_id", req.ID)
 			continue
 		}
+		if !sink.Handles(req.Category) {
+			// Also not an error, and deliberately not a delivery: the column
+			// stays NULL for ever and supportDelivered knows that. This is how
+			// a KYC request stays out of Discord - by code, not by trusting a
+			// channel permission to remain correct.
+			slog.Debug("support_requests: sink does not handle this category, skipping",
+				"sink", sink.Name(), "category", req.Category, "support_id", req.ID)
+			continue
+		}
 		result, err := sink.Deliver(fanCtx, req)
 		if err != nil {
 			slog.Error("support_requests: delivery failed",

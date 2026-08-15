@@ -85,6 +85,11 @@ func (s *telegramSupportSink) Configured() bool {
 	return s.token != "" && s.chatID != ""
 }
 
+// Handles takes every category. KYC is not excluded here the way it is from
+// Discord - it is routed to the admin's DM instead of a topic, which is a
+// different answer to the same question. Deliver decides which.
+func (s *telegramSupportSink) Handles(category string) bool { return true }
+
 // telegramResponse is the envelope every Bot API call returns.
 type telegramResponse struct {
 	OK          bool   `json:"ok"`
