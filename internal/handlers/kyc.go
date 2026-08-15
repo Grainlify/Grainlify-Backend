@@ -65,6 +65,48 @@ func extractKYCInfo(data map[string]interface{}) map[string]interface{} {
 	return extracted
 }
 
+// diditSessionUnreachable reports whether an error from Didit means the stored
+// session can never produce a decision, so the contributor should be released
+// to start a new one.
+//
+// **403 counts.** A session that belongs to a retired Didit account answers
+// "You do not have permission to perform this action" under the new API key,
+// and is as gone as a deleted one - no decision will ever arrive for it. Until
+// this included 403, the difference between two error strings was the
+// difference between self-healing and stuck-until-an-admin-notices: three
+// contributors sat in in_review with sessions on the old account after the key
+// migration, and only came unstuck because somebody went looking.
+//
+// This is one function because it was previously two lists, at the two call
+// sites below, and they had already drifted - Status() matched "does not
+// exist", "no such" and "not available" while Start() did not, so the same
+// dead session could release a contributor on one endpoint and block them on
+// the other. A rule expressed twice is a rule that disagrees with itself.
+//
+// Deliberately substring matching on the message rather than on a status code:
+// didit.Client returns a formatted error string, not a typed one, and
+// widening that interface is a larger change than this needs. The strings are
+// broad on purpose - a false positive costs a contributor an extra click to
+// start again, a false negative strands them.
+func diditSessionUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		// Gone.
+		"404", "not found", "not_found", "does not exist", "doesn't exist",
+		"no such", "not available", "deleted", "invalid",
+		// Not ours: belongs to another (retired) Didit account.
+		"403", "permission", "forbidden", "unauthorized", "401",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // mapDiditStatus maps a Didit status onto ours, reporting whether it
 // recognised the input.
 //
@@ -268,13 +310,10 @@ WHERE id = $1
 			if h.didit != nil {
 				decision, err := h.didit.GetSessionDecision(c.Context(), *existingSessionID)
 				if err != nil {
-					// Check if error indicates session not found/deleted
-					errMsg := strings.ToLower(err.Error())
-					if strings.Contains(errMsg, "404") ||
-						strings.Contains(errMsg, "not found") ||
-						strings.Contains(errMsg, "not_found") ||
-						strings.Contains(errMsg, "invalid") ||
-						strings.Contains(errMsg, "deleted") {
+					// One shared definition of "this session can never answer" -
+					// see diditSessionUnreachable. Includes 403, which is what a
+					// session from a retired Didit account returns.
+					if diditSessionUnreachable(err) {
 						// Session was deleted in Didit dashboard - mark as expired and allow new session
 						_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE users
@@ -481,7 +520,6 @@ WHERE id = $1
 			decision, err := h.didit.GetSessionDecision(c.Context(), *kycSessionID)
 			if err != nil {
 				// If API call fails, check if it's because session was deleted
-				errMsg := strings.ToLower(err.Error())
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
@@ -495,17 +533,9 @@ WHERE id = $1
 				// Check if error indicates session not found, deleted, or invalid
 				// Check for various error patterns that indicate session doesn't exist
 				// The error format from Didit client is: "didit get decision failed: status 404, error: ..., body: ..."
-				isDeleted := strings.Contains(errMsg, "status 404") ||
-					strings.Contains(errMsg, "status: 404") ||
-					strings.Contains(errMsg, "404") ||
-					strings.Contains(errMsg, "not found") ||
-					strings.Contains(errMsg, "not_found") ||
-					strings.Contains(errMsg, "invalid") ||
-					strings.Contains(errMsg, "deleted") ||
-					strings.Contains(errMsg, "does not exist") ||
-					strings.Contains(errMsg, "doesn't exist") ||
-					strings.Contains(errMsg, "no such") ||
-					strings.Contains(errMsg, "not available")
+				// Same definition as Start() uses. These were two separate
+				// lists that had already drifted apart.
+				isDeleted := diditSessionUnreachable(err)
 
 				if isDeleted {
 					previousStatusStr := "nil"
