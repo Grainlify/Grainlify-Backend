@@ -20,13 +20,42 @@ import (
 type SupportSink interface {
 	// Name identifies the sink in logs and in the delivery column it owns.
 	Name() string
-	// Deliver sends one request. An error means "not delivered"; the caller
+	// Deliver sends one request. An error means "not delivered": the caller
 	// records nothing and moves on to the next sink.
-	Deliver(ctx context.Context, req SupportRequest) error
+	//
+	// The result describes HOW it was delivered, which is not always "as
+	// intended" - a topic post that had to fall back to General reached a
+	// human but was misrouted, and that must be recorded rather than look
+	// identical to a clean delivery.
+	Deliver(ctx context.Context, req SupportRequest) (SupportDeliveryResult, error)
 	// Configured reports whether this sink has what it needs to run. An
 	// unconfigured sink is skipped quietly rather than counted as a failure -
 	// Telegram not being set up is not a Discord outage.
 	Configured() bool
+	// Handles reports whether this sink should receive this category at all.
+	//
+	// This exists so a category can be excluded by code rather than by
+	// configuration. Discord returns false for "kyc": the alternative was
+	// keeping the Discord channel private and trusting that it stays private,
+	// which makes the privacy of a verification request a property of a
+	// permission setting that anybody with Manage Channels can change without
+	// it being noticed. A sink that never receives the category cannot leak it
+	// whatever the channel is set to.
+	//
+	// Not handling a category is not a failure and not a delivery. The row's
+	// column for that sink stays NULL for ever, which is why supportDelivered
+	// has to know about it too - otherwise every KYC row looks permanently
+	// undelivered to any replay.
+	Handles(category string) bool
+}
+
+// SupportDeliveryResult describes a successful delivery.
+type SupportDeliveryResult struct {
+	// RoutedToFallback means the message reached the chat but not the topic it
+	// was addressed to - the topic was deleted, or the bot lost
+	// can_manage_topics. Recorded on the row because reports quietly piling
+	// into General while a topic sits empty is invisible otherwise.
+	RoutedToFallback bool
 }
 
 // SupportRequest is one submitted request, as stored.

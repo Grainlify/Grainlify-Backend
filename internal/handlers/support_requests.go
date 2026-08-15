@@ -70,9 +70,21 @@ func NewSupportRequestsHandler(cfg config.Config, d *db.DB) *SupportRequestsHand
 	return &SupportRequestsHandler{
 		cfg: cfg,
 		db:  d,
-		// Discord is the only sink today. Telegram joins this slice and needs
-		// no change here.
-		sinks: []SupportSink{newDiscordSupportSink(cfg.DiscordBugReportWebhookURL)},
+		// Peers. Each is attempted independently; one being unconfigured or
+		// down must not affect the other, and neither can fail the request.
+		sinks: []SupportSink{
+			newDiscordSupportSink(cfg.DiscordBugReportWebhookURL),
+			newTelegramSupportSink(telegramSinkConfig{
+				BotToken:    cfg.TelegramBotToken,
+				ChatID:      cfg.TelegramChatID,
+				AdminUserID: cfg.TelegramAdminUserID,
+				TopicBugs:   cfg.TelegramTopicBugs,
+				TopicKYC:    cfg.TelegramTopicKYC,
+				TopicIdeas:  cfg.TelegramTopicIdeas,
+				TopicHelp:   cfg.TelegramTopicHelp,
+				TopicOther:  cfg.TelegramTopicOther,
+			}),
+		},
 	}
 }
 
@@ -241,12 +253,22 @@ func (h *SupportRequestsHandler) fanOut(ctx context.Context, req SupportRequest)
 				"sink", sink.Name(), "support_id", req.ID)
 			continue
 		}
-		if err := sink.Deliver(fanCtx, req); err != nil {
-			slog.Error("support_requests: delivery failed",
-				"sink", sink.Name(), "support_id", req.ID, "error", err)
+		if !sink.Handles(req.Category) {
+			// Also not an error, and deliberately not a delivery: the column
+			// stays NULL for ever and supportDelivered knows that. This is how
+			// a KYC request stays out of Discord - by code, not by trusting a
+			// channel permission to remain correct.
+			slog.Debug("support_requests: sink does not handle this category, skipping",
+				"sink", sink.Name(), "category", req.Category, "support_id", req.ID)
 			continue
 		}
-		if err := h.markDelivered(ctx, req.ID, sink.Name()); err != nil {
+		result, err := sink.Deliver(fanCtx, req)
+		if err != nil {
+			slog.Error("support_requests: delivery failed",
+				"sink", sink.Name(), "support_id", req.ID, "category", req.Category, "error", err)
+			continue
+		}
+		if err := h.markDelivered(ctx, req.ID, sink.Name(), req.Category, result); err != nil {
 			// Delivered but not recorded. Logged loudly because it makes a
 			// replay look necessary when it is not - a duplicate is the cost.
 			slog.Error("support_requests: delivered but failed to record it",
@@ -257,29 +279,37 @@ func (h *SupportRequestsHandler) fanOut(ctx context.Context, req SupportRequest)
 	return delivered
 }
 
-// markDelivered stamps the column belonging to one sink. The column name is
-// chosen from a fixed map rather than interpolated from sink.Name(), so a sink
-// cannot inject SQL by choosing its own name.
-func (h *SupportRequestsHandler) markDelivered(ctx context.Context, id uuid.UUID, sink string) error {
+// markDelivered stamps the column that this sink, for this category, actually
+// delivered to.
+//
+// The column is chosen from a fixed switch rather than interpolated from
+// sink.Name(), so a sink cannot inject SQL by choosing its own name. The
+// category branch inside "telegram" is the delivery rule from
+// support_delivery.go expressed as a write: KYC delivers to the admin DM and
+// nowhere else, everything else to its topic, and the two must never share a
+// column or a posted stub becomes indistinguishable from delivered details.
+func (h *SupportRequestsHandler) markDelivered(
+	ctx context.Context, id uuid.UUID, sink, category string, result SupportDeliveryResult,
+) error {
 	switch sink {
 	case "discord":
 		_, err := h.db.Pool.Exec(ctx,
 			`UPDATE support_requests SET discord_delivered_at = now() WHERE id = $1`, id)
 		return err
 	case "telegram":
-		_, err := h.db.Pool.Exec(ctx,
-			`UPDATE support_requests SET telegram_delivered_at = now() WHERE id = $1`, id)
-		return err
-	case "telegram_admin_dm":
-		// Separate from "telegram" on purpose. A KYC request is two deliveries:
-		// a stub in the public topic and the details in the admin's DM. If they
-		// shared a column, a posted stub plus a 403'd DM would be
-		// indistinguishable from a clean delivery - and that combination is
-		// precisely the bad one, because the group then carries a public claim
-		// that somebody was replied to privately while nobody received the
-		// details.
-		_, err := h.db.Pool.Exec(ctx,
-			`UPDATE support_requests SET telegram_admin_dm_delivered_at = now() WHERE id = $1`, id)
+		if category == "kyc" {
+			// No public post exists for KYC, so this column is the whole
+			// delivery. Nothing can route to a fallback here either - a DM has
+			// no topic.
+			_, err := h.db.Pool.Exec(ctx,
+				`UPDATE support_requests SET telegram_admin_dm_delivered_at = now() WHERE id = $1`, id)
+			return err
+		}
+		_, err := h.db.Pool.Exec(ctx, `
+UPDATE support_requests
+SET telegram_delivered_at = now(),
+    telegram_routed_to_fallback = $2
+WHERE id = $1`, id, result.RoutedToFallback)
 		return err
 	default:
 		return fmt.Errorf("no delivery column for sink %q", sink)
