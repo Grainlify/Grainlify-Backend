@@ -305,15 +305,27 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Bug reports: public, unauthenticated, relays straight to Discord (no
 	// DB persistence). Rate-limited since it's an anonymous-reachable route
 	// that fans out to a third-party webhook - Discord itself will throttle
-	// or flag the webhook if hit too fast.
-	bugReports := handlers.NewBugReportsHandler(cfg)
-	app.Post("/bug-reports", limiter.New(limiter.Config{
-		Max:        5,
+	// Support requests. Persisted BEFORE any outbound call: the endpoint this
+	// replaces relayed straight to Discord and stored nothing, so a failed
+	// webhook returned 502 and the report was gone with whatever the person had
+	// typed. Delivery is now best-effort fan-out over sinks, recorded per sink.
+	//
+	// Unauthenticated on purpose - somebody who cannot sign in is the person
+	// most likely to need support - so the limiter is the only thing standing
+	// between this and free text from anyone. Raised from 5 to 10 a minute:
+	// with a category picker somebody may legitimately file a bug and then ask
+	// a question, and 5 was tight enough to block honest use.
+	supportRequests := handlers.NewSupportRequestsHandler(cfg, deps.DB)
+	supportLimiter := limiter.New(limiter.Config{
+		Max:        10,
 		Expiration: 1 * time.Minute,
 		LimitReached: func(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "rate_limited"})
 		},
-	}), bugReports.Create())
+	})
+	app.Post("/support-requests", supportLimiter, supportRequests.Create())
+	// Legacy path, kept so a cached frontend bundle keeps working after deploy.
+	app.Post("/bug-reports", supportLimiter, supportRequests.Create())
 
 	// Public projects list with filtering
 	projectsPublic := handlers.NewProjectsPublicHandler(cfg, deps.DB)
