@@ -178,7 +178,32 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// User profile endpoints
 	userProfile := handlers.NewUserProfileHandler(cfg, deps.DB)
 	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), userProfile.Profile())
-	app.Get("/profile/public", userProfile.PublicProfile()) // Public profile endpoint (no auth required)
+	// Public profile: unauthenticated, and linkable - contributors share it to
+	// show their standing, so it takes arbitrary ?login= strings from anyone.
+	//
+	// Each call runs internal/ranking twice (season and all-time), and
+	// ranking.Position is a direct query that does NOT use the leaderboard
+	// cache - it re-derives the whole ranking CTE and then filters to one row.
+	// Before this endpoint stopped short-circuiting on unknown logins it
+	// returned a stub instantly; now every arbitrary string costs two full
+	// rankings, which is a real amplification vector on a public URL.
+	//
+	// Sharing the leaderboard cache would be better than limiting, and was the
+	// first choice - but that cache lives on LeaderboardHandler, this handler
+	// has no reference to it, and the nine construction sites deliberately vary
+	// its TTL (tests use zero so they can read their own writes). Making it a
+	// package-level global would remove that seam. So: bound the abuse here,
+	// and treat cache sharing as the follow-up it deserves to be.
+	//
+	// 30/minute per IP is far above a human reading profiles and far below
+	// what makes the endpoint useful as an amplifier.
+	app.Get("/profile/public", limiter.New(limiter.Config{
+		Max:        30,
+		Expiration: 1 * time.Minute,
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "rate_limited"})
+		},
+	}), userProfile.PublicProfile())
 	app.Get("/profile/calendar", auth.RequireAuth(cfg.JWTSecret), userProfile.ContributionCalendar())
 	app.Get("/profile/activity", auth.RequireAuth(cfg.JWTSecret), userProfile.ContributionActivity())
 	app.Get("/profile/projects", auth.RequireAuth(cfg.JWTSecret), userProfile.ProjectsContributed())

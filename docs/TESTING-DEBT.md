@@ -405,3 +405,39 @@ time instead of mocking it, and the production value stays a single
 inspectable constant at the call site. Where the duration is also published
 to users, add a guard test that the published figure and the enforced figure
 are the same number.
+
+---
+
+# Known debt: contributions_count matches login case-sensitively
+
+`contributions_count` on both profile endpoints counts issues + pull requests
+with `WHERE author_login = $1`. `internal/ranking` groups by
+`LOWER(pr.author_login)`. The two therefore disagree for any contributor whose
+commits carry more than one spelling of their login — GitHub treats logins
+case-insensitively, and real rows do vary.
+
+The effect is an undercount: a contributor with commits under both `Alice` and
+`alice` has their rank computed from the sum and their contributions count
+computed from whichever spelling the profile happened to resolve. This is the
+same class of bug `internal/ranking` was created to remove, still present in
+the number displayed next to the rank it is meant to explain.
+
+**Not fixed deliberately.** Correcting it changes the number displayed to every
+existing contributor — some counts go up, none go down — and that is a visible
+change to figures people have already seen and screenshotted. It wants to be a
+deliberate, announced change rather than a side effect of an unrelated fix.
+
+Two further reasons it is not urgent:
+
+- It cannot produce the ranked/unranked contradiction that motivated looking at
+  it, because `ranking.Position` lowercases both sides (`WHERE r.login_key =
+  LOWER($3::text)`).
+- It under-reports rather than over-reports, so nobody is credited with work
+  they did not do.
+
+**When fixing:** change both the count and the `projects_contributed_to_count`
+/ languages / ecosystems queries in `user_profile.go` together — they all match
+`author_login` the same way — and add a test seeding one contributor under two
+spellings, asserting the count equals the sum. Note that a pre-check of the
+form "skip the ranking when contributions_count == 0" is NOT safe while this
+exists: a mixed-case contributor can be ranked while their count reads zero.
