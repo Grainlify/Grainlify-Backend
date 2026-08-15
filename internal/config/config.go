@@ -39,6 +39,19 @@ type Config struct {
 	// reports.
 	DiscordBugReportWebhookURL string
 
+	// Telegram support sink. Every value is a plain identifier except the
+	// token. If any required one is empty the sink reports itself
+	// unconfigured and is skipped - it must never crash the endpoint or
+	// block Discord.
+	TelegramBotToken    string
+	TelegramChatID      string
+	TelegramAdminUserID string
+	TelegramTopicBugs   string
+	TelegramTopicKYC    string
+	TelegramTopicIdeas  string
+	TelegramTopicHelp   string
+	TelegramTopicOther  string
+
 	// Public base URL of this backend, used when registering GitHub webhooks.
 	PublicBaseURL string
 
@@ -121,6 +134,15 @@ func Load() Config {
 		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
 
 		DiscordBugReportWebhookURL: getEnv("DISCORD_BUG_REPORT_WEBHOOK_URL", ""),
+
+		TelegramBotToken:    getEnv("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChatID:      getEnv("TELEGRAM_CHAT_ID", ""),
+		TelegramAdminUserID: getEnv("TELEGRAM_ADMIN_USER_ID", ""),
+		TelegramTopicBugs:   getEnv("TELEGRAM_TOPIC_BUGS", ""),
+		TelegramTopicKYC:    getEnv("TELEGRAM_TOPIC_KYC", ""),
+		TelegramTopicIdeas:  getEnv("TELEGRAM_TOPIC_IDEAS", ""),
+		TelegramTopicHelp:   getEnv("TELEGRAM_TOPIC_HELP", ""),
+		TelegramTopicOther:  getEnv("TELEGRAM_TOPIC_OTHER", ""),
 
 		PublicBaseURL: getEnv("PUBLIC_BASE_URL", ""),
 

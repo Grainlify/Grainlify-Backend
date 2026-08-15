@@ -20,13 +20,27 @@ import (
 type SupportSink interface {
 	// Name identifies the sink in logs and in the delivery column it owns.
 	Name() string
-	// Deliver sends one request. An error means "not delivered"; the caller
+	// Deliver sends one request. An error means "not delivered": the caller
 	// records nothing and moves on to the next sink.
-	Deliver(ctx context.Context, req SupportRequest) error
+	//
+	// The result describes HOW it was delivered, which is not always "as
+	// intended" - a topic post that had to fall back to General reached a
+	// human but was misrouted, and that must be recorded rather than look
+	// identical to a clean delivery.
+	Deliver(ctx context.Context, req SupportRequest) (SupportDeliveryResult, error)
 	// Configured reports whether this sink has what it needs to run. An
 	// unconfigured sink is skipped quietly rather than counted as a failure -
 	// Telegram not being set up is not a Discord outage.
 	Configured() bool
+}
+
+// SupportDeliveryResult describes a successful delivery.
+type SupportDeliveryResult struct {
+	// RoutedToFallback means the message reached the chat but not the topic it
+	// was addressed to - the topic was deleted, or the bot lost
+	// can_manage_topics. Recorded on the row because reports quietly piling
+	// into General while a topic sits empty is invisible otherwise.
+	RoutedToFallback bool
 }
 
 // SupportRequest is one submitted request, as stored.

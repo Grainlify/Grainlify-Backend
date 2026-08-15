@@ -45,7 +45,7 @@ var supportCategoryTitles = map[string]string{
 	"other": "💬 Support request",
 }
 
-func (s *discordSupportSink) Deliver(ctx context.Context, r SupportRequest) error {
+func (s *discordSupportSink) Deliver(ctx context.Context, r SupportRequest) (SupportDeliveryResult, error) {
 	title := supportCategoryTitles[r.Category]
 	if title == "" {
 		title = "💬 Support request"
@@ -77,39 +77,39 @@ func (s *discordSupportSink) Deliver(ctx context.Context, r SupportRequest) erro
 
 	payloadJSON, err := json.Marshal(discordWebhookPayload{Embeds: []discordEmbed{embed}})
 	if err != nil {
-		return fmt.Errorf("marshal discord payload: %w", err)
+		return SupportDeliveryResult{}, fmt.Errorf("marshal discord payload: %w", err)
 	}
 	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
-		return fmt.Errorf("write payload_json field: %w", err)
+		return SupportDeliveryResult{}, fmt.Errorf("write payload_json field: %w", err)
 	}
 	if fileName != "" {
 		part, err := writer.CreateFormFile("files[0]", fileName)
 		if err != nil {
-			return fmt.Errorf("create form file: %w", err)
+			return SupportDeliveryResult{}, fmt.Errorf("create form file: %w", err)
 		}
 		if _, err := part.Write(r.ScreenshotBytes); err != nil {
-			return fmt.Errorf("write screenshot bytes: %w", err)
+			return SupportDeliveryResult{}, fmt.Errorf("write screenshot bytes: %w", err)
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("close multipart writer: %w", err)
+		return SupportDeliveryResult{}, fmt.Errorf("close multipart writer: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, body)
 	if err != nil {
-		return fmt.Errorf("build discord request: %w", err)
+		return SupportDeliveryResult{}, fmt.Errorf("build discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("discord webhook request failed: %w", err)
+		return SupportDeliveryResult{}, fmt.Errorf("discord webhook request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("discord webhook returned status %d: %s", resp.StatusCode, string(respBody))
+		return SupportDeliveryResult{}, fmt.Errorf("discord webhook returned status %d: %s", resp.StatusCode, string(respBody))
 	}
-	return nil
+	return SupportDeliveryResult{}, nil
 }
