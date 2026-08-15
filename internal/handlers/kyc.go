@@ -65,33 +65,76 @@ func extractKYCInfo(data map[string]interface{}) map[string]interface{} {
 	return extracted
 }
 
-// mapDiditStatus maps Didit status to our internal KYC status
-// Production-ready mapping that preserves accurate status representation
+// mapDiditStatus maps a Didit status onto ours, reporting whether it
+// recognised the input.
+//
+// **The bool is the point.** This used to return "not_started" for anything it
+// did not recognise, which is the worst available default: not_started is one
+// of the three states canStartNewKYCSession treats as "free to begin", so an
+// unrecognised status silently rewrote a live verification into "never
+// started". A contributor midway through would be recorded as not having
+// begun, and any status carrying a decision we could not parse would discard
+// that decision.
+//
+// It mattered because the set was incomplete. Didit's v3 webhook sends
+// "Approved" | "Declined" | "In Review" | "In Progress" | "Not Started" |
+// "Abandoned" | "Expired" | "Kyc Expired" | "Resubmitted" | "Awaiting User",
+// and five of those ten fell through: "In Progress" (this switch had
+// "in_progress" and "inprogress" but not the spaced form Didit actually
+// sends), "Abandoned", "Kyc Expired", "Resubmitted" and "Awaiting User".
+//
+// Callers must not write the status when ok is false. Keeping the row as it is
+// loses nothing - the next poll or webhook re-reads the authoritative decision
+// from Didit - whereas writing a guess destroys state we cannot recover.
+//
 // Status flow: not_started -> pending -> in_review -> verified/rejected/expired
-func mapDiditStatus(diditStatus string) string {
+func mapDiditStatus(diditStatus string) (string, bool) {
 	status := strings.ToLower(strings.TrimSpace(diditStatus))
 	switch status {
 	case "approved", "verified":
-		return "verified"
+		return "verified", true
 	case "rejected", "declined":
-		return "rejected"
+		return "rejected", true
 	case "in review", "inreview":
-		// Didit is actively reviewing the verification
-		return "in_review"
-	case "pending", "in_progress", "inprogress":
-		// User has started verification process (clicked the link, submitted documents, etc.)
-		// but Didit hasn't started reviewing yet
-		return "pending"
-	case "expired":
-		return "expired"
+		// Didit is actively reviewing the verification.
+		return "in_review", true
+	case "resubmitted":
+		// The contributor supplied fresh documents after a request for more.
+		// That goes back to Didit for a decision, so it is a review state, not
+		// a "start again" one.
+		return "in_review", true
+	case "pending", "in progress", "in_progress", "inprogress":
+		// Started, not yet decided. "in progress" with a space is the form v3
+		// actually sends; its absence here is what made this the most common
+		// unrecognised value.
+		return "pending", true
+	case "awaiting user":
+		// Didit is waiting on the contributor to finish something. The session
+		// is live, so this is pending rather than expired: they should resume
+		// the existing link, which /kyc/status hands back, rather than start a
+		// second session.
+		return "pending", true
+	case "expired", "kyc expired":
+		return "expired", true
+	case "abandoned":
+		// Started and walked away. Deliberately mapped to expired rather than
+		// to a blocking state: expired is in canStartNewKYCSession's allow
+		// list, so an abandoned attempt lets them begin again instead of
+		// stranding them behind a session they will never finish.
+		return "expired", true
 	case "not started", "notstarted", "not_started":
-		// Session exists but user hasn't clicked the verification link yet
-		// This is distinct from "pending" - user hasn't begun verification
-		return "not_started"
+		// A session exists but the link was never opened. Distinct from
+		// pending: verification has not begun.
+		return "not_started", true
 	default:
-		// Unknown status - log as error for production monitoring
-		slog.Error("unknown didit status - defaulting to not_started", "status", diditStatus, "original", diditStatus)
-		return "not_started"
+		// Unrecognised. The caller keeps the existing status rather than
+		// writing a guess. Logged at error level because a status we have
+		// never seen means Didit has added one and this switch needs a
+		// deliberate decision about it - silence here is how the previous
+		// version turned five real statuses into "never started".
+		slog.Error("unrecognised didit status - leaving stored kyc_status unchanged",
+			"status", diditStatus)
+		return "", false
 	}
 }
 
@@ -515,9 +558,14 @@ WHERE id = $2
 						"error", err.Error(),
 						"current_status", currentStatusStr)
 				}
+			} else if newStatus, ok := mapDiditStatus(decision.Status); !ok {
+				// Unrecognised status: keep whatever is stored. Writing a guess
+				// here is how a live verification became "never started".
+				// mapDiditStatus has already logged the value.
+				slog.Warn("kyc status poll: leaving stored status unchanged",
+					"session_id", *kycSessionID, "didit_status", decision.Status)
 			} else {
 				// Session exists in Didit - update status based on Didit response
-				newStatus := mapDiditStatus(decision.Status)
 
 				// Log the full decision structure for debugging
 				decisionJSONDebug, _ := json.Marshal(decision.Decision)

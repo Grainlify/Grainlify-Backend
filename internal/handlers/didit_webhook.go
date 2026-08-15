@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -136,16 +137,20 @@ WHERE kyc_session_id = $1
 		// Process status update
 		// Fetch latest decision from Didit API if available
 		var kycStatus string
+		var recognised bool
 		var decisionData map[string]interface{}
+		// The raw status this decision came from, for the log if we reject it.
+		rawStatus := status
 
 		if h.didit != nil {
 			decision, err := h.didit.GetSessionDecision(c.Context(), sessionID)
 			if err != nil {
 				// If API call fails, use status from query/body
-				kycStatus = mapDiditStatus(status)
+				kycStatus, recognised = mapDiditStatus(status)
 			} else {
 				// Map Didit status to our KYC status
-				kycStatus = mapDiditStatus(decision.Status)
+				rawStatus = decision.Status
+				kycStatus, recognised = mapDiditStatus(decision.Status)
 				// Store both Decision and Data from Didit response
 				decisionData = map[string]interface{}{
 					"decision": decision.Decision,
@@ -154,7 +159,20 @@ WHERE kyc_session_id = $1
 			}
 		} else {
 			// If no Didit client, use status from query/body
-			kycStatus = mapDiditStatus(status)
+			kycStatus, recognised = mapDiditStatus(status)
+		}
+
+		// An unrecognised status must not overwrite a real one. Ack the
+		// delivery so Didit does not retry a payload we will never understand,
+		// but leave the row alone - the stored status stays whatever the last
+		// recognised decision made it, and the next poll re-reads the truth.
+		// mapDiditStatus has already logged the unknown value at error level.
+		if !recognised {
+			slog.Warn("didit webhook: unrecognised status, kyc_status left unchanged",
+				"session_id", sessionID, "didit_status", rawStatus)
+			return c.Status(fiber.StatusOK).JSON(fiber.Map{
+				"ok": true, "ignored": "unrecognised_status",
+			})
 		}
 
 		// Store decision data as JSONB (includes both Decision and Data)
