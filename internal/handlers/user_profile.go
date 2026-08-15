@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -846,34 +848,48 @@ SELECT ga.user_id
 FROM github_accounts ga
 WHERE LOWER(ga.login) = $1
 `, loginParamLower).Scan(&foundUserID)
-			if err != nil {
-				// User not found in database, but they might still be a contributor
-				// Return basic profile with just the login
-				return c.Status(fiber.StatusOK).JSON(fiber.Map{
-					"login":               loginParam,
-					"user_id":             "",
-					"contributions_count": 0,
-					"languages":           []fiber.Map{},
-					"ecosystems":          []fiber.Map{},
-					"bio":                 nil,
-					"website":             nil,
-					"rank": fiber.Map{
-						"position":   nil,
-						"tier":       "unranked",
-						"tier_name":  "Unranked",
-						"tier_color": "#7a6b5a",
-					},
-				})
-			}
-			userID = &foundUserID
 			githubLogin = &loginParam
 
-			// Get profile fields
-			_ = h.db.Pool.QueryRow(c.Context(), `
+			// No Grainlify account for this login does NOT mean "not a
+			// contributor". The leaderboard ranks by pull-request author_login
+			// and deliberately includes people who never signed up:
+			// entriesQuery LEFT JOINs github_accounts and falls back to
+			// COALESCE(acct.login, r.login_raw).
+			//
+			// This branch used to return early with a hardcoded
+			// {position: nil, tier_name: "Unranked", contributions_count: 0},
+			// never calling internal/ranking at all. That is how five of the
+			// top eight contributors ended up with public profiles saying they
+			// were unranked with zero contributions while sitting at ranks 3-8
+			// on the board - ekwe7 was rank 3 with 16 merged PRs and their own
+			// profile called them unranked.
+			//
+			// It is also the exact defect internal/ranking was created to
+			// remove ("ranked only logins present in github_accounts ... an
+			// unregistered contributor above you did not exist in the ranking
+			// your badge was computed from"). The package fixed the ranking;
+			// this handler short-circuited before reaching it.
+			//
+			// So: fall through instead of returning. Everything below is keyed
+			// on githubLogin, and every use of userID past this point is
+			// nil-guarded, so the response is computed rather than stubbed.
+			// userID stays nil, which renders user_id as "" - the honest
+			// answer for someone who is a contributor but not a member.
+			if err == nil {
+				userID = &foundUserID
+
+				// Profile fields only exist for a registered user.
+				_ = h.db.Pool.QueryRow(c.Context(), `
 SELECT bio, website, telegram, linkedin, whatsapp, twitter, discord, kyc_status
 FROM users
 WHERE id = $1
 `, foundUserID).Scan(&bio, &website, &telegram, &linkedin, &whatsapp, &twitter, &discord, &kycStatus)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				// A real lookup failure is different from "no such account".
+				// Log it rather than silently treating the user as unregistered.
+				slog.Warn("public profile: github_accounts lookup failed",
+					"login", loginParam, "error", err)
+			}
 		}
 
 		if githubLogin == nil || *githubLogin == "" {

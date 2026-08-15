@@ -66,27 +66,19 @@ func buildRankBadge(ctx context.Context, pool db.DBPool, githubLogin string) fib
 	}
 }
 
-// emptyRankBadge is the badge for someone who is not ranked in either window
-// - used where a handler returns a placeholder profile without running the
-// ranking at all. It exists so that response has the same shape as a real
-// one; a client should never have to check whether all_time is present.
-func emptyRankBadge() fiber.Map {
-	unranked := RankTierUnranked
-	tier := fiber.Map{
-		"position":   nil,
-		"tier":       string(unranked),
-		"tier_name":  GetRankTierDisplayName(unranked),
-		"tier_color": GetRankTierColor(unranked),
-		"merged_prs": 0,
-	}
-	badge := fiber.Map{}
-	for k, v := range tier {
-		badge[k] = v
-	}
-	badge["window"] = string(ranking.WindowSeason)
-	badge["all_time"] = tier
-	return badge
-}
+// emptyRankBadge used to live here: "the badge for someone who is not ranked
+// in either window - used where a handler returns a placeholder profile
+// without running the ranking at all."
+//
+// That description is the bug, written down. The one handler that used it -
+// PublicProfile's early return for a login with no github_accounts row -
+// produced an Unranked badge for contributors the leaderboard was actively
+// ranking, because it never ran the ranking to find out. Removed with its
+// last caller: buildRankBadge already returns a correctly-shaped badge with a
+// nil position for someone genuinely unranked, and it gets that answer by
+// asking rather than by assuming.
+//
+// Do not reintroduce a way to produce a rank without computing one.
 
 // rankPositionOrNil is Position with the error folded into "not ranked".
 //
