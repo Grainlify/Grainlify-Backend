@@ -38,6 +38,12 @@ const (
 	// disappearing silently, and surfacing only when the pool is shared out,
 	// is how a defensible decision comes to look arbitrary.
 	TypeSocialFollowCompleted Type = "social_follow_completed"
+
+	// An admin cleared a contributor's KYC status so they can verify again.
+	// Worth telling them: a refused verification is otherwise terminal in the
+	// UI, so somebody who was stuck has no way to discover that the door has
+	// been reopened.
+	TypeKYCReset Type = "kyc_reset"
 	// TypeRedemptionPaid fires when an admin marks a points->USDC redemption
 	// request as paid (internal/handlers/redemptions.go).
 	TypeRedemptionPaid Type = "redemption_paid"
@@ -77,6 +83,7 @@ var AllTypes = []Type{
 	TypeRewardReceived,
 	TypeReferralCompleted,
 	TypeSocialFollowCompleted,
+	TypeKYCReset,
 	TypeRedemptionPaid,
 	TypeRedemptionRejected,
 	TypeGrainHackIssueCapExceeded,
