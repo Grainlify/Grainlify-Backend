@@ -1,3 +1,16 @@
+// LEGACY - UNUSED. Integration tests for the two legacy contract clients.
+//
+// These skip unless SOROBAN_RPC_URL and SOROBAN_SOURCE_SECRET are set, and no
+// environment sets them - so they have never run. That matters: they are the
+// only thing that would have exercised the calls in escrow_legacy_unused.go
+// and program_legacy_unused.go against a real network, and they would have
+// failed immediately with an unknown-function error, because those files call
+// a contract that does not exist.
+//
+// A permanently-skipped test is not coverage. Kept alongside the code it
+// tests, renamed with it, and deliberately not repointed at the real contract:
+// the real adapter is a different shape and will get its own tests.
+
 package soroban
 
 import (
@@ -37,9 +50,9 @@ func TestEscrowContract_Integration(t *testing.T) {
 	// Create client
 	client, err := NewClient(Config{
 		RPCURL:            rpcURL,
-		Network:          NetworkTestnet,
+		Network:           NetworkTestnet,
 		NetworkPassphrase: "", // Will use default for testnet
-		HTTPTimeout:      30 * time.Second,
+		HTTPTimeout:       30 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
@@ -52,7 +65,7 @@ func TestEscrowContract_Integration(t *testing.T) {
 	}
 
 	// Create escrow contract client
-	escrow := NewEscrowContract(client, txBuilder, contractID)
+	escrow := NewLegacyUnusedEscrowContract(client, txBuilder, contractID)
 
 	ctx := context.Background()
 
@@ -99,9 +112,9 @@ func TestProgramEscrowContract_Integration(t *testing.T) {
 	// Create client
 	client, err := NewClient(Config{
 		RPCURL:            rpcURL,
-		Network:          NetworkTestnet,
+		Network:           NetworkTestnet,
 		NetworkPassphrase: "",
-		HTTPTimeout:      30 * time.Second,
+		HTTPTimeout:       30 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
@@ -114,7 +127,7 @@ func TestProgramEscrowContract_Integration(t *testing.T) {
 	}
 
 	// Create program escrow contract client
-	programEscrow := NewProgramEscrowContract(client, txBuilder, contractID)
+	programEscrow := NewLegacyUnusedProgramEscrowContract(client, txBuilder, contractID)
 
 	ctx := context.Background()
 
@@ -149,9 +162,9 @@ func TestClient_RPC(t *testing.T) {
 
 	client, err := NewClient(Config{
 		RPCURL:            rpcURL,
-		Network:          NetworkTestnet,
+		Network:           NetworkTestnet,
 		NetworkPassphrase: "",
-		HTTPTimeout:      30 * time.Second,
+		HTTPTimeout:       30 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)

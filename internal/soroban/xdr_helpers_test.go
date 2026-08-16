@@ -50,7 +50,7 @@ func TestEncodeScValVec(t *testing.T) {
 		{Type: xdr.ScValTypeScvI64, I64: func() *xdr.Int64 { v := xdr.Int64(1); return &v }()},
 		{Type: xdr.ScValTypeScvI64, I64: func() *xdr.Int64 { v := xdr.Int64(2); return &v }()},
 	}
-	
+
 	vecVal, err := EncodeScValVec(vals)
 	if err != nil {
 		t.Fatalf("EncodeScValVec failed: %v", err)

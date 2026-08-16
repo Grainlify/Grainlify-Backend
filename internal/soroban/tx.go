@@ -198,7 +198,7 @@ func (tb *TransactionBuilder) WaitForConfirmation(ctx context.Context, txHash st
 func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 	// Contract ID is typically a hex string (64 chars) or base64
 	var hash xdr.Hash
-	
+
 	// Try hex first (64 hex chars = 32 bytes)
 	if len(contractID) == 64 {
 		// Parse hex string
@@ -214,7 +214,7 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 		if err == nil {
 			contractId := xdr.ContractId(hash)
 			return xdr.ScAddress{
-				Type:        xdr.ScAddressTypeScAddressTypeContract,
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
 				ContractId: &contractId,
 			}, nil
 		}
@@ -232,7 +232,7 @@ func EncodeContractAddress(contractID string) (xdr.ScAddress, error) {
 
 	contractId := xdr.ContractId(hash)
 	return xdr.ScAddress{
-		Type:        xdr.ScAddressTypeScAddressTypeContract,
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
 		ContractId: &contractId,
 	}, nil
 }

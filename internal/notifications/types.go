@@ -18,8 +18,9 @@ const (
 	// user transitions to merged (internal/ingest/github_webhook.go).
 	TypePRMerged Type = "pr_merged"
 	// TypeRewardReceived is defined for forward compatibility with the
-	// on-chain payout system (internal/soroban) - nothing publishes it yet,
-	// since that system isn't wired to any request flow today. The
+	// on-chain payout system - nothing publishes it yet, because no payout
+	// path reaches a chain. (Do not look for it in internal/soroban's escrow
+	// files: those are legacy and call a contract that does not exist.) The
 	// preference toggle exists in the UI so it's ready once payouts ship.
 	TypeRewardReceived Type = "reward_received"
 	// TypeReferralCompleted fires when someone a user referred finishes

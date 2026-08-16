@@ -66,9 +66,9 @@ func (ca *ContractAddress) String() string {
 
 // RetryConfig configures retry behavior for transactions
 type RetryConfig struct {
-	MaxRetries      int
-	InitialDelay    time.Duration
-	MaxDelay        time.Duration
+	MaxRetries        int
+	InitialDelay      time.Duration
+	MaxDelay          time.Duration
 	BackoffMultiplier float64
 }
 

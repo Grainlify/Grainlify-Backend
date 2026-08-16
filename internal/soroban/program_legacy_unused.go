@@ -1,3 +1,25 @@
+// LEGACY - UNUSED - WRONG ABI *AND* WRONG PAYMENT MODEL.
+//
+// Worse than escrow_legacy_unused.go on two independent counts.
+//
+// First, the same problem: it calls functions no deployed contract has -
+// init_program, lock_program_funds, single_payout, batch_payout - against a
+// contract that exposes initialise/fund/publish_root/claim.
+//
+// Second, and more important: single_payout and batch_payout are PUSH
+// payments. The backend would choose a recipient address and send funds to it.
+// The system is deliberately pull-only: a contributor claims their own funds
+// with a Merkle proof and pays their own fee. That is not a preference - it is
+// what makes double-payment structurally impossible rather than merely tested,
+// because the contract sets its claimed flag before transferring and a second
+// attempt cannot pass. A push path reintroduces the entire class of "we paid
+// the wrong person" and "we paid twice" failures that pull removes.
+//
+// So this file is not a starting point for anything. Even with the function
+// names corrected it would be the wrong shape.
+//
+// Kept as a record, renamed so it cannot be used by accident.
+
 package soroban
 
 import (
@@ -10,16 +32,16 @@ import (
 	"github.com/stellar/go/xdr"
 )
 
-// ProgramEscrowContract provides methods to interact with the ProgramEscrowContract
-type ProgramEscrowContract struct {
+// LegacyUnusedProgramEscrowContract provides methods to interact with the LegacyUnusedProgramEscrowContract
+type LegacyUnusedProgramEscrowContract struct {
 	client          *Client
 	txBuilder       *TransactionBuilder
 	contractAddress string
 }
 
-// NewProgramEscrowContract creates a new program escrow contract client
-func NewProgramEscrowContract(client *Client, txBuilder *TransactionBuilder, contractAddress string) *ProgramEscrowContract {
-	return &ProgramEscrowContract{
+// NewLegacyUnusedProgramEscrowContract creates a new program escrow contract client
+func NewLegacyUnusedProgramEscrowContract(client *Client, txBuilder *TransactionBuilder, contractAddress string) *LegacyUnusedProgramEscrowContract {
+	return &LegacyUnusedProgramEscrowContract{
 		client:          client,
 		txBuilder:       txBuilder,
 		contractAddress: contractAddress,
@@ -27,7 +49,7 @@ func NewProgramEscrowContract(client *Client, txBuilder *TransactionBuilder, con
 }
 
 // InitProgram initializes a new program escrow
-func (pec *ProgramEscrowContract) InitProgram(ctx context.Context, programID, authorizedPayoutKey, tokenAddress string) (*TransactionResult, error) {
+func (pec *LegacyUnusedProgramEscrowContract) InitProgram(ctx context.Context, programID, authorizedPayoutKey, tokenAddress string) (*TransactionResult, error) {
 	pec.client.LogContractInteraction(pec.contractAddress, "init_program", map[string]interface{}{
 		"program_id":            programID,
 		"authorized_payout_key": authorizedPayoutKey,
@@ -74,7 +96,7 @@ func (pec *ProgramEscrowContract) InitProgram(ctx context.Context, programID, au
 }
 
 // LockProgramFunds locks funds into the program escrow
-func (pec *ProgramEscrowContract) LockProgramFunds(ctx context.Context, amount int64) (*TransactionResult, error) {
+func (pec *LegacyUnusedProgramEscrowContract) LockProgramFunds(ctx context.Context, amount int64) (*TransactionResult, error) {
 	pec.client.LogContractInteraction(pec.contractAddress, "lock_program_funds", map[string]interface{}{
 		"amount": amount,
 	})
@@ -116,7 +138,7 @@ func (pec *ProgramEscrowContract) LockProgramFunds(ctx context.Context, amount i
 }
 
 // SinglePayout executes a single payout to one recipient
-func (pec *ProgramEscrowContract) SinglePayout(ctx context.Context, recipientAddress string, amount int64) (*TransactionResult, error) {
+func (pec *LegacyUnusedProgramEscrowContract) SinglePayout(ctx context.Context, recipientAddress string, amount int64) (*TransactionResult, error) {
 	pec.client.LogContractInteraction(pec.contractAddress, "single_payout", map[string]interface{}{
 		"recipient": recipientAddress,
 		"amount":    amount,
@@ -169,7 +191,7 @@ type PayoutItem struct {
 	Amount    int64
 }
 
-func (pec *ProgramEscrowContract) BatchPayout(ctx context.Context, payouts []PayoutItem) (*TransactionResult, error) {
+func (pec *LegacyUnusedProgramEscrowContract) BatchPayout(ctx context.Context, payouts []PayoutItem) (*TransactionResult, error) {
 	pec.client.LogContractInteraction(pec.contractAddress, "batch_payout", map[string]interface{}{
 		"payout_count": len(payouts),
 	})
@@ -237,12 +259,12 @@ func (pec *ProgramEscrowContract) BatchPayout(ctx context.Context, payouts []Pay
 }
 
 // GetProgramInfo retrieves program information (read-only)
-func (pec *ProgramEscrowContract) GetProgramInfo(ctx context.Context) (*ProgramEscrowData, error) {
+func (pec *LegacyUnusedProgramEscrowContract) GetProgramInfo(ctx context.Context) (*ProgramEscrowData, error) {
 	return pec.getProgramInfoRPC(ctx)
 }
 
 // getProgramInfoRPC uses Soroban RPC to simulate the get_program_info call
-func (pec *ProgramEscrowContract) getProgramInfoRPC(ctx context.Context) (*ProgramEscrowData, error) {
+func (pec *LegacyUnusedProgramEscrowContract) getProgramInfoRPC(ctx context.Context) (*ProgramEscrowData, error) {
 	// Similar to escrow - requires building transaction XDR and calling simulateTransaction
 	// Then decoding the ScVal return value
 	slog.Warn("GetProgramInfo requires transaction building and XDR decoding")
@@ -250,12 +272,12 @@ func (pec *ProgramEscrowContract) getProgramInfoRPC(ctx context.Context) (*Progr
 }
 
 // GetRemainingBalance retrieves the remaining balance (read-only)
-func (pec *ProgramEscrowContract) GetRemainingBalance(ctx context.Context) (int64, error) {
+func (pec *LegacyUnusedProgramEscrowContract) GetRemainingBalance(ctx context.Context) (int64, error) {
 	return pec.getRemainingBalanceRPC(ctx)
 }
 
 // getRemainingBalanceRPC uses Soroban RPC to get remaining balance
-func (pec *ProgramEscrowContract) getRemainingBalanceRPC(ctx context.Context) (int64, error) {
+func (pec *LegacyUnusedProgramEscrowContract) getRemainingBalanceRPC(ctx context.Context) (int64, error) {
 	// Similar to getProgramInfoRPC - requires transaction building and XDR decoding
 	slog.Warn("GetRemainingBalance requires transaction building and XDR decoding")
 	return 0, fmt.Errorf("GetRemainingBalance requires transaction building - use RPC simulateTransaction")

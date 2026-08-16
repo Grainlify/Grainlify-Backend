@@ -23,8 +23,10 @@ const usdcPerPoint = 0.01
 const minRedemptionPoints = 100
 
 // Actually sending USDC is intentionally NOT wired here - there is no
-// funded treasury Stellar account configured yet (see internal/soroban,
-// which is bounty-escrow shaped, not a redeem-on-demand primitive anyway).
+// funded treasury Stellar account configured yet. (internal/soroban has
+// escrow-shaped files, but they are legacy and call a contract that does not
+// exist - see escrow_legacy_unused.go. They are not a redeem-on-demand
+// primitive and are not a starting point for one.)
 // A redemption is created 'pending' with points deducted immediately (so
 // the same points can't fund two simultaneous requests) and an admin sends
 // the USDC manually, then marks it paid or rejects it (refunding the

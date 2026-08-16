@@ -21,10 +21,10 @@ type Client struct {
 
 // Config holds configuration for Soroban client
 type Config struct {
-	RPCURL           string // Soroban RPC endpoint
-	NetworkPassphrase string // Network passphrase
-	Network         Network // "testnet" or "mainnet"
-	HTTPTimeout     time.Duration
+	RPCURL            string  // Soroban RPC endpoint
+	NetworkPassphrase string  // Network passphrase
+	Network           Network // "testnet" or "mainnet"
+	HTTPTimeout       time.Duration
 }
 
 // NewClient creates a new Soroban client
