@@ -158,6 +158,9 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		})
 	})
 	app.Get("/health", handlers.Health())
+	// Which commit is actually serving. Unauthenticated: a sha is not a secret,
+	// and a verification step that needs credentials is one that gets skipped.
+	app.Get("/version", handlers.Version())
 	app.Get("/ready", handlers.Ready(deps.DB))
 
 	// A nil *MailerCloudMailer boxed directly into the email.Mailer interface
@@ -324,6 +327,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		},
 	})
 	app.Post("/support-requests", supportLimiter, supportRequests.Create())
+	// Read is authenticated, unlike Create. Anonymous reports are legitimate to
+	// SEND - somebody who cannot sign in is the person most likely to need
+	// support - but there is no one to show a history to, and the caller's id
+	// comes from the verified token so there is no id to tamper with.
+	app.Get("/support-requests/mine", auth.RequireAuth(cfg.JWTSecret), supportRequests.Mine())
 	// Legacy path, kept so a cached frontend bundle keeps working after deploy.
 	app.Post("/bug-reports", supportLimiter, supportRequests.Create())
 
