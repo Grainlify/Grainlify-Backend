@@ -23,21 +23,54 @@ type capturedSend struct {
 	ChatID   string
 	ThreadID string
 	Text     string
+
+	// Set for multipart uploads (sendPhoto / sendDocument). Method is the Bot
+	// API method from the URL path, so a test can assert WHICH call was made
+	// rather than only that something was sent.
+	Method    string
+	FileField string
+	FileName  string
+	FileBytes int
+	Caption   string
+	ReplyTo   string
 }
 
 // fakeTelegram stands in for the Bot API. respond decides each reply, so a
 // test can make one call fail without affecting the next.
-func fakeTelegram(t *testing.T, respond func(c capturedSend) (int, string)) (*telegramSupportSink, *[]capturedSend, func()) {
+func fakeTelegram(
+	t *testing.T,
+	respond func(c capturedSend) (int, string),
+	overrides ...func(*telegramSinkConfig),
+) (*telegramSupportSink, *[]capturedSend, func()) {
 	t.Helper()
 	var mu sync.Mutex
 	sends := []capturedSend{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		c := capturedSend{
-			ChatID:   r.Form.Get("chat_id"),
-			ThreadID: r.Form.Get("message_thread_id"),
-			Text:     r.Form.Get("text"),
+		c := capturedSend{}
+		if i := strings.LastIndex(r.URL.Path, "/"); i >= 0 {
+			c.Method = r.URL.Path[i+1:]
+		}
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			// sendPhoto / sendDocument. ParseForm does not read these, so a
+			// harness that only called it would record an upload as an empty
+			// send and every assertion about it would be vacuous.
+			if err := r.ParseMultipartForm(16 << 20); err == nil {
+				c.ChatID = r.FormValue("chat_id")
+				c.ThreadID = r.FormValue("message_thread_id")
+				c.Caption = r.FormValue("caption")
+				c.ReplyTo = r.FormValue("reply_to_message_id")
+				for field, fhs := range r.MultipartForm.File {
+					if len(fhs) > 0 {
+						c.FileField, c.FileName, c.FileBytes = field, fhs[0].Filename, int(fhs[0].Size)
+					}
+				}
+			}
+		} else {
+			_ = r.ParseForm()
+			c.ChatID = r.Form.Get("chat_id")
+			c.ThreadID = r.Form.Get("message_thread_id")
+			c.Text = r.Form.Get("text")
 		}
 		mu.Lock()
 		sends = append(sends, c)
@@ -52,14 +85,23 @@ func fakeTelegram(t *testing.T, respond func(c capturedSend) (int, string)) (*te
 		_, _ = w.Write([]byte(body))
 	}))
 
-	sink := newTelegramSupportSink(telegramSinkConfig{
+	cfg := telegramSinkConfig{
 		BotToken: "test-token", ChatID: "-100999", AdminUserID: "42",
 		TopicBugs: "1700", TopicKYC: "1701", TopicIdeas: "1702",
 		TopicHelp: "1703", TopicOther: "1704",
-	})
+	}
+	for _, o := range overrides {
+		o(&cfg)
+	}
+	sink := newTelegramSupportSink(cfg)
 	sink.baseURL = srv.URL
 	return sink, &sends, srv.Close
 }
+
+// withoutAdminUserID drops TELEGRAM_ADMIN_USER_ID. Worth being able to build:
+// it is the configuration in which there is no private destination for an
+// image, and "no destination" must never resolve to the public group.
+func withoutAdminUserID(c *telegramSinkConfig) { c.AdminUserID = "" }
 
 func sampleRequest(category string) SupportRequest {
 	return SupportRequest{
