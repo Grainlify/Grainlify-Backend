@@ -228,14 +228,20 @@ FROM social_follow_submissions WHERE user_id = $1
 // limit; getting the images out of the JSON entirely needs an object store
 // and is tracked separately.
 const (
-	socialFollowPageSize = 10
-	// The ceiling is deliberately close to the default. At ~787kB a row the
-	// default page is already ~7.7MB, so a generous maximum would let a caller
-	// ask for a response BIGGER than the 17MB one this change exists to
-	// remove - a cap that permits a worse outcome than the bug is not a cap.
-	// 20 puts the worst case at ~15MB, strictly better than today and no
-	// longer growing with the queue.
-	socialFollowMaxPageSize = 20
+	// Both numbers rose when the screenshots left this response.
+	//
+	// They were 10 and 20, and both were set by payload rather than by what a
+	// reviewer wants to see: at ~775kB of base64 per row a page of 20 was
+	// ~15MB. Without the screenshots a row is about 160 bytes - login, avatar
+	// URL, status, two timestamps - so a page of 50 is ~8KB, and the page size
+	// can be set by the queue instead of by the wire.
+	//
+	// Still capped rather than unbounded, but for a different reason now:
+	// bulk-approve refuses a selection larger than one page, and that is what
+	// keeps "approve everything on screen" bounded to what somebody could
+	// plausibly have looked at.
+	socialFollowPageSize    = 50
+	socialFollowMaxPageSize = 100
 )
 
 // ListSubmissions handles GET /admin/social-follow/submissions.
@@ -277,7 +283,7 @@ func (h *SocialFollowHandler) ListSubmissions() fiber.Handler {
 		}
 
 		query := `
-SELECT s.id, s.user_id, COALESCE(ga.login, ''), s.linkedin_screenshot, s.x_screenshot,
+SELECT s.id, s.user_id, COALESCE(ga.login, ''), COALESCE(ga.avatar_url, ''),
        s.status, s.decision_reason, s.reason_code, s.decided_at::text, s.created_at::text,
        s.decided_by, COALESCE(dga.login, '')
 FROM social_follow_submissions s
@@ -297,20 +303,23 @@ LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
 		for rows.Next() {
 			var (
 				id, userID                    uuid.UUID
-				login, linkedIn, x, status    string
+				login, avatarURL, status      string
 				reason, reasonCode, decidedAt *string
 				createdAt                     string
 				decidedBy                     *uuid.UUID
 				decidedByLogin                string
 			)
-			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &reasonCode, &decidedAt, &createdAt,
+			if err := rows.Scan(&id, &userID, &login, &avatarURL, &status, &reason, &reasonCode, &decidedAt, &createdAt,
 				&decidedBy, &decidedByLogin); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
 			}
 			out = append(out, fiber.Map{
 				"id": id, "user_id": userID, "github_login": login,
-				"linkedin_screenshot": linkedIn, "x_screenshot": x,
-				"status": status, "decision_reason": reason,
+				// The avatar is what makes a compact row identifiable at a
+				// glance. The screenshots are deliberately NOT here - they are
+				// fetched per submission when a row is expanded. See Proofs.
+				"avatar_url": avatarURL,
+				"status":     status, "decision_reason": reason,
 				"reason_code":  reasonCode,
 				"reason_label": socialFollowReasonLabel(reasonCode),
 				"decided_at":   decidedAt, "created_at": createdAt,
@@ -745,4 +754,53 @@ func derefOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// Proofs handles GET /admin/social-follow/submissions/:id/proofs.
+//
+// The two screenshots for one submission, fetched when a reviewer expands a
+// row rather than shipped with every row of the queue.
+//
+// Why this exists: the screenshots are base64 data URLs in TEXT columns,
+// ~775kB a row, and returning them with the list made a page of ten a 7.7MB
+// response that grew with the queue. Paging bounded it; not sending them at
+// all removes it. A reviewer opens a handful of rows per session, so the
+// proofs are fetched a handful of times instead of fifty.
+//
+// The atomic rule still holds: both screenshots come back together, in one
+// response, because a decision covers both platforms and judging one without
+// the other in view is half a decision. There is deliberately no endpoint for
+// a single platform's proof.
+//
+// Admin-only, same as the list. These are photographs of people's social
+// accounts; the fact that they are keyed by an unguessable UUID is not
+// authorisation.
+func (h *SocialFollowHandler) Proofs() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+		submissionID, err := uuid.Parse(c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_submission_id"})
+		}
+
+		var linkedIn, x string
+		err = h.db.Pool.QueryRow(c.Context(), `
+SELECT linkedin_screenshot, x_screenshot
+FROM social_follow_submissions WHERE id = $1
+`, submissionID).Scan(&linkedIn, &x)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "submission_not_found"})
+		}
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+		}
+
+		return c.JSON(fiber.Map{
+			"id":                  submissionID,
+			"linkedin_screenshot": linkedIn,
+			"x_screenshot":        x,
+		})
+	}
 }
