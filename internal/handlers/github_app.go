@@ -364,10 +364,12 @@ SET github_repo_id = $2,
     verified_at = COALESCE(verified_at, now()),
     verification_error = NULL,
     github_app_installation_id = $3,
+    is_fork = $4,
+    fork_checked_at = now(),
     deleted_at = NULL,
     updated_at = now()
 WHERE id = $1
-`, projectID, repo.ID, installationID)
+`, projectID, repo.ID, installationID, repo.Fork)
 
 			slog.Info("verified existing project from GitHub App installation",
 				"project_id", projectID,
@@ -438,10 +440,12 @@ SET github_repo_id = $2,
     verified_at = now(),
     verification_error = NULL,
     github_app_installation_id = $3,
+    is_fork = $4,
+    fork_checked_at = now(),
     deleted_at = NULL,
     updated_at = now()
 WHERE id = $1
-`, projectID, repo.ID, installationID)
+`, projectID, repo.ID, installationID, repo.Fork)
 
 		// Enqueue sync jobs for issues and PRs
 		_, _ = h.db.Pool.Exec(ctx, `

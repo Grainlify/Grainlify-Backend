@@ -50,8 +50,8 @@ func (c *GitHubAppClient) GenerateJWT() (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"iat": now.Add(-60 * time.Second).Unix(), // Issued at time (allow 60s clock skew)
-		"exp": now.Add(10 * time.Minute).Unix(),   // Expires in 10 minutes
-		"iss": c.AppID,                            // Issuer is the App ID
+		"exp": now.Add(10 * time.Minute).Unix(),  // Expires in 10 minutes
+		"iss": c.AppID,                           // Issuer is the App ID
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -114,13 +114,18 @@ type InstallationRepository struct {
 	FullName string `json:"full_name"`
 	Name     string `json:"name"`
 	Private  bool   `json:"private"`
-	Owner    struct {
+	// Fork is why this struct exists in its current form. GitHub returns it on
+	// every repository and we simply were not decoding it, so nothing
+	// downstream could filter forks even in principle - it was discarded at
+	// the JSON boundary, not missing from a condition somewhere.
+	Fork  bool `json:"fork"`
+	Owner struct {
 		ID    int64  `json:"id"`
 		Login string `json:"login"`
 		Type  string `json:"type"` // "User" or "Organization"
 	} `json:"owner"`
-	Language    *string `json:"language"`
-	Description *string `json:"description"`
+	Language    *string  `json:"language"`
+	Description *string  `json:"description"`
 	Topics      []string `json:"topics"`
 }
 
@@ -159,4 +164,3 @@ func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, inst
 
 	return result.Repositories, nil
 }
-

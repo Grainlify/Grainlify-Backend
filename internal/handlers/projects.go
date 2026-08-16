@@ -557,9 +557,11 @@ SET github_repo_id = $2,
     verification_error = NULL,
     stars_count = $3,
     forks_count = $4,
+    is_fork = $5,
+    fork_checked_at = now(),
     updated_at = now()
 WHERE id = $1
-`, projectID, repo.ID, repo.StargazersCount, repo.ForksCount)
+`, projectID, repo.ID, repo.StargazersCount, repo.ForksCount, repo.Fork)
 		return
 	}
 
@@ -592,9 +594,11 @@ SET github_repo_id = $2,
     webhook_created_at = now(),
     stars_count = $5,
     forks_count = $6,
+    is_fork = $7,
+    fork_checked_at = now(),
     updated_at = now()
 WHERE id = $1
-`, projectID, repo.ID, wh.ID, webhookURL, repo.StargazersCount, repo.ForksCount)
+`, projectID, repo.ID, wh.ID, webhookURL, repo.StargazersCount, repo.ForksCount, repo.Fork)
 }
 
 func (h *ProjectsHandler) recordProjectError(ctx context.Context, projectID uuid.UUID, msg string) {

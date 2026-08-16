@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
+	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
 )
@@ -187,6 +188,15 @@ func main() {
 			}(),
 		)
 	}
+
+	// Resolve fork state for projects indexed before is_fork existed.
+	//
+	// Started here rather than run as a one-off script because the exclusion it
+	// feeds is a correctness property, not a migration chore: until a project's
+	// fork state is known it counts toward ranking, so the resolution has to
+	// happen wherever the code runs, not wherever somebody remembered to run a
+	// command. It is a no-op once every row is resolved.
+	go handlers.NewForkBackfiller(cfg, database).Run(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
