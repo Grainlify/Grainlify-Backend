@@ -432,6 +432,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/kyc/:id/resets", requireAdmin, kycAdmin.History())
 
 	adminGroup.Get("/social-follow/submissions", requireAdmin, socialFollow.ListSubmissions())
+	adminGroup.Get("/social-follow/reason-codes", requireAdmin, socialFollow.ReasonCodes())
+	// Registered before the ":id" routes: Fiber would otherwise match
+	// "bulk-approve" as an :id and fail on the UUID parse.
+	adminGroup.Post("/social-follow/submissions/bulk-approve", requireAdmin, socialFollow.BulkApprove())
 	adminGroup.Post("/social-follow/submissions/:id/approve", requireAdmin, socialFollow.Approve())
 	adminGroup.Post("/social-follow/submissions/:id/reject", requireAdmin, socialFollow.Reject())
 	// Eligibility is re-read at settlement, so an approval has to be
