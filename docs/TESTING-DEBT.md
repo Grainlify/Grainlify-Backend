@@ -460,8 +460,23 @@ version whose file is absent from the tree it is now looking at.
 
 Hit while splitting the KYC review alerting and the Telegram screenshot work
 into two branches cut from the same commit (2026-08-16): the screenshots branch
-has no migration 66, and six handler tests failed on a change that touched no
-SQL at all.
+had no migration for the version the shared database recorded, and six handler
+tests failed on a change that touched no SQL at all.
+
+(The version numbers in the quoted error are whatever was in flight that day -
+the alerting migration was later renumbered to 067 so its merge order would be
+enforced by the numbering rather than by a note. The failure mode does not
+depend on the number.)
+
+## The related trap: two open PRs both adding a migration
+
+golang-migrate applies only versions ABOVE the current one. If two branches
+each add migration NN and both merge, the second one to land is skipped
+**silently and permanently** - the build is green, the tests pass, and the
+table simply does not exist in production.
+
+Number them so that required merge order matches numeric order, and say so in
+the pull request. Do not rely on merging them in the right order by memory.
 
 ## What to do
 
