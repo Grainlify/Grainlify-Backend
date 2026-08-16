@@ -36,6 +36,8 @@ func socialFollowSuiteApp(d *db.DB) *fiber.App {
 
 	admin := app.Group("/admin", auth.RequireAuth(socialFollowSuiteJWTSecret))
 	admin.Get("/social-follow/submissions", auth.RequireRole("admin"), h.ListSubmissions())
+	admin.Get("/social-follow/reason-codes", auth.RequireRole("admin"), h.ReasonCodes())
+	admin.Post("/social-follow/submissions/bulk-approve", auth.RequireRole("admin"), h.BulkApprove())
 	admin.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), h.Approve())
 	admin.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), h.Reject())
 	admin.Post("/social-follow/submissions/:id/revoke", auth.RequireRole("admin"), h.Revoke())
@@ -464,5 +466,244 @@ func TestSocialFollow_ListShowsWhoDecided(t *testing.T) {
 	}
 	if row["decided_by_login"] != "sf-decider" {
 		t.Errorf("decided_by_login = %v, want the admin's login", row["decided_by_login"])
+	}
+}
+
+// bulkApprove posts a selection and returns the decoded per-row report.
+func bulkApprove(t *testing.T, app *fiber.App, token string, ids ...string) (int, map[string]any) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"ids": ids})
+	resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/bulk-approve", token, payload)
+	var out map[string]any
+	_ = json.Unmarshal(body, &out)
+	return resp.StatusCode, out
+}
+
+func countIn(m map[string]any, key string) int {
+	v, _ := m[key].(float64)
+	return int(v)
+}
+
+// A partial failure must be reported as a partial failure.
+//
+// The admin is told three separate facts: what was approved, what was skipped
+// because the queue moved underneath them, and what actually failed. Collapsing
+// skipped into failed sends somebody hunting a bug that is not there; reporting
+// everything as approved is the lie this endpoint exists to avoid.
+func TestSocialFollow_BulkApproveReportsEachRowsOutcome(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	adminID := seedSocialFollowUser(t, d, "sf-bulk-admin")
+	admin := socialFollowSuiteToken(t, adminID, "admin")
+
+	// One that will approve cleanly.
+	fresh := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-a"), "contributor"))
+
+	// One already approved before the batch runs - the stale-row case.
+	stale := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-b"), "contributor"))
+	if code, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+stale+"/approve", admin, nil); code.StatusCode != fiber.StatusOK {
+		t.Fatalf("pre-approve failed: %s", body)
+	}
+
+	// One already rejected - a different skip, and the one that matters most:
+	// silently re-approving it would reverse a decision somebody made.
+	rejected := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-c"), "contributor"))
+	if code, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+rejected+"/reject", admin,
+		[]byte(`{"reason_code":"unreadable"}`)); code.StatusCode != fiber.StatusOK {
+		t.Fatalf("pre-reject failed: %s", body)
+	}
+
+	// One that does not exist at all.
+	missing := uuid.NewString()
+
+	status, out := bulkApprove(t, app, admin, fresh, stale, rejected, missing)
+	if status != fiber.StatusOK {
+		t.Fatalf("bulk approve status = %d, body = %+v", status, out)
+	}
+
+	if got := countIn(out, "approved_count"); got != 1 {
+		t.Errorf("approved_count = %d, want 1", got)
+	}
+	if got := countIn(out, "skipped_count"); got != 3 {
+		t.Errorf("skipped_count = %d, want 3 (already approved, already rejected, missing)", got)
+	}
+	if got := countIn(out, "failed_count"); got != 0 {
+		t.Errorf("failed_count = %d, want 0 - none of these are failures", got)
+	}
+
+	// The skips must say WHY, and carry the status that caused them.
+	reasons := map[string]string{}
+	for _, raw := range out["skipped"].([]any) {
+		row := raw.(map[string]any)
+		reasons[row["id"].(string)] = row["reason"].(string)
+		if row["reason"] == "not_pending" && row["current_status"] == nil {
+			t.Errorf("skip for %v does not say what the row's status actually was", row["id"])
+		}
+	}
+	if reasons[stale] != "not_pending" {
+		t.Errorf("already-approved row skipped as %q, want not_pending", reasons[stale])
+	}
+	if reasons[rejected] != "not_pending" {
+		t.Errorf("already-rejected row skipped as %q, want not_pending", reasons[rejected])
+	}
+	if reasons[missing] != "not_found" {
+		t.Errorf("missing row skipped as %q, want not_found", reasons[missing])
+	}
+
+	// The rejected row must still be rejected. This is the whole point of the
+	// guard: a bulk approve must not quietly reverse somebody's decision.
+	row, found := findSubmission(t, app, admin, "rejected", rejected)
+	if !found {
+		t.Fatal("the rejected submission is no longer rejected after a bulk approve")
+	}
+	if row["status"] != "rejected" {
+		t.Errorf("status = %v, want it left rejected", row["status"])
+	}
+}
+
+// A selection larger than a page is refused outright.
+//
+// Approval grants Founding Contributor Pool eligibility, so approving what you
+// have not looked at is the thing to prevent. The UI only offers selection
+// over rows on screen; this makes that a rule rather than a convention, since
+// the endpoint is reachable without the UI.
+func TestSocialFollow_BulkApproveRefusesMoreThanAPage(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-cap"), "admin")
+
+	ids := make([]string, 0, 21)
+	for i := 0; i < 21; i++ {
+		ids = append(ids, uuid.NewString())
+	}
+	status, out := bulkApprove(t, app, admin, ids...)
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a selection larger than a page", status)
+	}
+	if out["error"] != "too_many_submissions" {
+		t.Errorf("error = %v, want too_many_submissions", out["error"])
+	}
+}
+
+func TestSocialFollow_BulkApproveRejectsAnEmptySelection(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-empty"), "admin")
+
+	status, out := bulkApprove(t, app, admin)
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if out["error"] != "no_submissions_selected" {
+		t.Errorf("error = %v", out["error"])
+	}
+}
+
+// The same id twice is one submission, and must not consume two slots of the
+// cap - otherwise a legitimate page-sized selection could be refused.
+func TestSocialFollow_BulkApproveDedupesIDs(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-dupe"), "admin")
+	id := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-dupe-c"), "contributor"))
+
+	status, out := bulkApprove(t, app, admin, id, id, id)
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %+v", status, out)
+	}
+	if got := countIn(out, "approved_count"); got != 1 {
+		t.Errorf("approved_count = %d, want 1 - the same row three times is one approval", got)
+	}
+	if got := countIn(out, "skipped_count"); got != 0 {
+		t.Errorf("skipped_count = %d, want 0 - the duplicates should never have been attempted", got)
+	}
+}
+
+// Single-row approve and reject were unguarded: acting on a stale row silently
+// overwrote the existing decision.
+func TestSocialFollow_ApproveAndRejectRefuseStaleRows(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-guard-admin"), "admin")
+	contributor := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-guard-c"), "contributor")
+	id := submitBoth(t, app, contributor)
+
+	if resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason_code":"wrong_account"}`)); resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("first reject failed: %s", body)
+	}
+
+	// Approving it now would reverse that rejection without a trace.
+	resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/approve", admin, nil)
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("approve on a rejected row = %d, want 409; body = %s", resp.StatusCode, body)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(body, &out)
+	if out["current_status"] != "rejected" {
+		t.Errorf("conflict does not report the actual status: %+v", out)
+	}
+
+	// And rejecting twice must not stack a second decision either.
+	if resp, _ := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason_code":"unreadable"}`)); resp.StatusCode != fiber.StatusConflict {
+		t.Errorf("second reject = %d, want 409", resp.StatusCode)
+	}
+}
+
+// Codes are stored alongside the note, not instead of it.
+func TestSocialFollow_RejectionStoresCodeAndNoteAndShowsBothToTheContributor(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-code-admin"), "admin")
+	contributorID := seedSocialFollowUser(t, d, "sf-code-c")
+	contributor := socialFollowSuiteToken(t, contributorID, "contributor")
+	id := submitBoth(t, app, contributor)
+
+	if resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason_code":"unreadable","reason":"the second image is a profile page"}`)); resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("reject failed: %s", body)
+	}
+
+	me := socialFollowMe(t, app, contributor)
+	if me["reason_code"] != "unreadable" {
+		t.Errorf("reason_code = %v", me["reason_code"])
+	}
+	// The note survives alongside the code - that is why both columns exist.
+	if me["decision_reason"] != "the second image is a profile page" {
+		t.Errorf("decision_reason = %v", me["decision_reason"])
+	}
+	// And the contributor reads one resolved sentence, not a code.
+	want := "Screenshot unreadable or wrong image - the second image is a profile page"
+	if me["decision_text"] != want {
+		t.Errorf("decision_text = %v, want %q", me["decision_text"], want)
+	}
+}
+
+func TestSocialFollow_OtherRequiresANoteAndBadCodesAreRefused(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-other-admin"), "admin")
+	id := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-other-c"), "contributor"))
+
+	// "Other" with no note tells the contributor their proof was rejected for
+	// "Other", which reads as an answer while saying nothing.
+	resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason_code":"other"}`))
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf(`"other" with no note = %d, want 400; body = %s`, resp.StatusCode, body)
+	}
+
+	resp, _ = notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason_code":"not_a_real_code","reason":"x"}`))
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("unknown code = %d, want 400", resp.StatusCode)
+	}
+
+	// A bare note with no code still works, so an admin bundle cached across
+	// the deploy keeps reviewing.
+	if resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
+		[]byte(`{"reason":"legacy free text"}`)); resp.StatusCode != fiber.StatusOK {
+		t.Errorf("legacy reason-only reject = %d, want 200; body = %s", resp.StatusCode, body)
 	}
 }

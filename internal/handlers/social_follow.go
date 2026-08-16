@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -177,12 +179,13 @@ func (h *SocialFollowHandler) Me() fiber.Handler {
 		var (
 			status  string
 			reason  *string
+			code    *string
 			decided *string
 		)
 		err := h.db.Pool.QueryRow(c.Context(), `
-SELECT status, decision_reason, decided_at::text
+SELECT status, decision_reason, reason_code, decided_at::text
 FROM social_follow_submissions WHERE user_id = $1
-`, userID).Scan(&status, &reason, &decided)
+`, userID).Scan(&status, &reason, &code, &decided)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.JSON(fiber.Map{
 				"platforms": socialFollowPlatforms,
@@ -200,7 +203,12 @@ FROM social_follow_submissions WHERE user_id = $1
 			"submitted":       true,
 			"status":          status,
 			"decision_reason": reason,
-			"decided_at":      decided,
+			"reason_code":     code,
+			// Resolved server-side so the contributor's page, the admin queue
+			// and the notification read the same words without the frontend
+			// holding its own copy of what a code means.
+			"decision_text": socialFollowDecisionText(code, derefOrEmpty(reason)),
+			"decided_at":    decided,
 			// The single question everything else here exists to answer.
 			"eligible": status == socialFollowApproved,
 		})
@@ -270,7 +278,7 @@ func (h *SocialFollowHandler) ListSubmissions() fiber.Handler {
 
 		query := `
 SELECT s.id, s.user_id, COALESCE(ga.login, ''), s.linkedin_screenshot, s.x_screenshot,
-       s.status, s.decision_reason, s.decided_at::text, s.created_at::text,
+       s.status, s.decision_reason, s.reason_code, s.decided_at::text, s.created_at::text,
        s.decided_by, COALESCE(dga.login, '')
 FROM social_follow_submissions s
 LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
@@ -288,14 +296,14 @@ LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
 		out := []fiber.Map{}
 		for rows.Next() {
 			var (
-				id, userID                 uuid.UUID
-				login, linkedIn, x, status string
-				reason, decidedAt          *string
-				createdAt                  string
-				decidedBy                  *uuid.UUID
-				decidedByLogin             string
+				id, userID                    uuid.UUID
+				login, linkedIn, x, status    string
+				reason, reasonCode, decidedAt *string
+				createdAt                     string
+				decidedBy                     *uuid.UUID
+				decidedByLogin                string
 			)
-			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &decidedAt, &createdAt,
+			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &reasonCode, &decidedAt, &createdAt,
 				&decidedBy, &decidedByLogin); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
 			}
@@ -303,7 +311,9 @@ LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
 				"id": id, "user_id": userID, "github_login": login,
 				"linkedin_screenshot": linkedIn, "x_screenshot": x,
 				"status": status, "decision_reason": reason,
-				"decided_at": decidedAt, "created_at": createdAt,
+				"reason_code":  reasonCode,
+				"reason_label": socialFollowReasonLabel(reasonCode),
+				"decided_at":   decidedAt, "created_at": createdAt,
 				// Who decided. The trail was already recorded on the row and in
 				// social_follow_decisions; it just was not readable from here,
 				// so the admin page could show a decision with no author.
@@ -343,7 +353,113 @@ func clampSocialFollowLimit(n int) int {
 }
 
 type socialFollowDecisionRequest struct {
+	// ReasonCode is one of socialFollowReasons. Optional for backwards
+	// compatibility: an admin bundle cached across the deploy still sends a
+	// bare Reason, and refusing it would break reviewing until every tab
+	// reloaded.
+	ReasonCode string `json:"reason_code"`
+	// Reason is the free-text note. Required when no code is given (the legacy
+	// path) and when the code is 'other', which says nothing on its own.
 	Reason string `json:"reason"`
+}
+
+// applyDecision is the whole state transition for one submission, inside one
+// transaction: guard, update, log.
+//
+// Extracted from the HTTP handler so bulk approval runs exactly the same rule
+// per row rather than a second copy of it. A bulk path that guarded
+// differently from the single path is the shape this codebase keeps getting
+// caught by, and here it would mean a queue action doing something the row
+// button would have refused.
+type socialFollowDecisionOutcome struct {
+	SubmitterID uuid.UUID
+	// PriorStatus is what the row was before, for reporting a skip honestly:
+	// "already approved" and "already rejected" are different facts and a
+	// reviewer wants to know which.
+	PriorStatus string
+}
+
+// errSocialFollowNotActionable means the row exists but is not in a state this
+// decision applies to. Distinct from "not found" and from a real failure - all
+// three are different things to tell an admin.
+var (
+	errSocialFollowNotActionable = errors.New("submission is not in an actionable state")
+	errSocialFollowNotFound      = errors.New("submission not found")
+)
+
+func (h *SocialFollowHandler) applyDecision(
+	ctx context.Context, submissionID, adminID uuid.UUID, to, reasonCode, note string,
+) (socialFollowDecisionOutcome, error) {
+	tx, err := h.db.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return socialFollowDecisionOutcome{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Read the current status first so a refusal can say what the row actually
+	// was. FOR UPDATE because two admins working the same queue is the normal
+	// case, not the exotic one, and without it both can approve the same row
+	// and both get told they did it.
+	var prior string
+	var submitterID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+SELECT status, user_id FROM social_follow_submissions WHERE id = $1 FOR UPDATE
+`, submissionID).Scan(&prior, &submitterID); errors.Is(err, pgx.ErrNoRows) {
+		return socialFollowDecisionOutcome{}, errSocialFollowNotFound
+	} else if err != nil {
+		return socialFollowDecisionOutcome{}, err
+	}
+
+	// What each decision may act on.
+	//
+	// Approve and reject were previously unguarded: acting on a stale row
+	// silently overwrote whatever decision was already there, fired a fresh
+	// notification, and left nothing indicating it had happened. Rare with a
+	// single button; likely the moment a reviewer selects a page and acts on
+	// all of it, because the queue moves underneath them.
+	if !socialFollowCanTransition(prior, to) {
+		return socialFollowDecisionOutcome{PriorStatus: prior}, errSocialFollowNotActionable
+	}
+
+	if _, err := tx.Exec(ctx, `
+UPDATE social_follow_submissions
+SET status = $1, decided_by = $2, decided_at = now(),
+    decision_reason = NULLIF($3, ''), reason_code = NULLIF($4, ''), updated_at = now()
+WHERE id = $5
+`, to, adminID, note, reasonCode, submissionID); err != nil {
+		return socialFollowDecisionOutcome{PriorStatus: prior}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO social_follow_decisions (submission_id, decision, reason, reason_code, actor_user_id)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5)
+`, submissionID, to, note, reasonCode, adminID); err != nil {
+		return socialFollowDecisionOutcome{PriorStatus: prior}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return socialFollowDecisionOutcome{PriorStatus: prior}, err
+	}
+	return socialFollowDecisionOutcome{SubmitterID: submitterID, PriorStatus: prior}, nil
+}
+
+// socialFollowCanTransition is the single definition of which decisions apply
+// to which current state.
+//
+//	pending  -> approved, rejected     a queued submission gets decided
+//	approved -> revoked                eligibility is withdrawn after the fact
+//
+// Everything else is refused. Re-approving an approval is a no-op dressed up
+// as an action; approving something already rejected silently reverses a
+// decision somebody made for a reason.
+func socialFollowCanTransition(from, to string) bool {
+	switch to {
+	case socialFollowApproved, socialFollowRejected:
+		return from == socialFollowPending
+	case socialFollowRevoked:
+		return from == socialFollowApproved
+	}
+	return false
 }
 
 // decide applies one decision to a whole submission and logs it.
@@ -365,58 +481,79 @@ func (h *SocialFollowHandler) decide(c *fiber.Ctx, to string, requireReason bool
 
 	var req socialFollowDecisionRequest
 	_ = c.BodyParser(&req)
-	reason := strings.TrimSpace(req.Reason)
-	if requireReason && reason == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "reason_required",
-			"message": "A reason is recorded and shown to the contributor, so this decision needs one.",
-		})
+	code, note, verr := validateSocialFollowReason(req.ReasonCode, req.Reason, requireReason)
+	if verr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(verr)
 	}
 
-	tx, err := h.db.Pool.BeginTx(c.Context(), pgx.TxOptions{})
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
-	}
-	defer func() { _ = tx.Rollback(c.Context()) }()
-
-	// Revocation applies only to something currently approved. Revoking a
-	// pending or rejected submission is meaningless and almost certainly a
-	// misclick on the wrong row.
-	var submitterID uuid.UUID
-	q := `
-UPDATE social_follow_submissions
-SET status = $1, decided_by = $2, decided_at = now(), decision_reason = NULLIF($3, ''), updated_at = now()
-WHERE id = $4`
-	if to == socialFollowRevoked {
-		q += ` AND status = '` + socialFollowApproved + `'`
-	}
-	q += ` RETURNING user_id`
-
-	if err := tx.QueryRow(c.Context(), q, to, adminID, reason, submissionID).Scan(&submitterID); errors.Is(err, pgx.ErrNoRows) {
-		if to == socialFollowRevoked {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error":   "not_approved",
-				"message": "Only an approved submission can be revoked.",
-			})
-		}
+	outcome, err := h.applyDecision(c.Context(), submissionID, adminID, to, code, note)
+	switch {
+	case errors.Is(err, errSocialFollowNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "submission_not_found"})
-	} else if err != nil {
+	case errors.Is(err, errSocialFollowNotActionable):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":          "not_actionable",
+			"current_status": outcome.PriorStatus,
+			"message":        socialFollowNotActionableMessage(to, outcome.PriorStatus),
+		})
+	case err != nil:
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
 	}
 
-	if _, err := tx.Exec(c.Context(), `
-INSERT INTO social_follow_decisions (submission_id, decision, reason, actor_user_id)
-VALUES ($1, $2, NULLIF($3, ''), $4)
-`, submissionID, to, reason, adminID); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
-	}
-
-	if err := tx.Commit(c.Context()); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
-	}
-
-	h.notifyDecision(c, submitterID, to, reason)
+	h.notifyDecision(c, outcome.SubmitterID, to, socialFollowDecisionText(nullableString(code), note))
 	return c.JSON(fiber.Map{"ok": true, "status": to})
+}
+
+func socialFollowNotActionableMessage(to, prior string) string {
+	if to == socialFollowRevoked {
+		return "Only an approved submission can be revoked. This one is " + prior + "."
+	}
+	return "This submission is already " + prior + ", so it was not changed. Reload the queue to see its current state."
+}
+
+// validateSocialFollowReason checks the code/note pair and returns what to
+// store. Returns a ready-to-send error body rather than an error string,
+// because each case needs its own message.
+func validateSocialFollowReason(rawCode, rawNote string, required bool) (string, string, fiber.Map) {
+	code := strings.TrimSpace(rawCode)
+	note := strings.TrimSpace(rawNote)
+
+	if code == "" {
+		// Legacy path: no code, so the note carries the whole decision and has
+		// to be there when a reason is required at all.
+		if required && note == "" {
+			return "", "", fiber.Map{
+				"error":   "reason_required",
+				"message": "A reason is recorded and shown to the contributor, so this decision needs one.",
+			}
+		}
+		return "", note, nil
+	}
+
+	reason, ok := socialFollowReasonByCode(code)
+	if !ok {
+		return "", "", fiber.Map{
+			"error":   "invalid_reason_code",
+			"message": "That is not one of the rejection reasons.",
+		}
+	}
+	// 'other' names no problem, so without a note the contributor is told
+	// their proof was rejected for "Other" - which is worse than no reason,
+	// because it looks like an answer.
+	if reason.NeedsNote && note == "" {
+		return "", "", fiber.Map{
+			"error":   "note_required",
+			"message": "\"Other\" needs a note saying what was wrong - the contributor sees it.",
+		}
+	}
+	return code, note, nil
+}
+
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // notifyDecision tells the contributor what happened. Best-effort: a failed
@@ -465,4 +602,147 @@ func (h *SocialFollowHandler) Reject() fiber.Handler {
 // revocation dispute turns on.
 func (h *SocialFollowHandler) Revoke() fiber.Handler {
 	return func(c *fiber.Ctx) error { return h.decide(c, socialFollowRevoked, true) }
+}
+
+type socialFollowBulkRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// BulkApprove handles POST /admin/social-follow/submissions/bulk-approve.
+//
+// # Why the batch is capped at a page
+//
+// An admin must not be able to approve submissions they have not looked at.
+// Approval grants Founding Contributor Pool eligibility, so "select everything
+// pending and press approve" is a way to hand out eligibility without seeing
+// the proof. The UI only offers selection over the rows on screen; this cap is
+// what makes that a rule rather than a convention, since the endpoint is
+// reachable without the UI.
+//
+// # Why every row is its own transaction
+//
+// One stale row must not discard nineteen valid approvals. Wrapping the batch
+// in a single transaction would mean the whole thing rolls back because one
+// submission was resubmitted while the reviewer was reading, which is both
+// annoying and misleading - the nineteen really were fine.
+//
+// # Why the response has three lists
+//
+//	approved  the decision was applied
+//	skipped   the row was not in a state to be approved, or is gone
+//	failed    something went wrong and it is worth retrying
+//
+// Skipped and failed are deliberately not merged. A skip is the system working
+// - the queue moved under the reviewer - and needs no action. A failure is the
+// system not working. Reporting "3 failed" for three rows that were simply
+// already approved sends somebody looking for a bug that is not there, and
+// reporting "20 approved" when 3 were not is the lie this endpoint must never
+// tell.
+func (h *SocialFollowHandler) BulkApprove() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+		adminID, ok := h.userID(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
+		}
+
+		var req socialFollowBulkRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_body"})
+		}
+
+		// Dedupe before the cap, so the same id sent twice cannot push a
+		// legitimate selection over the limit.
+		seen := map[uuid.UUID]bool{}
+		ids := []uuid.UUID{}
+		for _, raw := range req.IDs {
+			id, err := uuid.Parse(strings.TrimSpace(raw))
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_submission_id"})
+			}
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "no_submissions_selected",
+				"message": "Select at least one submission.",
+			})
+		}
+		if len(ids) > socialFollowMaxPageSize {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "too_many_submissions",
+				"message": "Approve at most one page at a time - eligibility should only be granted for proof somebody has looked at.",
+				"max":     socialFollowMaxPageSize,
+			})
+		}
+
+		approved := []fiber.Map{}
+		skipped := []fiber.Map{}
+		failed := []fiber.Map{}
+		notify := []uuid.UUID{}
+
+		for _, id := range ids {
+			outcome, err := h.applyDecision(c.Context(), id, adminID, socialFollowApproved, "", "")
+			switch {
+			case errors.Is(err, errSocialFollowNotFound):
+				skipped = append(skipped, fiber.Map{"id": id, "reason": "not_found"})
+			case errors.Is(err, errSocialFollowNotActionable):
+				skipped = append(skipped, fiber.Map{
+					"id": id, "reason": "not_pending", "current_status": outcome.PriorStatus,
+				})
+			case err != nil:
+				slog.Error("social_follow: bulk approve failed for one submission",
+					"submission_id", id, "admin_id", adminID, "error", err)
+				failed = append(failed, fiber.Map{"id": id})
+			default:
+				approved = append(approved, fiber.Map{"id": id})
+				notify = append(notify, outcome.SubmitterID)
+			}
+		}
+
+		// After every decision is durable. A notification failure must not make
+		// an approval look like it did not happen.
+		for _, submitter := range notify {
+			h.notifyDecision(c, submitter, socialFollowApproved, "")
+		}
+
+		return c.JSON(fiber.Map{
+			"approved": approved,
+			"skipped":  skipped,
+			"failed":   failed,
+			// Counts alongside the lists so the UI's summary line cannot drift
+			// from the lists it is summarising.
+			"approved_count": len(approved),
+			"skipped_count":  len(skipped),
+			"failed_count":   len(failed),
+		})
+	}
+}
+
+// ReasonCodes handles GET /admin/social-follow/reason-codes.
+//
+// The picker is built from this rather than from a list in the frontend, so
+// the codes and their wording exist once. A TypeScript copy would be the same
+// rule written down twice, and the contributor's status page, the notification
+// and the admin picker would then be free to disagree about what a code means.
+func (h *SocialFollowHandler) ReasonCodes() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		out := make([]fiber.Map, 0, len(socialFollowReasons))
+		for _, r := range socialFollowReasons {
+			out = append(out, fiber.Map{"code": r.Code, "label": r.Label, "needs_note": r.NeedsNote})
+		}
+		return c.JSON(fiber.Map{"reason_codes": out})
+	}
+}
+
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
