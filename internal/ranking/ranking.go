@@ -135,6 +135,33 @@ func (o Options) ecosystem() *string {
 //     github-actions[bot], and grantfox-oss[bot] - the last being Grainlify's
 //     own app, which was ranking against the humans it exists to serve.
 //
+// Forks are not eligible, anywhere.
+//
+// A fork is a repository the contributor controls. They can open a pull
+// request against it and merge it themselves, with nobody reviewing anything.
+// Ranking counts merged pull requests precisely because a merge means somebody
+// else accepted the work - so counting merges inside a fork converts the one
+// number the platform claims is unfarmable into a number anyone can mint on
+// demand: install the App on all repositories, fork any repo, merge into it.
+//
+// Written once and referenced by every query below rather than retyped. The
+// eligibility predicate is the thing an unrelated change is most likely to
+// "simplify", and TestEligibilityPredicateAppliesEverywhere reads this file to
+// assert no verified-project gate exists without it.
+//
+// COALESCE treats an undetermined project as eligible. That is deliberate and
+// it is the weaker of two bad options: making unknown ineligible empties the
+// leaderboard for every contributor the moment the column is added and before
+// the backfill has run. Every write path sets is_fork at creation and the
+// backfill resolves existing rows, so unknown is a transient state rather than
+// a resting one - and BackfillForks logs loudly if any live verified project
+// is still unknown after it runs.
+const notAFork = "AND COALESCE(p.is_fork, FALSE) = FALSE"
+
+// notAForkP2 is the same predicate for the p2 alias used by the org open-issue
+// subquery. Two spellings, one meaning - the test below checks both.
+const notAForkP2 = "AND COALESCE(p2.is_fork, FALSE) = FALSE"
+
 // Placeholders are fixed so every caller shares them: $1 = window start
 // (nullable timestamptz), $2 = ecosystem slug (nullable text).
 const rankedContributors = `
@@ -146,6 +173,7 @@ WITH merges AS (
     JOIN projects p ON p.id = pr.project_id
     WHERE p.status = 'verified'
       AND p.deleted_at IS NULL
+      ` + notAFork + `
       AND (pr.merged = TRUE OR pr.merged_at_github IS NOT NULL)
       AND pr.author_login IS NOT NULL
       AND pr.author_login <> ''
@@ -298,6 +326,7 @@ WITH merges AS (
     JOIN projects p ON p.id = pr.project_id
     WHERE p.status = 'verified'
       AND p.deleted_at IS NULL
+      ` + notAFork + `
       AND SPLIT_PART(p.github_full_name, '/', 2) <> '.github'
       AND (pr.merged = TRUE OR pr.merged_at_github IS NOT NULL)
       AND pr.author_login IS NOT NULL
@@ -368,6 +397,7 @@ SELECT r.rank,
            WHERE gi.state = 'open'
              AND p2.status = 'verified'
              AND p2.deleted_at IS NULL
+             ` + notAForkP2 + `
              AND LOWER(SPLIT_PART(p2.github_full_name, '/', 1)) = r.org_key
        ), 0) AS open_issues,
        r.ecosystems
