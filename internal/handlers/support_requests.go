@@ -74,16 +74,7 @@ func NewSupportRequestsHandler(cfg config.Config, d *db.DB) *SupportRequestsHand
 		// down must not affect the other, and neither can fail the request.
 		sinks: []SupportSink{
 			newDiscordSupportSink(cfg.DiscordBugReportWebhookURL),
-			newTelegramSupportSink(telegramSinkConfig{
-				BotToken:    cfg.TelegramBotToken,
-				ChatID:      cfg.TelegramChatID,
-				AdminUserID: cfg.TelegramAdminUserID,
-				TopicBugs:   cfg.TelegramTopicBugs,
-				TopicKYC:    cfg.TelegramTopicKYC,
-				TopicIdeas:  cfg.TelegramTopicIdeas,
-				TopicHelp:   cfg.TelegramTopicHelp,
-				TopicOther:  cfg.TelegramTopicOther,
-			}),
+			newTelegramSupportSink(telegramSinkConfigFrom(cfg)),
 		},
 	}
 }

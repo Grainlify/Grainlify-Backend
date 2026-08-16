@@ -20,10 +20,14 @@ type Repo struct {
 		Login     string `json:"login"`
 		AvatarURL string `json:"avatar_url"`
 	} `json:"owner"`
-	FullName        string    `json:"full_name"`
-	HTMLURL         string    `json:"html_url"`
-	Homepage        string    `json:"homepage"`
-	Private         bool      `json:"private"`
+	FullName string `json:"full_name"`
+	HTMLURL  string `json:"html_url"`
+	Homepage string `json:"homepage"`
+	Private  bool   `json:"private"`
+	// Fork is the repo being a fork of another. Not to be confused with
+	// ForksCount below, which is how many forks this repo HAS - the opposite
+	// relationship, and an easy one to reach for by mistake.
+	Fork            bool      `json:"fork"`
 	StargazersCount int       `json:"stargazers_count"`
 	ForksCount      int       `json:"forks_count"`
 	OpenIssuesCount int       `json:"open_issues_count"`
