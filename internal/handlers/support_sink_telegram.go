@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jagadeesh/grainlify/backend/internal/config"
 )
 
 // Telegram sink for support requests.
@@ -252,4 +254,23 @@ func (s *telegramSupportSink) deliverToTopic(ctx context.Context, r SupportReque
 		return SupportDeliveryResult{}, err
 	}
 	return SupportDeliveryResult{RoutedToFallback: true}, nil
+}
+
+// telegramSinkConfigFrom builds the sink config from app config.
+//
+// Extracted so every caller reads the same seven variables. The KYC review
+// alerter needs this sink too, and a second literal would be a second chance
+// to forget TELEGRAM_ADMIN_USER_ID - which is the field that decides whether
+// a KYC message reaches anybody at all.
+func telegramSinkConfigFrom(cfg config.Config) telegramSinkConfig {
+	return telegramSinkConfig{
+		BotToken:    cfg.TelegramBotToken,
+		ChatID:      cfg.TelegramChatID,
+		AdminUserID: cfg.TelegramAdminUserID,
+		TopicBugs:   cfg.TelegramTopicBugs,
+		TopicKYC:    cfg.TelegramTopicKYC,
+		TopicIdeas:  cfg.TelegramTopicIdeas,
+		TopicHelp:   cfg.TelegramTopicHelp,
+		TopicOther:  cfg.TelegramTopicOther,
+	}
 }

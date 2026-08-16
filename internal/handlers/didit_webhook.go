@@ -51,10 +51,13 @@ func verifyDiditSignature(secret string, body []byte, signatureHeader string, ti
 }
 
 type DiditWebhookHandler struct {
-	cfg    config.Config
-	db     *db.DB
-	didit  *didit.Client
-	notify *notifications.Service
+	// The same Telegram sink support requests use. KYC content is DM-only
+	// there, so this inherits that rule rather than inventing a second one.
+	reviewSink SupportSink
+	cfg        config.Config
+	db         *db.DB
+	didit      *didit.Client
+	notify     *notifications.Service
 }
 
 func NewDiditWebhookHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *DiditWebhookHandler {
@@ -63,10 +66,11 @@ func NewDiditWebhookHandler(cfg config.Config, d *db.DB, notify *notifications.S
 		diditClient = didit.NewClient(cfg.DiditAPIKey)
 	}
 	return &DiditWebhookHandler{
-		cfg:    cfg,
-		db:     d,
-		didit:  diditClient,
-		notify: notify,
+		cfg:        cfg,
+		db:         d,
+		didit:      diditClient,
+		reviewSink: newTelegramSupportSink(telegramSinkConfigFrom(cfg)),
+		notify:     notify,
 	}
 }
 
@@ -200,6 +204,16 @@ WHERE id = $3
 
 		if kycStatus == "verified" && previousStatus != "verified" {
 			maybeCompleteReferral(c.Context(), h.db, h.notify, userID)
+		}
+
+		// A session entering review is waiting on US - Didit routes it to the
+		// integrator's queue, not their own. Alerting is deduped on session id
+		// rather than gated on the previous status: a redelivery must not
+		// produce a second message, and an alert missed because the first
+		// delivery was dropped must still be sendable when a later one
+		// arrives. Didit retries twice and then gives up.
+		if kycStatus == "in_review" {
+			alertAdminOfKYCReview(c.Context(), h.db, h.reviewSink, userID, sessionID, "webhook")
 		}
 
 		// For GET requests (callback redirect), redirect to success page
