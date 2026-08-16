@@ -37,6 +37,7 @@ func socialFollowSuiteApp(d *db.DB) *fiber.App {
 	admin := app.Group("/admin", auth.RequireAuth(socialFollowSuiteJWTSecret))
 	admin.Get("/social-follow/submissions", auth.RequireRole("admin"), h.ListSubmissions())
 	admin.Get("/social-follow/reason-codes", auth.RequireRole("admin"), h.ReasonCodes())
+	admin.Get("/social-follow/submissions/:id/proofs", auth.RequireRole("admin"), h.Proofs())
 	admin.Post("/social-follow/submissions/bulk-approve", auth.RequireRole("admin"), h.BulkApprove())
 	admin.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), h.Approve())
 	admin.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), h.Reject())
@@ -255,15 +256,16 @@ func TestSocialFollow_ResubmissionReturnsToPendingAndKeepsTheHistory(t *testing.
 	}
 }
 
-// TestSocialFollow_AdminListShowsBothScreenshotsForOneDecision: a reviewer
-// judging one platform without the other in view is making half a decision.
-func TestSocialFollow_AdminListShowsBothScreenshotsForOneDecision(t *testing.T) {
+// The list carries what a COLLAPSED row needs and nothing else.
+//
+// This test used to assert the opposite - that both screenshots were in the
+// list - because the review UI rendered them inline. Rows are collapsed by
+// default now and the proofs are fetched per submission when one is expanded.
+func TestSocialFollow_AdminListCarriesNoScreenshots(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	userID := adminSuiteInsertUser(t, d, "contributor")
-	token := socialFollowSuiteToken(t, userID, "contributor")
-	adminID := adminSuiteInsertUser(t, d, "admin")
-	adminToken := socialFollowSuiteToken(t, adminID, "admin")
+	token := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-list-c"), "contributor")
+	adminToken := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-list-admin"), "admin")
 
 	id := submitBoth(t, app, token)
 
@@ -271,11 +273,26 @@ func TestSocialFollow_AdminListShowsBothScreenshotsForOneDecision(t *testing.T) 
 	if !found {
 		t.Fatal("submission missing from the pending review queue")
 	}
-	if row["linkedin_screenshot"] == "" || row["x_screenshot"] == "" {
-		t.Error("a queued submission is missing one of its screenshots")
-	}
 	if row["status"] != "pending" {
 		t.Errorf("status = %v, want pending", row["status"])
+	}
+
+	// The inverted premise. This test used to assert both screenshots were
+	// present in the list, because the review UI rendered them inline. Rows
+	// are collapsed by default now and the proofs are fetched per submission,
+	// so a screenshot appearing here is the 775kB-a-row payload coming back
+	// rather than a feature working.
+	for _, k := range []string{"linkedin_screenshot", "x_screenshot"} {
+		if v, present := row[k]; present && v != nil && v != "" {
+			t.Errorf("the list response still carries %s; that is ~775kB a row and the reason this endpoint was 7.7MB a page", k)
+		}
+	}
+	// What a compact row does need, so it can be identified without expanding.
+	if row["github_login"] == "" {
+		t.Error("no github_login: a collapsed row has nothing else to identify the person by")
+	}
+	if _, present := row["avatar_url"]; !present {
+		t.Error("no avatar_url in the list response")
 	}
 }
 
@@ -372,16 +389,22 @@ func TestSocialFollow_ListIsPagedAndReportsWhatIsNotOnThePage(t *testing.T) {
 	app := socialFollowSuiteApp(d)
 	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-admin"), "admin")
 
+	// Ask for a deliberately small page rather than relying on the default.
+	// This test used to hardcode 10, which broke the moment the page size
+	// changed - and it changed for a good reason. What it actually cares
+	// about is that a page is bounded and that the caller is told what is
+	// beyond it, neither of which is a specific number.
+	const pageSize = 5
 	const submitted = 13
 	for i := 0; i < submitted; i++ {
 		u := seedSocialFollowUser(t, d, "sf-pager")
 		submitBoth(t, app, socialFollowSuiteToken(t, u, "contributor"))
 	}
 
-	first := adminList(t, app, admin, "?status=pending")
+	first := adminList(t, app, admin, fmt.Sprintf("?status=pending&limit=%d", pageSize))
 	rows := listRows(t, first)
-	if len(rows) != 10 {
-		t.Errorf("default page returned %d rows, want the 10-row page size", len(rows))
+	if len(rows) != pageSize {
+		t.Errorf("page returned %d rows, want the %d requested", len(rows), pageSize)
 	}
 	if total, _ := first["total"].(float64); int(total) < submitted {
 		t.Errorf("total = %v, want at least the %d just submitted", first["total"], submitted)
@@ -393,7 +416,7 @@ func TestSocialFollow_ListIsPagedAndReportsWhatIsNotOnThePage(t *testing.T) {
 		t.Error("has_more = false with more rows than fit on a page")
 	}
 
-	second := adminList(t, app, admin, "?status=pending&offset=10")
+	second := adminList(t, app, admin, fmt.Sprintf("?status=pending&limit=%d&offset=%d", pageSize, pageSize))
 	if len(listRows(t, second)) == 0 {
 		t.Error("offset returned nothing; the second page is unreachable")
 	}
@@ -419,20 +442,28 @@ func TestSocialFollow_PageSizeIsClampedNotObeyed(t *testing.T) {
 		submitBoth(t, app, socialFollowSuiteToken(t, u, "contributor"))
 	}
 
-	for _, tc := range []struct {
-		query   string
-		wantMax int
-	}{
-		{"?status=pending&limit=100000", 20}, // capped, not honoured
-		{"?status=pending&limit=-1", 10},     // nonsense means "unset", not "no rows"
-		{"?status=pending&limit=0", 10},
-	} {
-		got := adminList(t, app, admin, tc.query)
-		if l, _ := got["limit"].(float64); int(l) > tc.wantMax {
-			t.Errorf("%s: limit = %v, want at most %d", tc.query, got["limit"], tc.wantMax)
-		}
-		if len(listRows(t, got)) > tc.wantMax {
-			t.Errorf("%s: returned %d rows, want at most %d", tc.query, len(listRows(t, got)), tc.wantMax)
+	// The ceiling is read back from the API rather than named here. Hardcoding
+	// it made this test fail when the page size legitimately rose once the
+	// screenshots left the response; what it is really asserting is that an
+	// absurd request does not get what it asked for, and that is true at any
+	// ceiling.
+	const absurd = 100000
+	capped := adminList(t, app, admin, fmt.Sprintf("?status=pending&limit=%d", absurd))
+	ceiling, _ := capped["limit"].(float64)
+	if int(ceiling) >= absurd {
+		t.Errorf("limit = %v: an absurd page size was honoured rather than capped", capped["limit"])
+	}
+	if len(listRows(t, capped)) > int(ceiling) {
+		t.Errorf("returned %d rows against a stated limit of %v", len(listRows(t, capped)), capped["limit"])
+	}
+
+	// Nonsense means "unset", not "no rows": both fall back to the default,
+	// which has to be a real page rather than zero.
+	for _, q := range []string{"?status=pending&limit=-1", "?status=pending&limit=0"} {
+		got := adminList(t, app, admin, q)
+		l, _ := got["limit"].(float64)
+		if l <= 0 || int(l) > int(ceiling) {
+			t.Errorf("%s: limit = %v, want the default (>0 and <= the %v ceiling)", q, got["limit"], ceiling)
 		}
 	}
 }
@@ -572,8 +603,10 @@ func TestSocialFollow_BulkApproveRefusesMoreThanAPage(t *testing.T) {
 	app := socialFollowSuiteApp(d)
 	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-cap"), "admin")
 
-	ids := make([]string, 0, 21)
-	for i := 0; i < 21; i++ {
+	// One more than a full page, whatever a full page currently is.
+	pageLimit, _ := adminList(t, app, admin, "?status=pending&limit=100000")["limit"].(float64)
+	ids := make([]string, 0, int(pageLimit)+1)
+	for i := 0; i < int(pageLimit)+1; i++ {
 		ids = append(ids, uuid.NewString())
 	}
 	status, out := bulkApprove(t, app, admin, ids...)
@@ -705,5 +738,54 @@ func TestSocialFollow_OtherRequiresANoteAndBadCodesAreRefused(t *testing.T) {
 	if resp, body := notifSuiteDo(t, app, "POST", "/admin/social-follow/submissions/"+id+"/reject", admin,
 		[]byte(`{"reason":"legacy free text"}`)); resp.StatusCode != fiber.StatusOK {
 		t.Errorf("legacy reason-only reject = %d, want 200; body = %s", resp.StatusCode, body)
+	}
+}
+
+// The proofs a reviewer sees when they expand a row.
+//
+// Both platforms in one response, always. A decision covers both, and the
+// atomic submission model exists so nobody has to make half of one - an
+// endpoint that could return a single platform's proof would put that back.
+func TestSocialFollow_ProofsReturnsBothScreenshotsTogether(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-admin"), "admin")
+	contributor := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-c"), "contributor")
+	id := submitBoth(t, app, contributor)
+
+	resp, body := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions/"+id+"/proofs", admin, nil)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("proofs status = %d, body = %s", resp.StatusCode, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["linkedin_screenshot"] != pngDataURL {
+		t.Errorf("linkedin_screenshot = %v", out["linkedin_screenshot"])
+	}
+	if out["x_screenshot"] != pngDataURL {
+		t.Errorf("x_screenshot = %v", out["x_screenshot"])
+	}
+}
+
+func TestSocialFollow_ProofsRequiresAdminAndAValidID(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+	contributorID := seedSocialFollowUser(t, d, "sf-proofs-guard")
+	contributor := socialFollowSuiteToken(t, contributorID, "contributor")
+	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-guard-admin"), "admin")
+	id := submitBoth(t, app, contributor)
+
+	// These are photographs of somebody's social accounts. An unguessable UUID
+	// is not authorisation, and the submitter's own token is not an admin's.
+	if resp, _ := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions/"+id+"/proofs", contributor, nil); resp.StatusCode == fiber.StatusOK {
+		t.Error("a contributor could read the proofs endpoint")
+	}
+	if resp, _ := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions/"+uuid.NewString()+"/proofs", admin, nil); resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("unknown id = %d, want 404", resp.StatusCode)
+	}
+	if resp, _ := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions/not-a-uuid/proofs", admin, nil); resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("malformed id = %d, want 400", resp.StatusCode)
 	}
 }

@@ -436,6 +436,9 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Registered before the ":id" routes: Fiber would otherwise match
 	// "bulk-approve" as an :id and fail on the UUID parse.
 	adminGroup.Post("/social-follow/submissions/bulk-approve", requireAdmin, socialFollow.BulkApprove())
+	// Registered before the ":id" action routes for the same reason
+	// bulk-approve is: Fiber matches in declaration order.
+	adminGroup.Get("/social-follow/submissions/:id/proofs", requireAdmin, socialFollow.Proofs())
 	adminGroup.Post("/social-follow/submissions/:id/approve", requireAdmin, socialFollow.Approve())
 	adminGroup.Post("/social-follow/submissions/:id/reject", requireAdmin, socialFollow.Reject())
 	// Eligibility is re-read at settlement, so an approval has to be
