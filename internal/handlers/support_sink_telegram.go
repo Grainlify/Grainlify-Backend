@@ -196,7 +196,8 @@ func (s *telegramSupportSink) deliverKYCToAdmin(ctx context.Context, r SupportRe
 		truncateRunes(r.Message, 3000),
 	}, "\n")
 
-	if _, err := s.sendMessage(ctx, s.adminUserID, "", text); err != nil {
+	sent, err := s.sendMessage(ctx, s.adminUserID, "", text+screenshotNoteForDM(r))
+	if err != nil {
 		// Loud and specific. This is the case where the information reaches
 		// nobody: there is no public post for KYC, so a failed DM means the
 		// request exists only in the database, with no human notified.
@@ -207,6 +208,10 @@ func (s *telegramSupportSink) deliverKYCToAdmin(ctx context.Context, r SupportRe
 			"hint", "if this is a 403 the admin has not started a chat with the bot, or has blocked it")
 		return SupportDeliveryResult{}, err
 	}
+
+	// A KYC screenshot is the likeliest of all of them to show an identity
+	// document, and this is the one path that never touches the group.
+	s.attachScreenshot(ctx, r, s.adminUserID, "", messageIDOf(sent))
 	return SupportDeliveryResult{}, nil
 }
 
@@ -228,6 +233,8 @@ func (s *telegramSupportSink) deliverToTopic(ctx context.Context, r SupportReque
 		"Support ID: " + r.ID.String(),
 	}, "\n")
 
+	text += screenshotNoteForTopic(r)
+
 	threadID := s.topics[r.Category]
 	if threadID == "" {
 		slog.Warn("telegram: no topic configured for category, using General",
@@ -235,10 +242,15 @@ func (s *telegramSupportSink) deliverToTopic(ctx context.Context, r SupportReque
 		if _, err := s.sendMessage(ctx, s.chatID, "", text); err != nil {
 			return SupportDeliveryResult{}, err
 		}
+		s.deliverScreenshotPrivately(ctx, r)
 		return SupportDeliveryResult{RoutedToFallback: true}, nil
 	}
 
 	if _, err := s.sendMessage(ctx, s.chatID, threadID, text); err == nil {
+		// Only after the report is delivered, and never into this chat: the
+		// image goes to the admin DM. Nothing below this line can cost the
+		// reporter their message.
+		s.deliverScreenshotPrivately(ctx, r)
 		return SupportDeliveryResult{}, nil
 	} else {
 		// A deleted topic, or a bot that lost can_manage_topics, must not lose
@@ -253,6 +265,7 @@ func (s *telegramSupportSink) deliverToTopic(ctx context.Context, r SupportReque
 			"category", r.Category, "support_id", r.ID, "error", err)
 		return SupportDeliveryResult{}, err
 	}
+	s.deliverScreenshotPrivately(ctx, r)
 	return SupportDeliveryResult{RoutedToFallback: true}, nil
 }
 
@@ -273,4 +286,14 @@ func telegramSinkConfigFrom(cfg config.Config) telegramSinkConfig {
 		TopicHelp:   cfg.TelegramTopicHelp,
 		TopicOther:  cfg.TelegramTopicOther,
 	}
+}
+
+// messageIDOf reads the id of a message we just sent, for replying to it.
+// Absent is not an error: the reply link is a convenience, and sendFile is
+// told to send without it rather than fail.
+func messageIDOf(resp *telegramResponse) int64 {
+	if resp == nil || resp.Result == nil {
+		return 0
+	}
+	return resp.Result.MessageID
 }
