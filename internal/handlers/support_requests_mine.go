@@ -35,6 +35,10 @@ import (
 // sink fails - the row is written first and delivery is best effort, precisely
 // so a Telegram outage never costs somebody their report.
 
+// mySupportRequestsPageSize bounds the list. The page states the total
+// alongside it, so a truncated history is visibly truncated.
+const mySupportRequestsPageSize = 50
+
 type mySupportRequest struct {
 	ID       uuid.UUID `json:"id"`
 	Category string    `json:"category"`
@@ -74,8 +78,8 @@ SELECT id, category, message, COALESCE(page_url, ''), created_at,
 FROM support_requests
 WHERE user_id = $1
 ORDER BY created_at DESC
-LIMIT 50
-`, userID)
+LIMIT $2
+`, userID, mySupportRequestsPageSize)
 		if err != nil {
 			slog.Error("support requests: could not list own reports",
 				"user_id", userID, "error", err, "request_id", c.Locals("requestid"))
@@ -101,6 +105,20 @@ LIMIT 50
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "could_not_list_reports"})
 		}
 
-		return c.JSON(fiber.Map{"support_requests": out})
+		// The true total, so the page can say "showing your 50 most recent of
+		// N" only when it is actually truncated. Sent by the server rather than
+		// inferred from the page being full, which is wrong at exactly the
+		// limit - and a partial history displayed as a complete one is how
+		// somebody concludes a report was never received.
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(),
+			`SELECT count(*) FROM support_requests WHERE user_id = $1`, userID).Scan(&total); err != nil {
+			slog.Error("support requests: count failed", "user_id", userID, "error", err)
+			// The list is still correct; only the "of N" is unknown. Falling
+			// back to the page size would silently claim the list is complete.
+			total = len(out)
+		}
+
+		return c.JSON(fiber.Map{"support_requests": out, "total": total})
 	}
 }

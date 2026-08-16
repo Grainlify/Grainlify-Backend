@@ -172,3 +172,33 @@ func TestSupportMine_RequiresAToken(t *testing.T) {
 		t.Errorf("status = %d without a token, want 401", status)
 	}
 }
+
+// A truncated history must be visibly truncated. Showing a partial list as a
+// complete one is how somebody concludes a report was never received - and
+// inferring truncation from "the page is full" is wrong at exactly the limit,
+// which is why the server sends the real total.
+func TestSupportMine_ReportsTheTrueTotalSoTruncationIsVisible(t *testing.T) {
+	d := testDB(t)
+	app := mineSuiteApp(d)
+	me := adminSuiteInsertUser(t, d, "contributor")
+
+	const seeded = 53 // deliberately just over one page
+	for i := 0; i < seeded; i++ {
+		mineSuiteSeed(t, d, &me, "bug", "report "+uuid.NewString()[:8], true)
+	}
+
+	status, body := adminSuiteDo(t, app, "GET", "/support-requests/mine", adminSuiteToken(t, me, "contributor"), nil)
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	list, _ := body["support_requests"].([]any)
+	total, _ := body["total"].(float64)
+
+	if len(list) != 50 {
+		t.Errorf("returned %d rows, want the page size of 50", len(list))
+	}
+	if int(total) != seeded {
+		t.Errorf("total = %v, want %d - the page cannot say \"50 of %d\" without it, "+
+			"and a list of exactly 50 is indistinguishable from a complete one", total, seeded, seeded)
+	}
+}
