@@ -202,3 +202,68 @@ func TestSupportMine_ReportsTheTrueTotalSoTruncationIsVisible(t *testing.T) {
 			"and a list of exactly 50 is indistinguishable from a complete one", total, seeded, seeded)
 	}
 }
+
+// The end-to-end property the past-reports section depends on.
+//
+// Create is deliberately unauthenticated - anonymous reports are legitimate,
+// and somebody who cannot sign in is the person most likely to need support -
+// so it reads the token itself when one is present. That made the failure
+// silent: the frontend never sent the header, every report saved with a null
+// user_id, and all 8 production rows were anonymous including three from
+// auth-gated pages. Nothing errored, because "no token" is a valid state.
+//
+// This asserts the whole path rather than either half: submit WITH a token,
+// and the report must come back from the caller's own history. A test that
+// only checked the insert would have passed throughout the outage.
+func TestSupport_ASignedInReportIsAttributedAndAppearsInTheirHistory(t *testing.T) {
+	d := testDB(t)
+
+	app := fiber.New()
+	h := handlers.NewSupportRequestsHandler(config.Config{JWTSecret: adminSuiteJWTSecret}, d)
+	app.Post("/support-requests", h.Create())
+	app.Get("/support-requests/mine", auth.RequireAuth(adminSuiteJWTSecret), h.Mine())
+
+	me := adminSuiteInsertUser(t, d, "contributor")
+	token := adminSuiteToken(t, me, "contributor")
+	message := "signed-in report " + uuid.NewString()[:8]
+
+	status, body := adminSuiteDo(t, app, "POST", "/support-requests", token,
+		map[string]string{"category": "bug", "message": message})
+	if status != fiber.StatusOK && status != fiber.StatusCreated {
+		t.Fatalf("submit: status = %d (body=%v)", status, body)
+	}
+	id, _ := body["support_id"].(string)
+	if id == "" {
+		t.Fatalf("no support_id returned: %v", body)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Pool.Exec(context.Background(), `DELETE FROM support_requests WHERE id = $1`, id)
+	})
+
+	// The row must carry the reporter. A null here is the production bug.
+	var userID *uuid.UUID
+	if err := d.Pool.QueryRow(context.Background(),
+		`SELECT user_id FROM support_requests WHERE id = $1`, id).Scan(&userID); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if userID == nil {
+		t.Fatal("a report submitted WITH a valid token was stored as anonymous - " +
+			"this is the production failure: every signed-in report was unactionable")
+	}
+	if *userID != me {
+		t.Fatalf("report attributed to %s, want the caller %s", userID, me)
+	}
+
+	// And it must be reachable from their own history, which is what the
+	// support page renders.
+	var found bool
+	for _, r := range mineSuiteList(t, app, token) {
+		if r["id"] == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the report was attributed but does not appear in the caller's history; " +
+			"the past-reports section would show nothing")
+	}
+}
