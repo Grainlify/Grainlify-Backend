@@ -441,3 +441,64 @@ Two further reasons it is not urgent:
 spellings, asserting the count equals the sum. Note that a pre-check of the
 form "skip the ranking when contributions_count == 0" is NOT safe while this
 exists: a mixed-case contributor can be ranked while their count reads zero.
+
+# Not a code failure: `no migration found for version NN` after a branch switch
+
+## What you will see
+
+Switching between a branch that adds a migration and one that does not, then
+running the suite, fails every test that touches the database with:
+
+```
+migrate.Up: no migration found for version 66: read down for version 66 .: file does not exist
+```
+
+It looks like the new migration is broken. It is not. The local test database
+is shared across branches, `schema_migrations` still records version 66 from
+the branch that had it, and golang-migrate refuses to reconcile a recorded
+version whose file is absent from the tree it is now looking at.
+
+Hit while splitting the KYC review alerting and the Telegram screenshot work
+into two branches cut from the same commit (2026-08-16): the screenshots branch
+had no migration for the version the shared database recorded, and six handler
+tests failed on a change that touched no SQL at all.
+
+(The version numbers in the quoted error are whatever was in flight that day -
+the alerting migration was later renumbered to 067 so its merge order would be
+enforced by the numbering rather than by a note. The failure mode does not
+depend on the number.)
+
+## The related trap: two open PRs both adding a migration
+
+golang-migrate applies only versions ABOVE the current one. If two branches
+each add migration NN and both merge, the second one to land is skipped
+**silently and permanently** - the build is green, the tests pass, and the
+table simply does not exist in production.
+
+Number them so that required merge order matches numeric order, and say so in
+the pull request. Do not rely on merging them in the right order by memory.
+
+## What to do
+
+Drop and recreate the database:
+
+```sh
+psql "postgres://$(whoami)@localhost:5432/postgres?sslmode=disable" \
+  -c "DROP DATABASE IF EXISTS grainlify_test;" -c "CREATE DATABASE grainlify_test;"
+```
+
+**Never hand-edit `schema_migrations`.** Deleting the row makes the error go
+away while leaving the table the migration created, so the next `Up` runs
+against a schema that already has half of it — and that failure appears later,
+somewhere unrelated, as a duplicate-object error nobody connects to this.
+
+## Why this is not being fixed
+
+The real fix is one test database per branch or worktree, keyed off the branch
+name in `TEST_DB_URL`. That is worth doing when several branches are in flight
+at once; with one branch at a time the drop is a few seconds and the failure is
+loud rather than silent.
+
+The reason it is written down is that the error names a migration and a version
+number, so the obvious first move is to go and read the migration — which is
+correct, and wastes the time it takes to establish that.

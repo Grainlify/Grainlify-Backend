@@ -173,6 +173,25 @@ func main() {
 			_ = assignmentRunner.Run(context.Background())
 		}()
 
+		// Backstop for a Didit webhook that never arrived.
+		//
+		// A session flagged "In Review" is routed to OUR review queue, not
+		// Didit's, and nothing surfaced that queue - three sessions sat there
+		// for up to 22 hours and were found only when a contributor
+		// complained. The webhook now alerts on the transition, but Didit
+		// retries twice and then drops the delivery, and the only other thing
+		// that re-reads a session is the status poll, which runs when the
+		// contributor opens their billing page. Somebody told to wait has no
+		// reason to open it.
+		//
+		// Alerts only. It never changes a status, and the claim table makes it
+		// silent for any session already alerted about.
+		kycSweeper := handlers.NewKYCReviewSweeper(cfg, database)
+		go func() {
+			slog.Info("kyc review sweeper started")
+			kycSweeper.Run(context.Background())
+		}()
+
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)
 		// No need for periodic polling
 	} else {
