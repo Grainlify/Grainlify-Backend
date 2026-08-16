@@ -120,7 +120,6 @@ RETURNING (SELECT role FROM users WHERE id = $1)
 	}
 }
 
-
 // recordRoleAudit writes one row to admin_role_audit.
 //
 // Best-effort and never fails the caller: the role change itself is already
