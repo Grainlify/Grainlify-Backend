@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -206,10 +207,37 @@ FROM social_follow_submissions WHERE user_id = $1
 	}
 }
 
+// Page size for the review queue.
+//
+// Small on purpose. Each row carries BOTH screenshots as base64 data URLs,
+// which measure around 787kB per row in production - so a page is roughly
+// 8MB of JSON, and the unpaginated version of this endpoint was returning
+// 17MB for 22 pending rows and growing with the queue.
+//
+// The screenshots have to be here: a reviewer decides by looking at them, and
+// the whole point of the atomic model is that both are in view for one
+// decision. Bounding the page is what stops the response growing without
+// limit; getting the images out of the JSON entirely needs an object store
+// and is tracked separately.
+const (
+	socialFollowPageSize = 10
+	// The ceiling is deliberately close to the default. At ~787kB a row the
+	// default page is already ~7.7MB, so a generous maximum would let a caller
+	// ask for a response BIGGER than the 17MB one this change exists to
+	// remove - a cap that permits a worse outcome than the bug is not a cap.
+	// 20 puts the worst case at ~15MB, strictly better than today and no
+	// longer growing with the queue.
+	socialFollowMaxPageSize = 20
+)
+
 // ListSubmissions handles GET /admin/social-follow/submissions.
 //
 // Returns both screenshots so a reviewer can see them side by side and make
 // one decision, rather than judging one platform without the other in view.
+//
+// Paginated, and the page bound is load-bearing beyond payload size: a
+// reviewer can only select what is on screen, so what "on screen" means has
+// to be a real, small number rather than "however many are pending".
 func (h *SocialFollowHandler) ListSubmissions() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -219,18 +247,37 @@ func (h *SocialFollowHandler) ListSubmissions() fiber.Handler {
 		// Defaults to the review queue; ?status=all for the full picture,
 		// which is what a revocation is decided from.
 		filter := c.Query("status", socialFollowPending)
-		query := `
-SELECT s.id, s.user_id, COALESCE(ga.login, ''), s.linkedin_screenshot, s.x_screenshot,
-       s.status, s.decision_reason, s.decided_at::text, s.created_at::text
-FROM social_follow_submissions s
-LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
-`
+		limit := clampSocialFollowLimit(c.QueryInt("limit", socialFollowPageSize))
+		offset := c.QueryInt("offset", 0)
+		if offset < 0 {
+			offset = 0
+		}
+
+		where := ""
 		args := []any{}
 		if filter != "all" {
-			query += " WHERE s.status = $1"
+			where = " WHERE s.status = $1"
 			args = append(args, filter)
 		}
-		query += " ORDER BY s.created_at ASC"
+
+		// Total for the SAME filter, so the UI can say "page 2 of 3" and, more
+		// importantly, say how many rows exist that are not on this page.
+		var total int
+		if err := h.db.Pool.QueryRow(c.Context(),
+			`SELECT count(*) FROM social_follow_submissions s`+where, args...).Scan(&total); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
+		}
+
+		query := `
+SELECT s.id, s.user_id, COALESCE(ga.login, ''), s.linkedin_screenshot, s.x_screenshot,
+       s.status, s.decision_reason, s.decided_at::text, s.created_at::text,
+       s.decided_by, COALESCE(dga.login, '')
+FROM social_follow_submissions s
+LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
+LEFT JOIN github_accounts dga ON dga.user_id = s.decided_by` + where + `
+ORDER BY s.created_at ASC
+LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+		args = append(args, limit, offset)
 
 		rows, err := h.db.Pool.Query(c.Context(), query, args...)
 		if err != nil {
@@ -245,8 +292,11 @@ LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
 				login, linkedIn, x, status string
 				reason, decidedAt          *string
 				createdAt                  string
+				decidedBy                  *uuid.UUID
+				decidedByLogin             string
 			)
-			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &decidedAt, &createdAt); err != nil {
+			if err := rows.Scan(&id, &userID, &login, &linkedIn, &x, &status, &reason, &decidedAt, &createdAt,
+				&decidedBy, &decidedByLogin); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
 			}
 			out = append(out, fiber.Map{
@@ -254,10 +304,42 @@ LEFT JOIN github_accounts ga ON ga.user_id = s.user_id
 				"linkedin_screenshot": linkedIn, "x_screenshot": x,
 				"status": status, "decision_reason": reason,
 				"decided_at": decidedAt, "created_at": createdAt,
+				// Who decided. The trail was already recorded on the row and in
+				// social_follow_decisions; it just was not readable from here,
+				// so the admin page could show a decision with no author.
+				"decided_by":       decidedBy,
+				"decided_by_login": decidedByLogin,
 			})
 		}
-		return c.JSON(fiber.Map{"submissions": out})
+		if err := rows.Err(); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list_failed"})
+		}
+
+		return c.JSON(fiber.Map{
+			"submissions": out,
+			"total":       total,
+			"limit":       limit,
+			"offset":      offset,
+			// Explicit rather than left to the caller to derive from
+			// offset+len(submissions) < total. A bulk action's confirmation
+			// copy depends on this being right.
+			"has_more": offset+len(out) < total,
+		})
 	}
+}
+
+// clampSocialFollowLimit keeps a caller-supplied page size inside sane bounds.
+// A limit of 0 or less means "unset", not "no rows", and anything above the
+// maximum is capped rather than rejected - the point is that no request can
+// ask for the whole queue in one response again.
+func clampSocialFollowLimit(n int) int {
+	if n <= 0 {
+		return socialFollowPageSize
+	}
+	if n > socialFollowMaxPageSize {
+		return socialFollowMaxPageSize
+	}
+	return n
 }
 
 type socialFollowDecisionRequest struct {
