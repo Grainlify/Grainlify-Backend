@@ -20,6 +20,18 @@ type leafVector struct {
 	LeafContributor string `json:"leaf_contributor"`
 	LeafMaintainer  string `json:"leaf_maintainer"`
 
+	// AptosLeafVector is the same construction with Aptos's address encoding:
+	// 32 raw bytes rather than a canonical string, because an Aptos address has
+	// several valid spellings and a Stellar strkey has one.
+	AptosLeafVector struct {
+		Inputs struct {
+			ClaimAddressHex string `json:"claim_address_hex"`
+			IdentityHashHex string `json:"identity_hash_hex"`
+			AmountMinor     int64  `json:"amount_minor"`
+		} `json:"inputs"`
+		Leaf string `json:"leaf"`
+	} `json:"aptos_leaf_vector"`
+
 	// TreeVectors pin the internal-node rules, which the leaf digests above
 	// do not reach. Kept in the same file and loaded by the same helper so
 	// there is one artefact to keep in step with the contract, not two.

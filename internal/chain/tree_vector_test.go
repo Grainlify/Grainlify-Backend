@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"math/big"
 	"testing"
 )
 
@@ -244,4 +245,50 @@ func atoiOrFail(t *testing.T, s string) int {
 		n = n*10 + int(r-'0')
 	}
 	return n
+}
+
+// TestAptosLeafVector_MatchesTheMoveContract is the leaf-level pin for Aptos,
+// as distinct from the tree-level vectors above.
+//
+// It exists because three mutations survived the Move suite before it did: the
+// leaf prefix, the pool byte, and the amount's left padding could each be
+// changed with every Move test still passing. The Move tests asserted that the
+// leaf was deterministic and that different inputs gave different digests, and
+// any consistent-but-wrong construction satisfies both. Nothing external pinned
+// the value, which is the same hole the original leaf vector was created to fill
+// - reopened on a third chain.
+//
+// The address is the 32 raw bytes on Aptos rather than a canonical string,
+// because an Aptos address has several valid spellings (0x1, 0x01, the padded
+// 64-digit form) while a Stellar strkey has exactly one. A leaf that depended on
+// which spelling somebody typed would fail permanently against a root that
+// cannot be corrected.
+//
+// Note what this test does NOT do: it does not reimplement the encoding. Go
+// already writes uint16(len(addr)) followed by addr, so passing the raw bytes as
+// ClaimAddress emits the Aptos layout through the production builder. The digest
+// below therefore comes from the code that will build a real root.
+func TestAptosLeafVector_MatchesTheMoveContract(t *testing.T) {
+	v := loadLeafVector(t)
+	in := v.AptosLeafVector.Inputs
+
+	if v.AptosLeafVector.Leaf == "" {
+		t.Fatal("vector file has no aptos leaf; the Move leaf is unpinned")
+	}
+
+	addr := mustHex(t, in.ClaimAddressHex)
+	id := mustHex(t, in.IdentityHashHex)
+
+	leaf := ClaimLeaf{
+		Pool:         PoolKindContributor,
+		IdentityHash: id,
+		ClaimAddress: string(addr[:]),
+		AmountMinor:  big.NewInt(in.AmountMinor),
+	}
+
+	got := leaf.Hash()
+	if hex.EncodeToString(got[:]) != v.AptosLeafVector.Leaf {
+		t.Errorf("aptos leaf digest\n got  %s\n want %s",
+			hex.EncodeToString(got[:]), v.AptosLeafVector.Leaf)
+	}
 }
