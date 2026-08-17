@@ -130,11 +130,13 @@ type InstallationRepository struct {
 }
 
 // ListInstallationRepositories lists all repositories accessible to an installation
-func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, installationToken string) ([]InstallationRepository, error) {
+// ListInstallationRepositories returns the repositories an installation can
+// see, and whether the maintainer selected them or granted all of them.
+func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, installationToken string) ([]InstallationRepository, string, error) {
 	url := "https://api.github.com/installation/repositories"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+installationToken)
@@ -145,22 +147,26 @@ func (c *GitHubAppClient) ListInstallationRepositories(ctx context.Context, inst
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
-		return nil, fmt.Errorf("failed to list repositories: status %d, error: %v", resp.StatusCode, errBody)
+		return nil, "", fmt.Errorf("failed to list repositories: status %d, error: %v", resp.StatusCode, errBody)
 	}
 
 	var result struct {
 		Repositories []InstallationRepository `json:"repositories"`
+		// "all" or "selected". Returned on every response and dropped until
+		// now, which meant a maintainer who picked specific repositories was
+		// indexed as though they had handed over everything.
+		RepositorySelection string `json:"repository_selection"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return result.Repositories, nil
+	return result.Repositories, result.RepositorySelection, nil
 }
