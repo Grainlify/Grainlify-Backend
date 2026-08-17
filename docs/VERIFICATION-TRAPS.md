@@ -139,3 +139,37 @@ and fixed.
 Caught by asking "who else holds one of these?", not by a test. The fix
 translates the legacy parameter into the shared selection and strips it, and
 there is now an assertion for that too.
+
+## 7. "Who else holds a copy of this?"
+
+The question that found a break no test could.
+
+Removing `DiscoverPage`'s `?dIssue=` parameter was correct inside the codebase:
+one overlay, one URL, every caller updated, tests green. What it missed is that
+the old URLs had already left the building. Anyone who copied a Discover issue
+link has one in a chat, and after the change it opened nothing at all -
+silently, with no error and no redirect.
+
+**No assertion could have caught it, because the affected population is not in
+the codebase.** The tests covered every call site; the broken links were in
+other people's messages.
+
+Nothing server-side had ever generated one, which is what made it survivable -
+but that was luck, and establishing it took a search rather than an assumption.
+Had a notification carried that parameter, those would have been live links we
+sent people.
+
+**Ask it whenever an identifier, route or parameter changes shape:**
+
+- URLs people may have bookmarked or shared
+- links inside notifications, emails, Telegram or Discord messages already sent
+- identifiers quoted back to us in support requests
+- anything printed in a doc, a grant application, or a screenshot
+
+The fix is usually a translation rather than continued support: accept the old
+form, convert it, and strip it so the URL self-heals. That keeps one canonical
+shape without stranding what is already out there.
+
+**The general rule:** tests cover the code you changed. This question covers
+the people who already have the old version. Only one of those is visible from
+inside the repository.
