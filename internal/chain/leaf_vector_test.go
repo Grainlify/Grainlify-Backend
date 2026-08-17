@@ -19,6 +19,20 @@ type leafVector struct {
 	} `json:"inputs"`
 	LeafContributor string `json:"leaf_contributor"`
 	LeafMaintainer  string `json:"leaf_maintainer"`
+
+	// TreeVectors pin the internal-node rules, which the leaf digests above
+	// do not reach. Kept in the same file and loaded by the same helper so
+	// there is one artefact to keep in step with the contract, not two.
+	TreeVectors struct {
+		LeavesSample map[string]string `json:"leaves_sample"`
+		Roots        map[string]string `json:"roots"`
+		Proof        struct {
+			LeafCount    int      `json:"leaf_count"`
+			Leaf         string   `json:"leaf"`
+			Siblings     []string `json:"siblings"`
+			ExpectedRoot string   `json:"expected_root"`
+		} `json:"proof"`
+	} `json:"tree_vectors"`
 }
 
 func loadLeafVector(t *testing.T) leafVector {

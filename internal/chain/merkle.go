@@ -228,12 +228,33 @@ func BuildMerkleTree(leaves []ClaimLeaf) (*MerkleTree, error) {
 	for _, l := range leaves {
 		hashed = append(hashed, l.Hash())
 	}
-	sort.Slice(hashed, func(i, j int) bool {
-		return bytes.Compare(hashed[i][:], hashed[j][:]) < 0
+	return buildFromDigests(hashed)
+}
+
+// buildFromDigests is the tree stage on its own, taking leaf digests that have
+// already been computed.
+//
+// Split out so the cross-implementation tree vectors exercise **this** code
+// rather than a copy of it. A vector that pins a test-local reimplementation
+// pins nothing: it is a second implementation of the same rules, which is
+// precisely the drift the vectors exist to catch. The contract's own test
+// helper still has that weakness, and is compensated for by claiming through
+// the real verifier rather than by asserting a root alone.
+//
+// The caller passes digests in whatever order it has them; sorting is this
+// function's job and is one of the three rules the vectors pin.
+func buildFromDigests(hashed [][32]byte) (*MerkleTree, error) {
+	if len(hashed) == 0 {
+		return nil, ErrEmptyTree
+	}
+	sorted := make([][32]byte, len(hashed))
+	copy(sorted, hashed)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
 	})
 
-	level := make([][32]byte, len(hashed))
-	copy(level, hashed)
+	level := make([][32]byte, len(sorted))
+	copy(level, sorted)
 	for len(level) > 1 {
 		next := make([][32]byte, 0, (len(level)+1)/2)
 		for i := 0; i < len(level); i += 2 {
@@ -245,12 +266,17 @@ func BuildMerkleTree(leaves []ClaimLeaf) (*MerkleTree, error) {
 		}
 		level = next
 	}
-	return &MerkleTree{Root: level[0], leaves: hashed}, nil
+	return &MerkleTree{Root: level[0], leaves: sorted}, nil
 }
 
 // Proof returns the sibling path for one leaf.
 func (t *MerkleTree) Proof(leaf ClaimLeaf) ([][32]byte, error) {
-	target := leaf.Hash()
+	return t.proofForDigest(leaf.Hash())
+}
+
+// proofForDigest is Proof by leaf digest, so the pinned proof vector walks the
+// same code a real claim does rather than a test-local copy of it.
+func (t *MerkleTree) proofForDigest(target [32]byte) ([][32]byte, error) {
 	idx := -1
 	for i, h := range t.leaves {
 		if h == target {
