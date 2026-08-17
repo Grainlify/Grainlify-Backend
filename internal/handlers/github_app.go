@@ -406,17 +406,39 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 			ecosystemID = &defaultEcosystemID
 		}
 
+		// description and tags come from the GitHub payload.
+		//
+		// InstallationRepository has decoded Description and Topics all along;
+		// the INSERT simply never listed description, so 0 of 106 projects
+		// awaiting metadata had one and every one of them was invisible to the
+		// catalogue until a human typed it in. Third field found decoded and
+		// dropped, after fork and owner.type.
+		//
+		// This deliberately does NOT touch needs_metadata. That flag is set by
+		// a human opening the setup form, and it is currently the only signal
+		// of intent anywhere in the pipeline: everything arrives via "All
+		// repositories" and nobody selects anything, so it is the one thing
+		// separating a chosen project from a swept-in one. Populating the
+		// fields means the form has less to ask for - it does not mean the
+		// project is live.
+		//
 		// Only insert public repos; private repos are never added
 		err = h.db.Pool.QueryRow(ctx, `
-INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, status, github_app_installation_id, needs_metadata)
-VALUES ($1, $2, $3, $4, $5, 'pending_verification', $6, true)
+INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, description, status, github_app_installation_id, needs_metadata)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification', $7, true)
 ON CONFLICT (github_full_name) DO UPDATE SET
   owner_user_id = EXCLUDED.owner_user_id,
   github_app_installation_id = EXCLUDED.github_app_installation_id,
+  -- Refreshed on every sync, but never blanked: GitHub omits these for some
+  -- repos, and overwriting a description a maintainer typed with an empty
+  -- string would be a worse outcome than a stale one.
+  description = COALESCE(NULLIF(EXCLUDED.description, ''), projects.description),
+  tags = CASE WHEN EXCLUDED.tags::text NOT IN ('[]', 'null')
+              THEN EXCLUDED.tags ELSE projects.tags END,
   deleted_at = NULL,
   updated_at = now()
 RETURNING id
-`, userID, repo.FullName, ecosystemID, repo.Language, tagsJSON, installationID).Scan(&projectID)
+`, userID, repo.FullName, ecosystemID, repo.Language, tagsJSON, repo.Description, installationID).Scan(&projectID)
 		if err != nil {
 			slog.Error("failed to create project",
 				"error", err,

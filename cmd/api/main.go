@@ -217,6 +217,10 @@ func main() {
 	// command. It is a no-op once every row is resolved.
 	go handlers.NewForkBackfiller(cfg, database).Run(context.Background())
 
+	// Fill in description and topics for projects indexed before the sync
+	// stored them. Deliberately does not touch needs_metadata - see the type.
+	go handlers.NewMetadataBackfiller(cfg, database).Run(context.Background())
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("starting http server", "step", "9", "action", "starting_http_server",
