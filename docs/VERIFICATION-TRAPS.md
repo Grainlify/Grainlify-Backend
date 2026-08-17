@@ -8,6 +8,14 @@ proxy was empty, absent, or mismatched for a reason unrelated to correctness.
 An error is loud. An empty result looks like a pass. That is what makes these
 expensive: the check does not fail, it *agrees with you*.
 
+**Entry 7 is a different family and is kept here deliberately.** Traps 1-6 are
+checks that produced a confident wrong answer, and every one of them is
+recoverable — you re-run the check properly and learn the truth. Trap 7 is the
+opposite failure: nothing gave a wrong answer, because nothing was recorded at
+all. The cause was knowable at the moment it happened and is now permanently
+unrecoverable. A bad check wastes an afternoon; discarded evidence costs you the
+incident.
+
 ## 1. Shell flags that silently return nothing
 
 ### `grep -l -n`
@@ -139,3 +147,85 @@ and fixed.
 Caught by asking "who else holds one of these?", not by a test. The fix
 translates the legacy parameter into the shared selection and strips it, and
 there is now an assertion for that too.
+
+## 7. Evidence discarded before it was written down
+
+Signup returned `{"error":"github_user_fetch_failed"}` in production for
+roughly seven minutes of active failures spread over half an hour, reported
+twice by contributors. Diagnosing it took an hour and produced no proof,
+because the one fact that would have answered it in a second had been read and
+thrown away at the moment it arrived.
+
+The callback made two GitHub calls and had two failure exits:
+
+```go
+tr, err := github.ExchangeCode(...)
+if err != nil {
+    return c.Status(401).JSON(fiber.Map{"error": "token_exchange_failed"})   // logged nothing
+}
+u, err := gh.GetUser(c.Context(), tr.AccessToken)
+if err != nil {
+    return c.Status(401).JSON(fiber.Map{"error": "github_user_fetch_failed"}) // logged nothing
+}
+```
+
+and underneath, the client reduced GitHub's entire answer to a number:
+
+```go
+return User{}, fmt.Errorf("github /user failed: status %d", resp.StatusCode)
+```
+
+Three separate losses, each sufficient on its own:
+
+1. **Neither exit logged.** Between "using redirect_uri from state" and the
+   final redirect there was not one line. In the logs a failed callback was
+   indistinguishable from a *different* failed callback with a different cause.
+2. **The body was dropped.** GitHub says what went wrong in plain text —
+   `Bad credentials`, `You have exceeded a secondary rate limit`.
+3. **The rate-limit headers were dropped.** `X-RateLimit-Remaining` is the one
+   field that separates "we are out of budget" from every other 403.
+
+`status 403` on its own is four incidents wearing one name — a revoked token,
+the primary rate limit, a secondary per-IP limit, and GitHub degraded. They
+need opposite responses: rotate a credential, back off, slow the caller down,
+wait. The bare code distinguishes none of them, and GitHub had already told us
+which.
+
+What the investigation could do was *eliminate*: not a deploy (nothing had
+touched the path in fourteen commits), not the client secret (three exchanges
+succeeded in the same window), not the scopes (granted matched requested), not
+first-time user creation (that returns 500, and every failure logged 401), not
+a timeout (1.2-1.5s against a 10s limit). That narrowed it to a live GitHub
+incident, corroborated by 72 unrelated 403s from the same host in two minutes.
+
+**Strong, and still circumstantial.** The actual status code for those four
+failures does not exist anywhere. It was in a variable named `err` and was
+never written down.
+
+**The guard.** At every external boundary, log the upstream status, the bounded
+body, and the rate-limit budget *before* returning our own error name. One
+error name per upstream call, and never a name that could cover two.
+
+Bounded matters: an error path must not be a way for a remote host to write an
+unbounded string into our logs. 1KB is plenty for a message.
+
+There is one exception and it is worth stating, because the obvious fix
+introduces a worse bug. **A boundary whose success response contains a
+credential must never have a formatter that prints its body.** GitHub's token
+endpoint returns the access token on success and an error payload on failure —
+both with HTTP 200 — so `ExchangeCode` deliberately does *not* use the shared
+`APIError` type and surfaces only the parsed `error` / `error_description`
+fields. `TestExchangeCode_ErrorNeverContainsTheToken` pins that, because "log
+the body" applied uniformly would have leaked every user's token into the logs.
+
+### The related smell: one error name covering several causes
+
+Worth checking for separately, because it survives even when logging is good.
+The name is a promise about what failed, and a name broader than the call it
+wraps sends the next person to the wrong place. During this incident the
+question "does `github_user_fetch_failed` also cover the `/user/emails` call?"
+was reasonable, load-bearing, and took real work to answer — it did not, but it
+easily could have, and nothing in the code said so.
+
+The check is mechanical: for each error name, list the calls that can produce
+it. If the list has more than one entry, split the name.
