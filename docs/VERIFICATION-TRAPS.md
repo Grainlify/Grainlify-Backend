@@ -8,6 +8,102 @@ proxy was empty, absent, or mismatched for a reason unrelated to correctness.
 An error is loud. An empty result looks like a pass. That is what makes these
 expensive: the check does not fail, it *agrees with you*.
 
+## The through-line
+
+Read this before the entries, because it is what they have in common and it
+predicts where the next one will be.
+
+**Every expensive mistake in this file happened in a position nothing checked.
+Every cheap one happened in a position something did.**
+
+The comparison is not hypothetical. In two days of one workstream:
+
+| Mistake | Checked by | Cost |
+|---|---|---|
+| An invalid hex digit in a Move address literal (three times) | The compiler | A minute each. Non-events. |
+| A mutation patch that changed the file but not the behaviour | Nothing | Reported as a survivor, read as a coverage gap, wrong |
+| A test that skipped while the suite said `ok` | Nothing | Ran green in CI and in every worktree, checking two fewer things than anyone believed |
+| A harness recording build errors as kills | Nothing | Four consecutive false greens, on the exact gap under investigation |
+| Tests quietly encoding overfunding as supported | Nothing | Passed correctly for months; surfaced only when a rule tightened |
+
+The same carelessness produced all of them. What differed was whether it landed
+somewhere a machine would object.
+
+**So the lesson is not "be more careful."** Carefulness is what was already being
+applied, and it distributes evenly across positions that check and positions that
+do not. The lesson is:
+
+> **Move the thing you have to remember into a position that refuses.**
+
+Three examples from the same workstream, each replacing a rule with a mechanism:
+
+- *"Fund the leaf total, never the pool total"* was a runbook line. It became
+  `assert!(total == funded_total)` — and an operator reading the runbook can no
+  longer get it wrong, because the chain declines.
+- *"Never retry a claim row"* was going to be a branch in the reconciler. It
+  became a database constraint that makes such a row unstorable, plus a type that
+  cannot be constructed from one. The reconciler's query cannot return the
+  dangerous row, so its author does not need to know the danger exists.
+- *"Never log the salt"* was a doc comment. It became a type whose `String()` and
+  `MarshalJSON` return a redaction, so the accidental log line is harmless.
+
+When you catch yourself writing a rule — in a runbook, a comment, a review note —
+ask what would have to be true for the rule to be unnecessary. Sometimes nothing
+reasonable. Often it is one constraint, one type, or one assertion, and then the
+rule becomes an explanation of a mechanism rather than the mechanism itself.
+
+### The positive instance, because everything else here is a failure
+
+Every numbered entry below is a check that failed to refuse. This is the same
+mechanism working, recorded so the file contains at least one example of what
+success looks like.
+
+The first sponsored claim, submitted against a deployed contract, aborted:
+
+```
+Move abort in ...::escrow: E_BAD_DIGEST_LENGTH(0xa)
+```
+
+The identity hash had been passed to the SDK as the string `"0x2222…"` rather
+than as 32 bytes. BCS encoded it as a string, and the module received something
+the wrong length.
+
+**What that assertion bought.** Without it, `leaf_hash` would have hashed the
+wrong bytes perfectly happily. The leaf would have been well-formed and wrong, the
+proof would not have verified, and the visible symptom would have been a Merkle
+mismatch — sending whoever debugged it into the tree construction, which is the
+most-tested code in this workstream and would not have been at fault.
+
+On a real event it is worse than a wasted afternoon. A root built from
+string-encoded identity hashes publishes without complaint, commits permanently,
+and produces leaves **nobody can ever claim**. The failure would surface at the
+first genuine claim, against a root that cannot be corrected.
+
+Instead: a named abort, on the first attempt, pointing at the exact argument.
+
+`assert!(vector::length(&identity_hash) == DIGEST_LEN, ...)` is the kind of line
+that reads as defensive noise in review — an obvious invariant, checked at a
+boundary the caller controls. It is worth remembering what it actually did the
+first time real bytes went through, next time one of these looks removable.
+
+**The corollary, and the reason this file exists:** where a mechanism is not
+possible, the check that stands in for it must be verified to actually check. That
+is what every entry below is about.
+
+**Entry 12 names a family rather than an incident.** Several of the entries
+before it are instances of one shape - a test that passes for a reason its author
+did not choose - and it is worth recognising the third occurrence as a repeat
+rather than filing it as something new. The individual entries stay where they
+are, because each also teaches its own mechanism.
+
+**Entry 7 is a different family and is kept here deliberately.** Traps 1-6, 8 and 9
+are checks that produced a confident wrong answer, and every one of them is
+recoverable — you re-run the check properly and learn the truth. Trap 7 is the
+opposite failure: nothing gave a wrong answer, because nothing was recorded at
+all. The cause was knowable at the moment it happened and is now permanently
+unrecoverable. A bad check wastes an afternoon; discarded evidence costs you the
+incident.
+
 **Entry 7 is a different family and is kept here deliberately.** Traps 1-6 are
 checks that produced a confident wrong answer, and every one of them is
 recoverable — you re-run the check properly and learn the truth. Trap 7 is the
@@ -363,6 +459,109 @@ Three of those four were only conclusive on a second attempt. Retrying is
 cheap; a mutation recorded as caught when it never ran is a test you now trust
 for no reason.
 
+### The escalation: a restore that deleted the baseline
+
+The case above miscounted one patch. The same mistake in the restore step
+miscounts **every patch after the first**, and reports a wall of green.
+
+Mutation-testing the Merkle tree construction, the harness restored each
+mutated file with `git checkout internal/chain/merkle.go`. That file had
+uncommitted changes — the refactor the new vector tests depend on — so the
+restore reverted it to `HEAD` and discarded the refactor. From the second
+mutation onward the package did not compile, and the run reported:
+
+```
+M5b nodePrefix 0x01 -> 0x09            -> FAIL     recorded as killed
+M7  leaf sort ascending -> descending  -> FAIL     recorded as killed
+M4  duplicate odd node, not promote    -> FAIL     recorded as killed
+M8  remove the leaf sort entirely      -> FAIL     recorded as killed
+```
+
+Four kills, none of them real; the mutations never ran. And the wall is what
+makes this worse than a single miscount — four consecutive greens are far more
+convincing than one, and these four were reporting that the exact gap under
+investigation had been closed.
+
+Caught by noticing that changing a `const` from `0x01` to `0x09` cannot
+plausibly break a build. The tell was in the output the whole time: `[build
+failed]` where the other lines said `--- FAIL: TestName`.
+
+Two guards. The second is the general one and reaches well past mutation
+testing:
+
+- **The harness must distinguish "the test failed" from "it did not compile"**
+  and must never count the second as a kill. Match the build-failure string
+  explicitly; do not infer from an exit code. Relatedly, the exit status of a
+  pipeline is the *last* command's — `go test ./... | grep -v '^ok'` exits 0
+  whenever grep does, whatever the tests did.
+- **`git checkout <file>` is not an undo.** It restores from the index or
+  `HEAD`, not from the state the file held a moment ago. While writing the
+  tests you are about to mutate — which is the normal condition — the tree has
+  uncommitted work in it and `git checkout` is a destructive operation. Restore
+  from a copy instead:
+
+```sh
+cp internal/chain/merkle.go "$SCRATCH/merkle.go.baseline"
+# ... mutate, run, read ...
+cp "$SCRATCH/merkle.go.baseline" internal/chain/merkle.go
+```
+
+**Re-establish the baseline before the first mutation and after the last.** A
+harness that never checks its own starting point cannot tell a mutation that
+survived from a tree that was already broken.
+
+### The third variant: a patch that changed the file but not the behaviour
+
+Two entries above cover a build error recorded as a kill, and a broken restore
+recorded as four. This is the mirror image, and it is the one that looks like a
+finding.
+
+Mutation-testing the sweep, a patch meant to check that sweeping does not clear
+the claimed markers was written as:
+
+```move
+transfer_out(escrow, amount);
+let _ = &escrow.claimed;      // intent: clear the table
+```
+
+It applied cleanly, compiled, and the suite passed — recorded as a survivor, and
+read as "the evidence-intact property is untested". It is not: the patch clears
+nothing, so the run measured nothing. Rewritten three ways that genuinely destroy
+the evidence — zeroing `root_total`, unsetting `root`, zeroing `claimed_total` —
+all three die against the same test that had appeared not to cover them.
+
+Worth noting what nearly hid it: `sweep_unclaimed` takes an immutable borrow, so
+the type system already forbids touching the markers. Every real version of that
+mutation had to change `borrow_global` to `borrow_global_mut` first. A structural
+guarantee and a tested one look identical from the outside, and only one of them
+was being exercised.
+
+**A no-op patch reporting a survivor and a build error reporting a kill are the
+same bug wearing different clothes:** in both cases the harness reported on
+something other than what it claimed to measure. The tell was identical all three
+times — *a change that should obviously have had an effect appeared not to*.
+
+**The guard is now a script, not an instinct:** `scripts/mutate.sh`. It refuses to
+report until it has established that it works.
+
+- The baseline must compile and pass **before the first mutation and after the
+  last**. A failing baseline afterwards means a restore leaked and every result is
+  void.
+- Every run takes a **control mutation** the caller is certain is lethal. If the
+  control survives, the harness cannot detect what it claims to, so the run aborts
+  and reports nothing — the same shape as §1's control grep that must match.
+- Each patch must **measurably change the file**, by hash. A pattern that matched
+  nothing is reported as `NOT APPLIED`, never as a survivor.
+- A survivor is reported as **`SURVIVED (unverified)`**, because a survivor is the
+  one outcome indistinguishable from a broken patch. Promoting it to a finding
+  requires naming the observable it should have altered.
+- Restores come from a copy, never from `git checkout`.
+
+It takes the test command as an opaque string, so the same harness covers Go and
+Move; it interprets only the exit status, which is why it never string-matches on
+error text. That last point is the fix for the second variant: `error[E11001]` is
+what a Move *test failure* prints.
+
 ## 5. e2e checks on pages that never rendered
 
 `e2e/widget-overlap.spec.ts` (frontend) reported 26 of 26 passing while 25 of
@@ -587,6 +786,52 @@ Only the last is caught by asking the running service what commit it is —
 which is what `scripts/verify-deployed.mjs` does, and why it exists. The rows
 above it need their own check.
 
+### Verifying a rewrite against the copy you rewrote
+
+A history rewrite is the sharpest version of this, because the check is so
+plausible.
+
+Two commits in a repository about to be made public contained an absolute local
+path. `filter-branch` removed it, and the obvious confirmation is:
+
+```sh
+git grep -c "the-bad-string" $(git rev-list --all)     # 0 hits
+```
+
+Zero hits. **That check is worth almost nothing**, for two separate reasons, and
+both are easy to miss:
+
+1. **It confirms your own edit, not the published result.** You are grepping the
+   working copy you just changed. Of course it is clean; you cleaned it.
+2. **`filter-branch` keeps the originals in `refs/original/`.** They are still
+   real objects, still reachable, and until they are dropped and the reflog
+   expired they can still be pushed. Immediately after the rewrite the "clean"
+   local repository still contained both original commits — `git cat-file -e`
+   found them.
+
+There is also a trap inside the fix: `--force-with-lease` was **rejected as
+stale**, because `filter-branch` had rewritten `refs/remotes/origin/master` too.
+The lease was comparing against a rewritten ghost rather than the real remote. It
+takes a fetch to restore an accurate view before the lease means anything —
+which is a check protecting you by refusing, and worth not overriding blindly.
+
+**The guard: clone it fresh and check that.**
+
+```sh
+git clone <remote> /tmp/verify && cd /tmp/verify
+git grep -c "the-bad-string" $(git rev-list --all)
+git cat-file -e <old-sha> && echo "STILL THERE"
+```
+
+The clone is the only artefact that answers the question actually being asked —
+*what will somebody else receive?* Everything before it answers *what do I
+believe I did?*
+
+Worth extending past rewrites: the same clone check is how you confirm a push
+carried what you think it carried. For the Soroban repository it also built and
+ran its suite from the clone, which catches the other half — a repository can
+contain every file and still be missing something needed to use it.
+
 **The guard:** an audit of "what shipped" must start from the working tree, not
 from the remote. Two commands, and the first is the one nobody runs:
 
@@ -661,3 +906,257 @@ Only running the delete showed which one won.
 **A schema check that reads metadata tests what was declared. Executing the
 operation tests what happens.** When those can differ, the second is the one
 that matters.
+
+## 9. Two implementations of one rule, and the vector pinned the wrong one
+
+Same family as 1-6: a check that measured a proxy. What makes this one worth its
+own entry is where it sat — the node rule is what decides whether a contributor
+can claim their money against a root that cannot be corrected. It was the
+least-checked line in the payout path and the most expensive one to get wrong.
+
+The claim **leaf** digest is pinned across two languages by a shared vector,
+because the Go builder and the Soroban contract drifted apart once and a root
+built by one could not be claimed against the other. The **tree** above the leaf
+was never pinned, so vectors were added for it — roots at seven leaf counts,
+asserted from both sides.
+
+Asserted from Rust against this, in the contract's own test file:
+
+```rust
+fn node(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+    let (x, y) = (a.to_array(), b.to_array());
+    if x <= y { sha(env, &[&[NODE_PREFIX], &x, &y]) }
+    else      { sha(env, &[&[NODE_PREFIX], &y, &x]) }
+}
+```
+
+That helper **reimplements** `verify_proof`'s node rule rather than calling it.
+So a root vector asserted through it pins the helper, and the helper and the
+real verifier are then free to drift — which is the identical failure the leaf
+vector exists to prevent, reproduced one level up by the very test written to
+prevent it.
+
+Measured, on the contract:
+
+| mutation | caught by the vector? |
+|---|---|
+| `NODE_PREFIX` const `0x01` → `0x09` | yes — the helper reads the same const |
+| the prefix removed **inside `verify_proof`** | **no** — only by settling a real claim |
+| the pair ordering reversed **inside `verify_proof`** | **no** — only by settling a real claim |
+
+The same trap was one keystroke from being reproduced on the Go side, where the
+first draft of the vector test built its trees with a test-local copy of the
+tree loop.
+
+**The fix is two layers, and they catch different things:**
+
+| layer | pins | catches |
+|---|---|---|
+| vector vs. helper | the two languages agree on the rule | a changed shared constant |
+| a real claim through the real verifier | the shipping code implements that rule | a changed verifier |
+
+On the Go side the loop was extracted instead, so `BuildMerkleTree` and the
+vector test both call `buildFromDigests` — one implementation, nothing to drift.
+On the contract side the helper stays (a test cannot easily call a private
+function) and is compensated for by `a_claim_verifies_through_a_promoted_node_in_an_odd_tree`,
+which publishes a real three-leaf root and claims against it. Three leaves
+specifically: every pre-existing claim test used two, so none of them ever
+crossed a promoted node.
+
+**The general rule:** a cross-implementation vector is only as good as the code
+path it drives. Before trusting one, ask *which function did this actually
+call* — and if the answer is a helper defined in the test file, the vector is
+pinning the test to itself. **Verify the artefact through the path production
+will use**, which for a contract means settling a real transaction, not
+recomputing a digest.
+
+**The check:** for each shared vector, mutate the production function it is
+supposed to pin — not the constant, the function body. If the vector test still
+passes, it is pinning a copy.
+
+## 10. A test that skipped, in a suite that reported green
+
+The newest one, and it was mine. Worth recording because the skip was *designed
+in* as a convenience and read as prudence.
+
+Two tests compare the Merkle vectors in this repository against the copies in the
+sibling `Aptos-Contracts` repository. Written when that package lived inside this
+one, they resolved a relative path. When it moved out to its own repository the
+path became `../../../Aptos-Contracts`, which resolves on a developer machine
+with both checked out side by side and nowhere else — so they were written to
+skip when the sibling was missing, on the reasoning that a check which cannot run
+should not fail.
+
+That reasoning is wrong, and the output shows why:
+
+```
+--- SKIP: TestAptosFixture_IsAByteForByteCopy
+--- SKIP: TestAptosMoveLiterals_MatchTheVector
+ok      .../internal/chain      0.203s
+```
+
+`ok`. In CI, which performs a single checkout, both would have skipped on every
+run forever. In the isolated worktree used to verify what actually ships, both
+skipped too — because a worktree has no sibling directory either. The two
+practices interacted: **the more carefully the suite was isolated, the less it
+checked**, and it said `ok` the whole time.
+
+A skip is not a neutral third outcome. It is a pass that establishes nothing, and
+it is the one line nobody reads in a hundred-line test output.
+
+**The fix, in two parts.**
+
+An absent sibling now **fails**, with a message naming both remedies. And the
+only way to a pass without the checks is to declare their absence in an
+environment variable that is set in exactly one place — `.github/workflows/ci.yml`
+— so the omission is reviewable code with a comment next to it, rather than a
+runtime decision the test made on its own behalf.
+
+```yaml
+# This CI run verifies the Go half only. It says NOTHING about the Move
+# contract, whose suite runs in its own repository.
+GRAINLIFY_SIBLING_REPOS_ABSENT: '1'
+```
+
+Plus the §2 guard, because two checks reading one file each is a suite that can
+silently halve: a third test asserts how many sibling files are actually named
+and reachable, and the literal count is checked against a hardcoded 7 as well as
+against the vector's own length — so deleting a root from *both* sides fails
+rather than shrinking the check.
+
+**The general rule:** a conditional skip is a silent reduction in coverage, and
+the condition is almost never "this check is not applicable" — it is "this check
+could not find what it needed". Those want opposite outcomes. Prefer a failure
+with instructions, and if a real environment must be exempt, make the exemption
+live in that environment's configuration where a human reviews it.
+
+**And write down what a green run does not cover.** For this pair it is one
+sentence, now in the test file, the README of the other repository, and the CI
+comment: *a green backend run says nothing about the Move contract* — not when
+the sibling is absent, and not when it is present either, because these tests
+compare stored values and never compile a line of Move.
+
+## 11. When two sources disagree about where someone's money goes, ask
+
+Not a check that lied — a design rule, kept here because it is the rule behind
+several entries above and because the tempting alternative is always the one that
+looks more helpful.
+
+**When two sources of truth disagree about where a person's money should go,
+surface the disagreement. Never reconcile it silently, in either direction.**
+
+The pull is always toward silent reconciliation, because it reads as smoothness.
+Every instance below arrived as a convenience.
+
+### Address verification signed with a different address than the one saved
+
+A contributor saves `0x…1a2b`, then signs the verification challenge with
+`0x…c3d4` — usually a wallet defaulting to the wrong account.
+
+The helpful-looking design updates the stored address to whichever one signed:
+the wallet evidently controls that key, the user evidently intended it, and the
+flow completes without friction. **It is wrong.** A mis-selected account silently
+replaces an address the contributor deliberately typed, everything succeeds, and
+their payout goes somewhere they did not choose. Nothing failed, so nothing gets
+investigated.
+
+Reject, and name both addresses: *"You signed with `0x…c3d4`, but the address you
+saved is `0x…1a2b`."* Both remedies are one click. The person makes the choice.
+
+### The database says paid, the chain says unclaimed
+
+The chain is the system of record, so the database is corrected — but the
+correction is to mark the row unpaid and **alert**, not to re-send the payment.
+
+A database that can be wrong about payment is a database whose automatic
+correction can also be wrong, and the failure mode of guessing here is paying
+twice. Reconciling toward "pay again" is the direction that looks like fixing it.
+
+### A claim row that looks like unfinished work
+
+`chain_operations` holds operations we submit and operations we merely observe.
+A stale claim row looks exactly like a crashed submission, and "recovering" it
+means sending funds to somebody who never signed for them — a push payout, in a
+system that is pull-based specifically to prevent that.
+
+This one is not solved by asking, because there is no human in the loop at 3am. It
+is solved by making the row unstorable in a retryable state (migration `000073`)
+and un-constructible as a submittable value (`internal/chainops`). **Where the
+disagreement can be resolved by a machine at all, remove the machine's ability to
+resolve it in the dangerous direction.**
+
+### The general shape
+
+Ask which of these a piece of reconciliation logic is:
+
+| | |
+|---|---|
+| Two sources disagree, and one is authoritative | Correct toward the authority, and **alert**. Do not act on the correction. |
+| Two sources disagree, and a person can tell you which is right | Ask them. Name both values. |
+| Two sources disagree, and neither is authoritative | Stop. This is the case where silent reconciliation does the most damage. |
+
+**The test:** for any code that resolves a mismatch automatically, ask what
+happens if it resolves it the wrong way. If the answer involves somebody's money
+arriving somewhere they did not choose, or arriving twice, it is not a
+reconciliation — it is a decision, and it belongs to a person.
+
+## 12. What a test asserts is not what its author believed it asserted
+
+A family rather than an incident, and it now has enough members to be worth
+naming. Several entries above are instances; this section is where the shape
+lives, so the next one is recognised as a repeat rather than filed as a novelty.
+
+**The failure:** a test passes, and it passes for a reason its author did not
+choose. The assertion is true. It is simply about something other than the thing
+the test is named for, and nothing distinguishes those two cases from the outside
+— a green line looks identical either way.
+
+Members so far, each also filed under its own mechanism because each *also*
+teaches something specific:
+
+| Where | What it actually asserted |
+|---|---|
+| §1, test named after a guard | That inputs unrelated to the guard return nothing. Deleting the guard changed nothing. |
+| §2, regex matched one gate of three | That the one gate it happened to match was correct. |
+| §3, test evaluated its own constant | That a value equals itself. |
+| §6, removal without rewiring | That a component was gone. Not that anything replaced it. |
+| Below, tests that quietly overfunded | That publishing worked *when overfunded*, which nobody had decided was allowed. |
+
+### The newest member: tests that pass for a reason nobody chose
+
+The escrow's `publish_root` originally asserted `total <= balance`. Four tests
+funded 1,000,000 and published a root of 600,000. They passed, correctly, and had
+passed since they were written.
+
+Nothing was wrong with the contract and nothing was wrong with the assertions.
+What was wrong is that **overfunding had never been a decision** — it was a habit
+the fixtures happened to encode, and every test run was quietly certifying it as
+supported behaviour.
+
+It surfaced only when the rule tightened to `total == funded_total`, because an
+address-less contributor's share would otherwise sit in the escrow looking exactly
+like residue, which is sweepable with no timelock. Four tests went red immediately.
+That was the guard working. It was also the first time anybody had asked whether
+those fixtures meant anything.
+
+**What makes this variant distinct** from the others above: there was no defective
+assertion to find. Each of those four tests was correct in isolation. The defect
+was in what the *set* of them established — a norm nobody had chosen — and no
+amount of reading any single test would have revealed it.
+
+### The check
+
+For the individual case, the one already in §5: when a check passes, ask what it
+would take for it to fail. If you cannot answer, break the thing on purpose.
+
+For this variant, a different question, because the tests are individually fine:
+
+> **What does my fixture assume that I have never decided?**
+
+Fixture values are decisions in disguise. An amount, a count, a timestamp offset,
+a funded balance — each is a claim about what the system supports, made by whoever
+was writing a test at the time and inherited unexamined by everyone after. When a
+rule later tightens and a batch of tests goes red together, that is not a
+regression. **It is the first time the assumption was stated out loud**, and the
+right response is to read what the fixtures had been asserting rather than to
+adjust them until the suite is green again.
