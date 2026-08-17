@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -49,6 +50,19 @@ func NewKYCAdminHandler(d *db.DB, notify *notifications.Service) *KYCAdminHandle
 }
 
 type kycResetRequest struct {
+	// ReasonCode is one of kycResetReasons. It decides what the contributor is
+	// told, so it is required - unlike the social-follow queue, where a bare
+	// note is still accepted for backwards compatibility, this endpoint has
+	// never been called by any client and has no cached bundle to break.
+	ReasonCode string `json:"reason_code"`
+	// Note is the admin's own words, appended to the message the contributor
+	// receives. Optional except for the 'other' code, which carries no message
+	// of its own.
+	Note string `json:"note"`
+	// Reason is the internal justification, recorded and never sent. Kept
+	// separate from Note because an audit entry and a message to the person it
+	// concerns are different documents - previously they were one string, and
+	// the admin's reasoning went out verbatim to the contributor.
 	Reason string `json:"reason"`
 }
 
@@ -76,10 +90,28 @@ func (h *KYCAdminHandler) Reset() fiber.Handler {
 		var req kycResetRequest
 		_ = c.BodyParser(&req)
 		reason := strings.TrimSpace(req.Reason)
+		note := strings.TrimSpace(req.Note)
+
+		chosen, ok := kycReasonByCode(strings.TrimSpace(req.ReasonCode))
+		if !ok {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "invalid_reason_code",
+				"message": "Pick one of the listed reasons. It decides what the contributor is told.",
+			})
+		}
+		if chosen.NeedsNote && note == "" {
+			// 'other' names no problem on its own. Sending it with no note
+			// would deliver a refusal with no content - the dead end this
+			// exists to remove, rebuilt one layer up.
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "note_required",
+				"message": "This reason needs a note: it is the only thing the contributor will have to act on.",
+			})
+		}
 		if reason == "" {
-			// Required because the audit row is the whole point. A reset with
-			// no stated reason records that it happened but not why, which is
-			// the half that matters when somebody asks later.
+			// Still required, and still separate. The audit row is the whole
+			// point: a reset that records what the contributor was told but
+			// not why we told them is half a record.
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":   "reason_required",
 				"message": "A reason is recorded against this reset. Say why the contributor is being allowed to verify again.",
@@ -96,12 +128,19 @@ func (h *KYCAdminHandler) Reset() fiber.Handler {
 		// concurrent webhook cannot land a decision between the read and the
 		// write and have it silently discarded.
 		var prevStatus, prevSessionID *string
+		// kyc_data is read here and stored on the audit row because this is
+		// the last moment it exists. Both the webhook and the status poll
+		// overwrite the column wholesale on the next decision, and Start()
+		// overwrites it when the contributor retries - which, now that a
+		// refused contributor can retry unaided, may be minutes from now.
+		// Whatever this reset was a response to is unrecoverable afterwards.
+		var prevKYCData []byte
 		err = tx.QueryRow(c.Context(), `
-SELECT kyc_status, kyc_session_id
+SELECT kyc_status, kyc_session_id, kyc_data
 FROM users
 WHERE id = $1
 FOR UPDATE
-`, subjectID).Scan(&prevStatus, &prevSessionID)
+`, subjectID).Scan(&prevStatus, &prevSessionID, &prevKYCData)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user_not_found"})
 		}
@@ -131,11 +170,15 @@ WHERE id = $1
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "reset_failed"})
 		}
 
-		if _, err := tx.Exec(c.Context(), `
+		var auditID uuid.UUID
+		if err := tx.QueryRow(c.Context(), `
 INSERT INTO kyc_reset_audit
-  (subject_user_id, previous_status, previous_session_id, actor_user_id, reason)
-VALUES ($1, $2, $3, $4, $5)
-`, subjectID, prevStatus, prevSessionID, actorID, reason); err != nil {
+  (subject_user_id, previous_status, previous_session_id, actor_user_id,
+   reason, reason_code, note, previous_kyc_data)
+VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
+RETURNING id
+`, subjectID, prevStatus, prevSessionID, actorID,
+			reason, chosen.Code, note, prevKYCData).Scan(&auditID); err != nil {
 			slog.Error("kyc reset: audit insert failed", "subject", subjectID, "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "reset_failed"})
 		}
@@ -153,16 +196,59 @@ VALUES ($1, $2, $3, $4, $5)
 			"previous_status", prev, "reason", reason)
 
 		// Best-effort: a failed notification must not undo a recorded reset.
-		// Worth sending, though - a refused verification is terminal in the UI,
-		// so somebody who was stuck has no way to discover the door reopened.
+		// But it must not be invisible either - three resets were applied by
+		// hand against production and told nobody, and the only reason that is
+		// known is that the operator wrote it into the reason text. The
+		// outcome is recorded either way.
+		//
+		// In-app only. See notifications.NotifyInApp: no account has a stored
+		// email address, and persisting one is being decided separately.
+		//
+		// The link goes to the BILLING subtab, not payout. Verification lives
+		// in BillingTab; the payout screen's own copy tells you to go to
+		// Billing. Same bug as the maintainer notification that pointed at the
+		// contributor view - a link to a page where the action is not.
+		notified := false
+		notifyErr := ""
 		if h.notify != nil {
-			h.notify.Notify(c.Context(), subjectID, notifications.TypeKYCReset,
+			res := h.notify.NotifyInApp(c.Context(), subjectID, notifications.TypeKYCReset,
 				"You can verify your identity again",
-				"An admin has reset your verification so you can try again: "+reason,
-				notifications.SettingsLink(notifications.SubtabPayout))
+				kycResetMessage(chosen, note),
+				notifications.SettingsLink(notifications.SubtabBilling))
+			notified = res.Created
+			switch {
+			case res.Err != nil:
+				notifyErr = truncateRunes(res.Err.Error(), 500)
+			case res.Suppressed:
+				notifyErr = "suppressed by the contributor's notification preferences"
+			}
+		} else {
+			notifyErr = "notification service not configured"
 		}
 
-		return c.JSON(fiber.Map{"ok": true, "previous_status": prev, "status": "expired"})
+		if _, err := h.db.Pool.Exec(c.Context(), `
+UPDATE kyc_reset_audit
+SET notified_at = CASE WHEN $2 THEN now() ELSE NULL END,
+    notify_error = NULLIF($3, '')
+WHERE id = $1
+`, auditID, notified, notifyErr); err != nil {
+			// The reset itself is committed and correct; only the record of
+			// whether we told them failed to save. Loud, because this column
+			// exists precisely so nobody has to guess.
+			slog.Error("kyc reset: could not record notification outcome",
+				"audit_id", auditID, "subject", subjectID, "notified", notified, "error", err)
+		}
+
+		return c.JSON(fiber.Map{
+			"ok":              true,
+			"previous_status": prev,
+			"status":          "expired",
+			"reason_code":     chosen.Code,
+			// Returned so the admin screen can show what the contributor was
+			// actually told, rather than reconstructing it and drifting.
+			"message_sent": kycResetMessage(chosen, note),
+			"notified":     notified,
+		})
 	}
 }
 
@@ -180,9 +266,15 @@ func (h *KYCAdminHandler) History() fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_user_id"})
 		}
 
+		// previous_kyc_data is deliberately not selected. It is stored so the
+		// evidence behind a decision survives, not so it can be served: it is
+		// the raw provider decision, and this endpoint feeds a screen. Anyone
+		// who needs it is answering a dispute and can query for it.
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT r.previous_status, r.previous_session_id, r.reason, r.created_at::text,
-       COALESCE(ga.login, '')
+       COALESCE(ga.login, ''),
+       r.reason_code, r.note,
+       (r.notified_at IS NOT NULL), r.notify_error
 FROM kyc_reset_audit r
 LEFT JOIN github_accounts ga ON ga.user_id = r.actor_user_id
 WHERE r.subject_user_id = $1
@@ -195,19 +287,135 @@ ORDER BY r.created_at DESC
 
 		out := []fiber.Map{}
 		for rows.Next() {
-			var prevStatus, prevSession, reason *string
+			var prevStatus, prevSession, reason, reasonCode, note, notifyError *string
 			var createdAt, actorLogin string
-			if err := rows.Scan(&prevStatus, &prevSession, &reason, &createdAt, &actorLogin); err != nil {
+			var notified bool
+			if err := rows.Scan(&prevStatus, &prevSession, &reason, &createdAt, &actorLogin,
+				&reasonCode, &note, &notified, &notifyError); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "history_failed"})
 			}
-			out = append(out, fiber.Map{
+			row := fiber.Map{
 				"previous_status":     prevStatus,
 				"previous_session_id": prevSession,
 				"reason":              reason,
 				"created_at":          createdAt,
 				"actor_github_login":  actorLogin,
-			})
+				"reason_code":         reasonCode,
+				"note":                note,
+				// The question the audit could not answer before: was the
+				// contributor actually told? Three resets reached nobody and
+				// nothing recorded it.
+				"notified":     notified,
+				"notify_error": notifyError,
+			}
+			// The label and the message as they stand today, resolved from the
+			// code rather than stored per row - so a wording improvement
+			// applies to the history too, and an unrecognised code (a reason
+			// retired since) degrades to the bare code rather than vanishing.
+			if reasonCode != nil {
+				if r, ok := kycReasonByCode(*reasonCode); ok {
+					row["reason_label"] = r.Label
+					row["message_sent"] = kycResetMessage(r, derefOrEmpty(note))
+				}
+			}
+			out = append(out, row)
 		}
 		return c.JSON(fiber.Map{"resets": out})
+	}
+}
+
+// ReasonCodes handles GET /admin/kyc/reason-codes.
+//
+// The closed list, served rather than duplicated in the frontend. Two copies
+// of one list is how the same rule comes to disagree with itself; this way the
+// review screen renders whatever the send path will accept, by construction.
+//
+// Message is included so the admin can see exactly what the contributor will
+// read before choosing. A reason picker that hides the resulting message asks
+// somebody to choose blind.
+func (h *KYCAdminHandler) ReasonCodes() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		out := make([]fiber.Map, 0, len(kycResetReasons))
+		for _, r := range kycResetReasons {
+			out = append(out, fiber.Map{
+				"code":       r.Code,
+				"label":      r.Label,
+				"message":    r.Message,
+				"needs_note": r.NeedsNote,
+			})
+		}
+		return c.JSON(fiber.Map{"reason_codes": out})
+	}
+}
+
+// Pending handles GET /admin/kyc/pending - the review queue.
+//
+// Everything waiting on a decision: in_review (Didit routes these to OUR
+// queue, not theirs) and rejected. Both are here because they are two halves
+// of one job - the second is somebody a decision has already been made about
+// who may still need telling why.
+//
+// What it deliberately does NOT return: kyc_data, any document image, or any
+// provider warning text. The admin reads the provider console for the detail;
+// this endpoint carries only what is needed to identify the person, see how
+// long they have waited, and choose a reason. `suggested_reason_codes` is
+// derived from the stored decision on the way out and is a suggestion only -
+// the send path never consults it.
+func (h *KYCAdminHandler) Pending() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+
+		rows, err := h.db.Pool.Query(c.Context(), `
+SELECT u.id, COALESCE(ga.login, ''), COALESCE(ga.avatar_url, ''),
+       u.kyc_status, u.updated_at::text, u.kyc_data,
+       (SELECT count(*) FROM kyc_reset_audit r WHERE r.subject_user_id = u.id)
+FROM users u
+LEFT JOIN github_accounts ga ON ga.user_id = u.id
+WHERE u.kyc_status IN ('in_review', 'rejected')
+ORDER BY u.updated_at ASC
+`)
+		if err != nil {
+			slog.Error("kyc pending: query failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
+		}
+		defer rows.Close()
+
+		out := []fiber.Map{}
+		for rows.Next() {
+			var id uuid.UUID
+			var login, avatarURL, status, updatedAt string
+			var kycData []byte
+			var resetCount int
+			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &resetCount); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
+			}
+
+			var decoded map[string]interface{}
+			if len(kycData) > 0 {
+				_ = json.Unmarshal(kycData, &decoded)
+			}
+
+			out = append(out, fiber.Map{
+				"user_id":       id.String(),
+				"github_login":  login,
+				"avatar_url":    avatarURL,
+				"kyc_status":    status,
+				"waiting_since": updatedAt,
+				// How many times this person has been reset before. A second
+				// or third reset is a different decision from a first, and an
+				// admin should not have to open another screen to know which
+				// one they are making.
+				"previous_resets": resetCount,
+				// May be empty - notably for a refusal whose only warnings are
+				// ip_analysis, which map to nothing on purpose.
+				"suggested_reason_codes": SuggestKYCReasons(decoded),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
+		}
+		return c.JSON(fiber.Map{"pending": out})
 	}
 }
