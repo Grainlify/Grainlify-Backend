@@ -324,6 +324,18 @@ SELECT EXISTS(
 SELECT github_issue_id, number, state, title, body, author_login, url, labels, updated_at_github, last_seen_at
 FROM github_issues
 WHERE project_id = $1
+  -- Open only. This had no state predicate at all, so 42% of what it
+  -- returned was closed - and the ordering made that worse rather than
+  -- neutral, because closing an issue bumps updated_at_github, sorting the
+  -- most recently closed straight to the top. 35% of the top ten, where
+  -- people actually look.
+  --
+  -- Not a staleness problem: the issues webhook is wired and writes state on
+  -- close (internal/ingest/github_webhook.go), so for a repo with the App
+  -- installed this is correct within seconds. Staleness only bounds how fast
+  -- a repo WITHOUT the App catches up, and that is a second-order concern
+  -- behind having the filter at all.
+  AND state = 'open'
 ORDER BY COALESCE(updated_at_github, last_seen_at) DESC
 LIMIT 50
 `, projectID)
