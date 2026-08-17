@@ -3,6 +3,7 @@ package notifications
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // Where a notification sends somebody.
@@ -67,6 +68,36 @@ func ProjectLink(projectID string) string {
 func MaintainerApplicationLink(projectID string, githubIssueID int64) string {
 	return fmt.Sprintf("%s?tab=maintainers&view=maintainer&project=%s&issue=%d",
 		DashboardPath, url.QueryEscape(projectID), githubIssueID)
+}
+
+// AbsoluteLink turns any of the builders below into a full URL, for somewhere
+// a relative path cannot work - a GitHub issue comment, an email body.
+//
+// Falls back to the relative path when no base is configured, which resolves
+// against the current origin if the reader happens to already be on the site
+// and is dead otherwise. That is the pre-existing behaviour and is preserved
+// deliberately: a comment with a half-working link is better than a handler
+// that refuses to post one.
+//
+// This exists so an absolute link is the SAME path as the in-app one with a
+// host in front, rather than a second hand-written copy of the format string.
+// Four such copies had already accumulated in issue_applications.go alone.
+func AbsoluteLink(baseURL, path string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" || !strings.HasPrefix(base, "http") {
+		return path
+	}
+	return base + path
+}
+
+// MyApplicationsLink points a contributor at their own applications.
+//
+// The contributions board is the only place somebody can see that they applied
+// to something and what became of it. A notification about a contributor's own
+// application belongs here rather than on the issue: the issue shows the work,
+// this shows their standing on it.
+func MyApplicationsLink() string {
+	return DashboardPath + "?tab=contributors"
 }
 
 // IssueLink builds a link to a specific issue inside a project.

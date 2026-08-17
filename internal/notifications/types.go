@@ -14,13 +14,23 @@ const (
 	// TypeIssueApplicationRejected fires when a maintainer rejects an
 	// application (Reject()).
 	TypeIssueApplicationRejected Type = "issue_application_rejected"
+	// TypeIssueApplicationReceived confirms to the CONTRIBUTOR that their own
+	// application was recorded and is waiting on the maintainer (Apply()).
+	//
+	// It exists because the applicant side was silent. Applying notified the
+	// maintainer and told the applicant nothing, so the first message a
+	// contributor ever received about their own application was its rejection
+	// - 13 of the 14 people with an open application had never had a single
+	// notification about it. A refusal arriving out of a silence reads as a
+	// system that was never listening.
+	TypeIssueApplicationReceived Type = "issue_application_received"
 	// TypePRMerged fires when a pull request authored by a linked Grainlify
 	// user transitions to merged (internal/ingest/github_webhook.go).
 	TypePRMerged Type = "pr_merged"
 	// TypeRewardReceived is defined for forward compatibility with the
-	// on-chain payout system (internal/soroban) - nothing publishes it yet,
-	// since that system isn't wired to any request flow today. The
-	// preference toggle exists in the UI so it's ready once payouts ship.
+	// on-chain payout system (internal/chain) - nothing publishes it yet,
+	// since no payout path has ever run. The preference toggle exists in the
+	// UI so it's ready once payouts ship.
 	TypeRewardReceived Type = "reward_received"
 	// TypeReferralCompleted fires when someone a user referred finishes
 	// GitHub signup + KYC verification (internal/handlers/referrals.go
@@ -79,6 +89,7 @@ var AllTypes = []Type{
 	TypeIssueAssigned,
 	TypeIssueApplicationSubmitted,
 	TypeIssueApplicationRejected,
+	TypeIssueApplicationReceived,
 	TypePRMerged,
 	TypeRewardReceived,
 	TypeReferralCompleted,

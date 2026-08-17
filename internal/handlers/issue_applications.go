@@ -195,12 +195,11 @@ LIMIT 1
 		}
 		quotedMsg := strings.Join(quotedLines, "\n")
 		// Deep link to this issue in the dashboard so "review their application" opens the exact issue.
-		base := strings.TrimSpace(strings.TrimRight(h.cfg.FrontendBaseURL, "/"))
-		reviewURL := fmt.Sprintf("%s/dashboard?tab=browse&project=%s&issue=%d", base, projectID.String(), githubIssueID)
-		if base == "" || !strings.HasPrefix(base, "http") {
-			// Fallback: relative path only if FrontendBaseURL not configured (link will use current origin)
-			reviewURL = fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID)
-		}
+		// The maintainer surface, not Browse - Browse is the contributor view
+		// of the issue, where Reject/Assign/Unassign do not exist. Built from
+		// the same one definition the in-app notification uses.
+		reviewURL := notifications.AbsoluteLink(h.cfg.FrontendBaseURL,
+			notifications.MaintainerApplicationLink(projectID.String(), githubIssueID))
 		if issueURL == "" {
 			issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", fullName, issueNumber)
 		}
@@ -243,6 +242,31 @@ WHERE project_id = $1 AND number = $2
 			fmt.Sprintf("New application from @%s", linked.Login),
 			fmt.Sprintf("@%s applied to work on issue #%d in %s.", linked.Login, issueNumber, fullName),
 			applicationLinkPath,
+		)
+
+		// And tell the applicant. This side was silent: applying notified the
+		// maintainer and told the contributor nothing, so the first message
+		// anybody ever received about their own application was its rejection.
+		// 13 of the 14 people holding an open application had never had a
+		// single notification about it.
+		//
+		// It matters more now than it did last week. Maintainers could not
+		// reach their queue until the view gate and the notification link were
+		// fixed, so almost nothing was ever resolved; as they start working
+		// through it, refusals will land on people who were never told they
+		// were being considered. A refusal arriving out of silence reads as a
+		// system that was never listening.
+		//
+		// Deliberately says what happens next and does not promise a decision
+		// by any particular time - nothing enforces one, and inventing a
+		// deadline here would be the sort of claim that is only discovered to
+		// be false by the person waiting on it.
+		h.notify.Notify(c.Context(), userID, notifications.TypeIssueApplicationReceived,
+			fmt.Sprintf("You applied to issue #%d", issueNumber),
+			fmt.Sprintf("Your application for issue #%d in %s is with the maintainer. "+
+				"You'll be notified when they decide, and you can withdraw it any time before then.",
+				issueNumber, fullName),
+			notifications.MyApplicationsLink(),
 		)
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -599,11 +623,10 @@ WHERE project_id = $1 AND number = $2
 
 		var githubIssueID int64
 		_ = h.db.Pool.QueryRow(c.Context(), `SELECT github_issue_id FROM github_issues WHERE project_id = $1 AND number = $2`, projectID, issueNumber).Scan(&githubIssueID)
-		base := strings.TrimSpace(strings.TrimRight(h.cfg.FrontendBaseURL, "/"))
-		manageURL := base + "/dashboard?tab=browse&project=" + projectID.String() + "&issue=" + fmt.Sprintf("%d", githubIssueID)
-		if base == "" || !strings.HasPrefix(base, "http") {
-			manageURL = "/dashboard?tab=browse&project=" + projectID.String() + "&issue=" + fmt.Sprintf("%d", githubIssueID)
-		}
+		// Addressed to maintainers ("You can manage this issue"), so it points
+		// at the maintainer surface rather than the contributor view of it.
+		manageURL := notifications.AbsoluteLink(h.cfg.FrontendBaseURL,
+			notifications.MaintainerApplicationLink(projectID.String(), githubIssueID))
 		botBody := fmt.Sprintf("Congratulations, **@%s**! 🎉 Your application was accepted by the repo's maintainers.\n\n"+
 			"Please resolve the issue such that the repo's maintainers have enough time to review your contribution.\n\n"+
 			"> ⚠️ **Warning:** When opening a PR, please link it to this issue to ensure it gets tracked accurately.\n\n"+
@@ -628,8 +651,8 @@ WHERE project_id = $1 AND number = $2
 			}
 			h.notify.Notify(c.Context(), assigneeUserID, notifications.TypeIssueAssigned,
 				fmt.Sprintf("You've been assigned to issue #%d", issueNumber),
-				fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
-				fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID),
+					fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
+				notifications.IssueLink(projectID.String(), githubIssueID),
 			)
 		}
 
@@ -845,12 +868,25 @@ WHERE project_id = $1 AND number = $2
 		}
 
 		if applicantUserID, ok := notifications.ResolveUserIDByGitHubLogin(c.Context(), h.db, req.Assignee); ok {
+			// Built, not hand-written. This was its own copy of IssueLink's
+			// format string - identical today, and a second definition of the
+			// same rule, which is how two spellings of a settings path reached
+			// production and how a maintainer link came to point at the
+			// contributor view.
+			//
+			// It points at the issue rather than at their applications board,
+			// because the board deliberately does not carry refusals: a
+			// contributor should not have to keep looking at a list of the
+			// things they were turned down for. The issue is still open and
+			// still real, which is the useful thing left to show them.
 			var githubIssueID int64
 			_ = h.db.Pool.QueryRow(c.Context(), `SELECT github_issue_id FROM github_issues WHERE project_id = $1 AND number = $2`, projectID, issueNumber).Scan(&githubIssueID)
 			h.notify.Notify(c.Context(), applicantUserID, notifications.TypeIssueApplicationRejected,
 				fmt.Sprintf("Application not accepted for issue #%d", issueNumber),
-				fmt.Sprintf("Your application for issue #%d in %s was not accepted this time.", issueNumber, fullName),
-				fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID),
+				fmt.Sprintf("Your application for issue #%d in %s was not accepted this time. "+
+					"The issue may still be open, and applying to others does not count against you.",
+					issueNumber, fullName),
+				notifications.IssueLink(projectID.String(), githubIssueID),
 			)
 		}
 
