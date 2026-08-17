@@ -330,6 +330,13 @@ UPDATE users SET kyc_data = $1 WHERE id = $2
 		t.Error("a verified contributor is in the queue; nothing is waiting on them")
 	}
 
+	// The session id is carried, because matching a queue row to a session in
+	// the provider console by GitHub username does not work - the console does
+	// not index by it. It is an identifier, not provider data.
+	if got, _ := byID[refused.String()]["kyc_session_id"].(string); got == "" {
+		t.Error("kyc_session_id is missing; a reviewer cannot match this row to a session")
+	}
+
 	// Suggestions name the screen photo and say nothing about the IP.
 	sugg, _ := byID[refused.String()]["suggested_reason_codes"].([]any)
 	var codes []string
