@@ -688,7 +688,6 @@ WHERE id = $2
 
 		// Extract rejection reasons and get extracted info
 		var extractedInfo map[string]interface{}
-		var rejectionReason interface{}
 
 		if kycDataMap != nil {
 			// Get extracted info if it exists, otherwise extract it now
@@ -715,55 +714,31 @@ WHERE id = $2
 				}
 			}
 
-			// Extract rejection reasons from warnings
-			var rejectionReasons []string
-
-			// Check face_match warnings
-			if faceMatch, ok := kycDataMap["face_match"].(map[string]interface{}); ok {
-				if warnings, ok := faceMatch["warnings"].([]interface{}); ok {
-					for _, warning := range warnings {
-						if w, ok := warning.(map[string]interface{}); ok {
-							if longDesc, ok := w["long_description"].(string); ok && longDesc != "" {
-								rejectionReasons = append(rejectionReasons, longDesc)
-							} else if shortDesc, ok := w["short_description"].(string); ok && shortDesc != "" {
-								rejectionReasons = append(rejectionReasons, shortDesc)
-							}
-						}
-					}
-				}
-			}
-
-			// Check other feature warnings (id_verification, liveness, etc.)
-			featuresToCheck := []string{"id_verification", "liveness", "ip_analysis"}
-			for _, featureName := range featuresToCheck {
-				if feature, ok := kycDataMap[featureName].(map[string]interface{}); ok {
-					if warnings, ok := feature["warnings"].([]interface{}); ok {
-						for _, warning := range warnings {
-							if w, ok := warning.(map[string]interface{}); ok {
-								if longDesc, ok := w["long_description"].(string); ok && longDesc != "" {
-									rejectionReasons = append(rejectionReasons, longDesc)
-								} else if shortDesc, ok := w["short_description"].(string); ok && shortDesc != "" {
-									rejectionReasons = append(rejectionReasons, shortDesc)
-								}
-							}
-						}
-					}
-				}
-			}
-
-			// If rejected, set rejection reason
-			if kycStatus != nil && *kycStatus == "rejected" {
-				if len(rejectionReasons) > 0 {
-					rejectionReason = strings.Join(rejectionReasons, "; ")
-					if extractedInfo == nil {
-						extractedInfo = make(map[string]interface{})
-					}
-					extractedInfo["rejection_reasons"] = rejectionReasons
-				} else {
-					// Fallback: check for any status fields that indicate rejection
-					rejectionReason = "Verification declined"
-				}
-			}
+			// The rejection-reason join that used to live here is gone. It
+			// walked face_match / id_verification / liveness / ip_analysis
+			// warnings, concatenated their long_description strings, and
+			// returned the result as `rejection_reason` plus
+			// `extracted.rejection_reasons`.
+			//
+			// Three things were wrong with it, and only the first is obvious:
+			//
+			//  1. It published the verification provider's raw text verbatim.
+			//     Nothing ever rendered it, so it left our API and stopped -
+			//     an exposure with no reader.
+			//  2. It could not distinguish a warning a person can act on
+			//     ("could not detect document type") from a fraud signal they
+			//     must not be handed ("document country does not match IP
+			//     country", "duplicated IP address from another session").
+			//     Naming which fraud check tripped tells somebody exactly what
+			//     to change next time, so ip_analysis is now excluded from
+			//     reason mapping entirely, deliberately and permanently. See
+			//     kycReasonForWarning.
+			//  3. Concatenating every warning made the loudest failure and the
+			//     deciding one indistinguishable.
+			//
+			// A reason does reach the contributor - but as a code an admin
+			// picked from a fixed list, sent explicitly, never as a
+			// pass-through of what the provider said.
 		}
 
 		// Format verified_at as ISO8601 string for JSON response
@@ -773,21 +748,31 @@ WHERE id = $2
 			verifiedAtStr = &formatted
 		}
 
+		// `data` - the entire raw kyc_data blob - is deliberately NOT here.
+		//
+		// Dropping `rejection_reason` while still returning `data` would have
+		// been cosmetic: the same provider warning text is reachable at
+		// data.id_verification.warnings[].long_description, so the strings
+		// would have gone on crossing the boundary by a slightly longer path.
+		// The blob also carried every raw feature block, which is far more
+		// than any caller needs to render a status.
+		//
+		// Nothing consumed it. The frontend reads `status` always and
+		// `extracted` only on success; `rejection_reason` existed solely as a
+		// declared field in the API client's type and was never read.
+		//
+		// `extracted` stays because it IS consumed - the billing profile is
+		// populated from it once somebody verifies - and it holds parsed,
+		// structured fields rather than provider prose.
 		response := fiber.Map{
 			"status":      kycStatus,
 			"session_id":  kycSessionID,
 			"verified_at": verifiedAtStr,
-			"data":        kycDataMap,
 		}
 
 		// Add extracted information if available
 		if extractedInfo != nil && len(extractedInfo) > 0 {
 			response["extracted"] = extractedInfo
-		}
-
-		// Add rejection reason if available
-		if rejectionReason != nil {
-			response["rejection_reason"] = rejectionReason
 		}
 
 		// Log actual status values for debugging
@@ -809,8 +794,7 @@ WHERE id = $2
 			"status", responseStatusStr,
 			"session_id", responseSessionIDStr,
 			"verified_at", responseVerifiedAtLogStr,
-			"has_extracted", extractedInfo != nil && len(extractedInfo) > 0,
-			"has_rejection_reason", rejectionReason != nil)
+			"has_extracted", extractedInfo != nil && len(extractedInfo) > 0)
 
 		return c.Status(fiber.StatusOK).JSON(response)
 	}
