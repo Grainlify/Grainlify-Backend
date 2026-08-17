@@ -25,6 +25,7 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,10 +136,33 @@ func TestKYCHandler_Status(t *testing.T) {
 		if _, hasRejection := resp["rejection_reason"]; hasRejection {
 			t.Errorf("expected no rejection_reason key for a verified user, got %v", resp["rejection_reason"])
 		}
+		if _, hasData := resp["data"]; hasData {
+			t.Errorf("expected no raw data blob, got %v", resp["data"])
+		}
 	})
 
-	t.Run("rejected status with no stored decision data falls back to a generic rejection reason", func(t *testing.T) {
+	// The provider's own warning text must not cross our API boundary.
+	//
+	// This endpoint used to join every warning's long_description and return
+	// it as `rejection_reason`, plus the whole raw decision under `data`.
+	// Nothing rendered either, so it was an exposure with no reader - and it
+	// could not tell an actionable warning ("could not detect document type")
+	// from a fraud signal a person must not be handed ("document country does
+	// not match IP country").
+	//
+	// The blob matters as much as the field: dropping `rejection_reason` while
+	// still returning `data` would leave the identical strings reachable one
+	// level down, at data.id_verification.warnings[].long_description.
+	t.Run("a refused verification returns no provider text, in any field", func(t *testing.T) {
 		userID := kycSuiteInsertUser(t, d.Pool, kycSuiteStrPtr("rejected"))
+		const warning = "Document country does not match IP country"
+		if _, err := d.Pool.Exec(t.Context(), `
+UPDATE users SET kyc_data = $1 WHERE id = $2
+`, `{"ip_analysis":{"warnings":[{"risk":"COUNTRY_FROM_DOCUMENT_DOES_NOT_MATCH_COUNTRY_FROM_IP","long_description":"`+warning+`"}]},
+    "id_verification":{"status":"Declined","warnings":[{"risk":"SCREEN_CAPTURE_DETECTED","long_description":"Screen capture of document detected"}]}}`,
+			userID); err != nil {
+			t.Fatalf("seed kyc_data: %v", err)
+		}
 		token := kycSuiteJWT(t, userID, "contributor")
 
 		status, body := projectsFxDoJSON(t, app, "GET", "/auth/kyc/status", token, nil)
@@ -152,8 +176,19 @@ func TestKYCHandler_Status(t *testing.T) {
 		if resp["status"] != "rejected" {
 			t.Errorf("status = %v, want \"rejected\"", resp["status"])
 		}
-		if resp["rejection_reason"] != "Verification declined" {
-			t.Errorf("rejection_reason = %v, want \"Verification declined\" (generic fallback when kyc_data carries no warnings)", resp["rejection_reason"])
+		if _, has := resp["rejection_reason"]; has {
+			t.Errorf("rejection_reason is still returned: %v", resp["rejection_reason"])
+		}
+		if _, has := resp["data"]; has {
+			t.Errorf("the raw decision blob is still returned: %v", resp["data"])
+		}
+		// The strongest form: assert on the serialised response, so a warning
+		// surfacing under any key at any depth fails this.
+		if strings.Contains(string(body), warning) {
+			t.Errorf("provider warning text appears in the response body:\n%s", body)
+		}
+		if strings.Contains(string(body), "Screen capture of document detected") {
+			t.Errorf("provider warning text appears in the response body:\n%s", body)
 		}
 	})
 
