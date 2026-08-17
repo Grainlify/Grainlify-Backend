@@ -34,7 +34,13 @@ func TestSyncInsertPersistsTheFieldsItDecodes(t *testing.T) {
 
 	// Decoded by InstallationRepository and meaningful to a reader of the
 	// catalogue. is_fork is covered separately by the ranking guards.
-	for _, col := range []string{"github_full_name", "language", "tags", "description"} {
+	// Each was decoded from the GitHub payload before it was persisted, and
+	// four were dropped silently for months: fork, owner.type, description and
+	// repository_selection. This is where that pattern stops.
+	for _, col := range []string{
+		"github_full_name", "language", "tags", "description",
+		"installation_repository_selection",
+	} {
 		if !strings.Contains(columns, col) {
 			t.Errorf("the sync INSERT does not persist %q, although InstallationRepository decodes it.\n\n"+
 				"A field parsed and dropped is invisible: fork cost a farmable leaderboard, owner.type "+
