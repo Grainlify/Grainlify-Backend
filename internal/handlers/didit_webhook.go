@@ -189,12 +189,30 @@ WHERE kyc_session_id = $1
 		var previousStatus string
 		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COALESCE(kyc_status, '') FROM users WHERE id = $1`, userID).Scan(&previousStatus)
 
-		// Update user KYC status
+		// Update user KYC status.
+		//
+		// kyc_verified_at is stamped only on the TRANSITION into verified, not
+		// on every observation of it. The unqualified kyc_status inside the
+		// SET expression is the row's pre-update value, so this asks "were
+		// they already verified before this delivery?" atomically, without
+		// depending on the previousStatus read above (which is a separate
+		// statement and therefore racy).
+		//
+		// It used to be `CASE WHEN $1 = 'verified' THEN now()`, which re-dated
+		// somebody every time a redelivery or a poll observed them still
+		// verified. Every one of the 37 founding members ended up with a
+		// kyc_verified_at LATER than the wave assignment that verification
+		// caused - impossible, and by up to 26 hours. The column looked like
+		// the authoritative answer to "when did this person verify" and was
+		// the one thing that could not answer it.
 		_, err = h.db.Pool.Exec(c.Context(), `
 UPDATE users
 SET kyc_status = $1,
     kyc_data = $2,
-    kyc_verified_at = CASE WHEN $1 = 'verified' THEN now() ELSE kyc_verified_at END,
+    kyc_verified_at = CASE
+      WHEN $1 = 'verified' AND kyc_status IS DISTINCT FROM 'verified' THEN now()
+      ELSE kyc_verified_at
+    END,
     updated_at = now()
 WHERE id = $3
 `, kycStatus, decisionJSON, userID)
