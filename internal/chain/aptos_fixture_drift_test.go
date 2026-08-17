@@ -7,47 +7,114 @@ import (
 	"testing"
 )
 
-// The Aptos-Contracts repository holds the same Merkle vectors as Move literals,
-// because Move cannot read a file at runtime and the package must build with no
-// reference to this tree.
+// Drift checks against the sibling Aptos-Contracts repository.
 //
-// That leaves a copy, and a copy can drift. These two tests catch it, and they
-// live on this side deliberately: the constraint is that the *contracts* must not
-// depend on the Go tree, not the reverse.
+// That repository holds the same Merkle vectors as Move literals, because Move
+// cannot read a file at runtime and the package must build with no reference to
+// this tree. That leaves a copy, and a copy can drift. These tests catch it.
 //
-// **Read this before relying on them.** Aptos-Contracts is a separate
-// repository, checked out as a sibling of this one. So these tests only run on a
-// machine that happens to have both side by side, and they SKIP everywhere else -
-// including in CI, which checks out one repository. They are a developer-machine
-// convenience, not a merge gate.
+// # Why these fail rather than skip
 //
-// What actually pins the two repositories to each other is the vectors
-// themselves: each side asserts the same digests independently, so a divergence
-// turns one of the two suites red wherever it runs. These tests only shorten the
-// feedback loop by catching an edit to the copy before the Move suite is run at
-// all.
+// The first version skipped when Aptos-Contracts was not checked out beside this
+// repository. That made the whole suite report green while silently performing
+// two fewer checks than the reader believed - which is the exact shape every
+// entry in docs/VERIFICATION-TRAPS.md shares. A skip is not a neutral outcome; it
+// is a pass that means nothing, and nobody reads the skip line.
 //
-// Skipping rather than failing on an absent sibling is therefore correct, and is
-// also why neither test is allowed to be the only thing checking a value.
+// So an absent sibling is now a **failure**, and the only way to get a pass
+// without the checks is to declare their absence explicitly in
+// GRAINLIFY_SIBLING_REPOS_ABSENT. That declaration lives in
+// .github/workflows/ci.yml and nowhere else, so it is reviewable code rather than
+// a runtime accident.
+//
+// # The consequence, written down because it is easy to forget
+//
+// **A green backend test run says nothing about the Move contract.** Not when the
+// sibling is absent, and not when it is present either - these tests compare
+// stored vector values, they do not compile or run a single line of Move. The
+// contract's own suite has to be run separately and deliberately:
+//
+//	cd ../Aptos-Contracts && aptos move test --dev
+//
+// Verifying this repository in an isolated worktree makes that sharper, because a
+// worktree has no sibling directory: the run fails here until you either place
+// one beside it or state that you are checking the Go half only.
+//
+// # What actually pins the implementations
+//
+// Not these tests. Go, Rust and Move each assert the same digests independently,
+// so a divergence turns one of the three suites red wherever it runs. These are a
+// fourth layer that shortens the feedback loop by catching an edited copy before
+// the Move suite is run at all.
+
 const aptosContractsDir = "../../../Aptos-Contracts"
 
-func aptosContractsPath(t *testing.T, rel string) (string, bool) {
+// siblingAbsentEnv declares that the sibling repository is knowingly not present.
+//
+// Set only in CI, which performs a single checkout. The durable fix is for CI to
+// check out Aptos-Contracts as well, at which point this variable and the branch
+// it guards should both be deleted.
+const siblingAbsentEnv = "GRAINLIFY_SIBLING_REPOS_ABSENT"
+
+// wantDriftedFiles is how many files in the sibling repository these tests read.
+// Asserted so that dropping one of the checks is a failure rather than a quietly
+// smaller suite - the lesson from internal/ranking/fork_guard_test.go, where a
+// structural check silently reduced its own coverage to one gate of three.
+const wantDriftedFiles = 2
+
+// wantPinnedRoots is the number of tree roots the vector must pin, hardcoded
+// rather than read from the vector itself.
+//
+// Comparing the Move literal count against the JSON count alone would pass if
+// somebody removed a root from both sides, which is precisely the change that
+// would matter: the odd leaf counts are the only ones that can catch a reversed
+// sort, so losing them is losing the point of the vectors.
+const wantPinnedRoots = 7
+
+// aptosContractsPath resolves a path inside the sibling repository.
+//
+// Fails the calling test when the sibling is missing and its absence has not been
+// declared. It deliberately does not return a bool for the caller to branch on:
+// that is what reintroduced the silent skip last time.
+func aptosContractsPath(t *testing.T, rel string) string {
 	t.Helper()
+
 	p := filepath.Join(aptosContractsDir, rel)
-	if _, err := os.Stat(p); err != nil {
-		return "", false
+	if _, err := os.Stat(p); err == nil {
+		return p
 	}
-	return p, true
+
+	if os.Getenv(siblingAbsentEnv) != "" {
+		t.Skipf("%s is set, so the Aptos-Contracts drift checks are knowingly not "+
+			"running. The Move vectors are unverified from this side; run "+
+			"`aptos move test --dev` in that repository.", siblingAbsentEnv)
+	}
+
+	t.Fatalf(`cannot read %s
+
+The Aptos-Contracts repository is not checked out beside this one, so the Merkle
+vector drift checks cannot run. This is a failure rather than a skip on purpose:
+a suite that quietly performs fewer checks than you believe is the failure mode
+docs/VERIFICATION-TRAPS.md exists to catalogue.
+
+Pick one:
+
+  * clone Aptos-Contracts as a sibling of this repository, or
+  * set %s=1 to state that you are checking the Go half only
+
+Either way, a green run of this repository says nothing about the Move contract.
+Run its suite deliberately:
+
+  cd ../Aptos-Contracts && aptos move test --dev
+`, p, siblingAbsentEnv)
+	return ""
 }
 
 // TestAptosFixture_IsAByteForByteCopy is the cheap half: a human diffing two
 // repositories should be comparing identical files, not reconciling two
 // renderings of the same data.
 func TestAptosFixture_IsAByteForByteCopy(t *testing.T) {
-	copyPath, ok := aptosContractsPath(t, "fixtures/leaf_vector.json")
-	if !ok {
-		t.Skip("Aptos-Contracts is not checked out beside this repository")
-	}
+	copyPath := aptosContractsPath(t, "fixtures/leaf_vector.json")
 
 	authoritative, err := os.ReadFile("testdata/leaf_vector.json")
 	if err != nil {
@@ -74,10 +141,7 @@ func TestAptosFixture_IsAByteForByteCopy(t *testing.T) {
 // the same technique TestSupportDelivered_SQLAndGoAgree ended up using for the
 // same reason: a check that compares a value against itself is documentation.
 func TestAptosMoveLiterals_MatchTheVector(t *testing.T) {
-	movePath, ok := aptosContractsPath(t, "tests/tree_vectors.move")
-	if !ok {
-		t.Skip("Aptos-Contracts is not checked out beside this repository")
-	}
+	movePath := aptosContractsPath(t, "tests/tree_vectors.move")
 
 	src, err := os.ReadFile(movePath)
 	if err != nil {
@@ -91,12 +155,14 @@ func TestAptosMoveLiterals_MatchTheVector(t *testing.T) {
 		found[m[1]] = m[2]
 	}
 
-	if len(found) == 0 {
-		t.Fatal("no root literals found in the Move fixture; the regex or the file shape changed")
+	// Assert how much was checked, not only that what was checked agreed.
+	// Against a hardcoded count as well as the vector's own, so that removing a
+	// root from both sides fails here rather than shrinking this test silently.
+	if len(found) != wantPinnedRoots {
+		t.Errorf("found %d root literals in the Move fixture, want %d - a vector "+
+			"that pins fewer counts cannot catch a reversed leaf sort, which is "+
+			"only visible at non-power-of-two counts", len(found), wantPinnedRoots)
 	}
-	// Assert how much was checked, not only that what was checked agreed - a
-	// restructure that renamed the accessors would otherwise reduce this test's
-	// coverage to zero while it kept passing.
 	if len(found) != len(v.TreeVectors.Roots) {
 		t.Errorf("Move declares %d roots, the vector has %d; they must pin the same set",
 			len(found), len(v.TreeVectors.Roots))
@@ -120,5 +186,30 @@ func TestAptosMoveLiterals_MatchTheVector(t *testing.T) {
 	}
 	if lm[1] != v.AptosLeafVector.Leaf {
 		t.Errorf("Move aptos_leaf\n got  %s\n want %s", lm[1], v.AptosLeafVector.Leaf)
+	}
+}
+
+// TestAptosDriftChecks_CoverEveryFileTheyClaimTo asserts the drift suite has not
+// quietly shrunk.
+//
+// The two tests above read one file each. If a future edit drops one of them, or
+// points both at the same file, nothing else would notice: the remaining test
+// would pass and the suite would still look like a cross-repository check. This
+// counts the files actually named and reachable, the same guard shape as
+// wantGates in internal/ranking/fork_guard_test.go.
+func TestAptosDriftChecks_CoverEveryFileTheyClaimTo(t *testing.T) {
+	files := []string{
+		"fixtures/leaf_vector.json",
+		"tests/tree_vectors.move",
+	}
+	if len(files) != wantDriftedFiles {
+		t.Fatalf("this test names %d sibling files, want %d", len(files), wantDriftedFiles)
+	}
+	for _, rel := range files {
+		// Uses the same resolver, so an absent sibling fails here too rather than
+		// leaving this guard as the one test that still passes.
+		if p := aptosContractsPath(t, rel); p == "" {
+			t.Fatalf("%s is not readable in the sibling repository", rel)
+		}
 	}
 }
