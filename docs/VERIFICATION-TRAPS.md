@@ -107,3 +107,35 @@ collisions.
 **The general rule for all of the above:** when a check passes, ask what it
 would take for it to fail. If you cannot answer, break the thing on purpose and
 confirm it goes red.
+
+## 6. A test that passed on a build where clicking did nothing
+
+`DiscoverPage` owned a second issue-detail overlay behind its own `?dIssue=`
+parameter. Fixing it meant two separate changes:
+
+1. **removal** — the page stops rendering its own overlay
+2. **rewiring** — the click reports upward so the shared overlay opens
+
+The first test asserted only removal: *"the page no longer renders an issue
+detail view."* It passed. It also passed when the click handler was mutated
+back to writing `?dIssue=` — a build where **clicking an issue does nothing at
+all**, which is worse than the inconsistency being fixed.
+
+Only the second property is one a user can feel. Nobody notices that a
+component was deleted; they notice that a click stopped working.
+
+**The general rule:** when a fix moves behaviour from one place to another,
+removal and rewiring are two properties and need two assertions. A test for the
+old thing being gone will pass on a build where nothing replaced it.
+
+### The same shape a second time, in the same change
+
+Removing the `?dIssue=` read also silently broke every link somebody had
+already shared: the parameter was ignored, so the page opened nothing. Nothing
+server-side ever generated those URLs — no notification, email or Telegram
+message — which meant they existed only in chats, where they could not be found
+and fixed.
+
+Caught by asking "who else holds one of these?", not by a test. The fix
+translates the legacy parameter into the shared selection and strips it, and
+there is now an assertion for that too.
