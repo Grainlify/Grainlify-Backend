@@ -57,6 +57,35 @@ concluding, with a control that must match:
 git grep -n "func " -- '*.go' | head -1    # if this is empty, the search is broken
 ```
 
+### The easiest place for this to hide is a test named after a guard
+
+`kycReasonForWarning` excludes the `ip_analysis` feature from reason mapping so
+a fraud signal is never disclosed to the contributor. It has a test called
+`TestKYCReasonForWarning_IPAnalysisNeverMapsToAReason`, which listed the real
+ip_analysis risk codes and asserted each returned nothing.
+
+Deleting the guard entirely did not fail it. None of those risk names appear in
+the mapping switch anyway, so they returned nothing for a reason that had
+nothing to do with the guard. The test asserted something true, about code that
+was not the code it was named after.
+
+This was caught by mutation testing minutes after the guard was written, with
+the file open — which is the point worth recording. The lesson is not "write
+better tests". It is that **a test named after a guard is where this hides
+best, because the name does the convincing.** Nobody re-reads the body of
+`TestXNeverHappens` to check that X could have happened; the name has already
+answered the question, and a reviewer who trusts it inherits the same blind
+spot as the author.
+
+The fix was to include, in the same table, inputs that **do** map under other
+features — `SCREEN_CAPTURE_DETECTED`, `DATA_INCONSISTENT`,
+`LOW_FACE_MATCH_SIMILARITY`. Those return a reason unless the guard stops them,
+so the guard becomes the only thing that can produce a pass.
+
+**The check:** for a test asserting that something never happens, ask what
+makes it happen, and confirm that input is in the test. If every input in the
+table would pass with the guard deleted, the test is documentation.
+
 ## 2. A regex guard that matched one gate of three
 
 `internal/ranking/fork_guard_test.go` asserts that every verified-project gate
