@@ -47,6 +47,28 @@ func ProjectLink(projectID string) string {
 	return fmt.Sprintf("%s?tab=browse&project=%s", DashboardPath, url.QueryEscape(projectID))
 }
 
+// MaintainerApplicationLink points a maintainer at an application they can
+// actually act on.
+//
+// This used to be an IssueLink - /dashboard?tab=browse&... - which is the
+// CONTRIBUTOR view of the issue. A maintainer clicking their own "new
+// application" notification landed on a screen rendering Withdraw instead of
+// Reject/Assign/Unassign, because those actions live on the maintainer
+// surface. Not hidden behind a click: absent from the page they were sent to.
+//
+// Fifteen active maintainers had resolved one application between them. This
+// is the likeliest reason: the notification led somewhere the work could not
+// be done, and the surface where it could was reachable only through a view
+// toggle that reset on every reload.
+//
+// view=maintainer is carried explicitly so the link works on a cold load. The
+// dashboard reads it from the URL, so following this from an email or a fresh
+// tab lands in the right mode rather than defaulting to contributor.
+func MaintainerApplicationLink(projectID string, githubIssueID int64) string {
+	return fmt.Sprintf("%s?tab=maintainers&view=maintainer&project=%s&issue=%d",
+		DashboardPath, url.QueryEscape(projectID), githubIssueID)
+}
+
 // IssueLink builds a link to a specific issue inside a project.
 func IssueLink(projectID string, githubIssueID int64) string {
 	return fmt.Sprintf("%s?tab=browse&project=%s&issue=%d", DashboardPath, url.QueryEscape(projectID), githubIssueID)

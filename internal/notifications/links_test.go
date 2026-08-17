@@ -136,3 +136,36 @@ func TestNoNotificationCallSiteWritesAnUnroutablePath(t *testing.T) {
 		t.Fatal("found no dashboard/settings link literals at all - the scanner is broken, not the links")
 	}
 }
+
+// A maintainer's application notification must land where the actions are.
+//
+// It pointed at /dashboard?tab=browse - the CONTRIBUTOR view of the issue,
+// which renders Withdraw rather than Reject/Assign/Unassign. A maintainer
+// clicking their own notification arrived somewhere the work could not be
+// done, and the surface where it could was reachable only through a view
+// toggle that reset on every reload.
+func TestMaintainerApplicationLinkLandsOnTheMaintainerSurface(t *testing.T) {
+	link := notifications.MaintainerApplicationLink("proj-1", 42)
+	assertRoutable(t, link, "MaintainerApplicationLink")
+
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	q := u.Query()
+
+	if q.Get("tab") != "maintainers" {
+		t.Errorf("tab = %q, want maintainers - Browse renders the contributor view, "+
+			"where the maintainer actions do not exist", q.Get("tab"))
+	}
+	// Carried explicitly so the link works on a cold load: the dashboard reads
+	// the view from the URL, and without it a fresh tab defaults to contributor
+	// and lands on the fallback instead of the queue.
+	if q.Get("view") != "maintainer" {
+		t.Errorf("view = %q, want maintainer - following this from an email or a new tab "+
+			"would otherwise open in contributor mode", q.Get("view"))
+	}
+	if q.Get("issue") != "42" || q.Get("project") != "proj-1" {
+		t.Errorf("the application is not in view: project=%q issue=%q", q.Get("project"), q.Get("issue"))
+	}
+}
