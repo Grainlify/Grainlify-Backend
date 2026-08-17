@@ -258,3 +258,48 @@ easily could have, and nothing in the code said so.
 
 The check is mechanical: for each error name, list the calls that can produce
 it. If the list has more than one entry, split the name.
+
+### A local commit is not a pushed commit
+
+Same family as §7, one step earlier, and it hides from a different set of
+checks.
+
+A docs change was committed at 14:20Z and never pushed. It had a real commit
+hash, a real message, and a clean `git status` — the tree looked finished. It
+was invisible to **every check that reads the remote**: it was not in the merge
+list, not in a PR, not in any deploy, and not on the site. Six hours later an
+audit of "what merged and what is live" found nothing wrong, because the audit
+asked the remote and the remote had never heard of it.
+
+The failure modes stack, and each one is invisible to the check below it:
+
+| state | looks fine to |
+|---|---|
+| committed, not pushed | `git status`, `git log`, the local tree |
+| pushed, not merged | the branch, CI on the branch |
+| merged, not deployed | the merge list, `git log origin/main` |
+| deployed, wrong artifact | the deploy log |
+
+Only the last is caught by asking the running service what commit it is —
+which is what `scripts/verify-deployed.mjs` does, and why it exists. The rows
+above it need their own check.
+
+**The guard:** an audit of "what shipped" must start from the working tree, not
+from the remote. Two commands, and the first is the one nobody runs:
+
+```sh
+git log --branches --not --remotes --oneline   # committed here, pushed nowhere
+git status --porcelain                         # not even committed
+```
+
+Run them in every repo, not just the one being worked on. The commit that went
+missing was in the docs repo during a backend day, which is exactly how it
+stayed missing: nobody was looking at that tree.
+
+**And a corollary that bit on the same day.** A shared working tree makes
+`git status` ambiguous rather than merely incomplete: a second session had
+deleted a whole package in the same checkout, so a full test run reported green
+for a tree that was neither `origin/main` nor `origin/main` plus the change
+under test. The result was not wrong so much as about something else. Verify in
+an isolated worktree by default — `git worktree add --detach <path> <branch>` —
+so the thing being tested is exactly the thing being shipped.
