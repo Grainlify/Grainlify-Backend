@@ -305,7 +305,7 @@ func (h *GitHubAppHandler) syncInstallationRepositories(ctx context.Context, use
 	}
 
 	// List repositories
-	repos, err := appClient.ListInstallationRepositories(ctx, installationToken)
+	repos, repositorySelection, err := appClient.ListInstallationRepositories(ctx, installationToken)
 	if err != nil {
 		slog.Error("failed to list installation repositories", "error", err)
 		return
@@ -314,6 +314,10 @@ func (h *GitHubAppHandler) syncInstallationRepositories(ctx context.Context, use
 	slog.Info("found repositories in installation",
 		"count", len(repos),
 		"installation_id", installationID,
+		// "selected" means the maintainer picked these deliberately; "all"
+		// means GitHub's default, which also covers every repo the account
+		// creates from now on.
+		"repository_selection", repositorySelection,
 	)
 
 	// Get default ecosystem (or use a fallback)
@@ -424,8 +428,8 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 		//
 		// Only insert public repos; private repos are never added
 		err = h.db.Pool.QueryRow(ctx, `
-INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, description, status, github_app_installation_id, needs_metadata)
-VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification', $7, true)
+INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, description, status, github_app_installation_id, installation_repository_selection, needs_metadata)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification', $7, NULLIF($8, ''), true)
 ON CONFLICT (github_full_name) DO UPDATE SET
   owner_user_id = EXCLUDED.owner_user_id,
   github_app_installation_id = EXCLUDED.github_app_installation_id,
@@ -435,10 +439,13 @@ ON CONFLICT (github_full_name) DO UPDATE SET
   description = COALESCE(NULLIF(EXCLUDED.description, ''), projects.description),
   tags = CASE WHEN EXCLUDED.tags::text NOT IN ('[]', 'null')
               THEN EXCLUDED.tags ELSE projects.tags END,
+  -- Never blanked back to NULL: a later response we could not read must
+  -- not erase a selection GitHub already told us about.
+  installation_repository_selection = COALESCE(NULLIF(EXCLUDED.installation_repository_selection, ''), projects.installation_repository_selection),
   deleted_at = NULL,
   updated_at = now()
 RETURNING id
-`, userID, repo.FullName, ecosystemID, repo.Language, tagsJSON, repo.Description, installationID).Scan(&projectID)
+`, userID, repo.FullName, ecosystemID, repo.Language, tagsJSON, repo.Description, installationID, repositorySelection).Scan(&projectID)
 		if err != nil {
 			slog.Error("failed to create project",
 				"error", err,
