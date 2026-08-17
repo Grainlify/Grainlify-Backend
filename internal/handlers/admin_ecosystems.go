@@ -138,7 +138,7 @@ WHERE e.id = $1
 			_ = json.Unmarshal(technologiesJSON, &technologies)
 		}
 		var projectCnt, userCnt int64
-		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(p.id), COUNT(DISTINCT p.owner_user_id) FROM projects p WHERE p.ecosystem_id = $1`, ecoID).Scan(&projectCnt, &userCnt)
+		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COUNT(p.id), COUNT(DISTINCT p.owner_user_id) FROM projects p WHERE p.ecosystem_id = $1 AND COALESCE(p.is_fork, FALSE) = FALSE`, ecoID).Scan(&projectCnt, &userCnt)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"id":            id.String(),
 			"slug":          slug,

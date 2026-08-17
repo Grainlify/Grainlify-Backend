@@ -156,7 +156,19 @@ func (o Options) ecosystem() *string {
 // backfill resolves existing rows, so unknown is a transient state rather than
 // a resting one - and BackfillForks logs loudly if any live verified project
 // is still unknown after it runs.
-const notAFork = "AND COALESCE(p.is_fork, FALSE) = FALSE"
+// Exported because forks must be excluded from every surface that lists or
+// counts projects, not only from ranking. Recommendations were built without
+// it and shipped forks to the Discover page for weeks; retyping the predicate
+// at each new call site is how that happens again.
+//
+// Assumes the projects table is aliased `p`.
+const NotAForkCondition = "COALESCE(p.is_fork, FALSE) = FALSE"
+
+// NotAFork is the same predicate with the leading AND, for splicing into a
+// WHERE chain. Callers that build a []string of conditions and join them with
+// " AND " must use NotAForkCondition instead - using this one produces
+// "AND AND" and a syntax error, which is how three List tests broke.
+const NotAFork = "AND " + NotAForkCondition
 
 // notAForkP2 is the same predicate for the p2 alias used by the org open-issue
 // subquery. Two spellings, one meaning - the test below checks both.
@@ -173,7 +185,7 @@ WITH merges AS (
     JOIN projects p ON p.id = pr.project_id
     WHERE p.status = 'verified'
       AND p.deleted_at IS NULL
-      ` + notAFork + `
+      ` + NotAFork + `
       AND (pr.merged = TRUE OR pr.merged_at_github IS NOT NULL)
       AND pr.author_login IS NOT NULL
       AND pr.author_login <> ''
@@ -326,7 +338,7 @@ WITH merges AS (
     JOIN projects p ON p.id = pr.project_id
     WHERE p.status = 'verified'
       AND p.deleted_at IS NULL
-      ` + notAFork + `
+      ` + NotAFork + `
       AND SPLIT_PART(p.github_full_name, '/', 2) <> '.github'
       AND (pr.merged = TRUE OR pr.merged_at_github IS NOT NULL)
       AND pr.author_login IS NOT NULL

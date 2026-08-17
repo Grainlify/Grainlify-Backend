@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jagadeesh/grainlify/backend/internal/ranking"
 	"log/slog"
 	"strings"
 	"sync"
@@ -474,6 +475,10 @@ func (h *ProjectsPublicHandler) List() fiber.Handler {
 
 		// Exclude special GitHub repositories (owner/.github)
 		conditions = append(conditions, "split_part(p.github_full_name, '/', 2) != '.github'")
+		// A fork is somebody else's project under a contributor's namespace.
+		// Browse showed them for weeks: the exclusion added in #445 covered
+		// ranking only, and every listing surface was missed.
+		conditions = append(conditions, ranking.NotAForkCondition)
 
 		// Filter by ecosystem
 		if ecosystem != "" {
@@ -694,7 +699,7 @@ SELECT
   e.slug AS ecosystem_slug
 FROM projects p
 LEFT JOIN ecosystems e ON p.ecosystem_id = e.id
-WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false AND split_part(p.github_full_name, '/', 2) != '.github'
+WHERE p.status = 'verified' AND p.deleted_at IS NULL AND p.needs_metadata = false AND split_part(p.github_full_name, '/', 2) != '.github' ` + ranking.NotAFork + `
 ORDER BY contributors_count DESC, p.stars_count DESC, p.created_at DESC
 LIMIT $1
 `
