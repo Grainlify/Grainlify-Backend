@@ -57,6 +57,61 @@ concluding, with a control that must match:
 git grep -n "func " -- '*.go' | head -1    # if this is empty, the search is broken
 ```
 
+### A fixture arranged so the bug cannot manifest
+
+`/projects/:id/issues/public` returned closed issues: no state predicate at
+all, and an ordering that promoted them, because it sorts by
+`updated_at_github DESC` and **closing an issue bumps that timestamp**. 42% of
+what it returned was closed.
+
+The obvious test seeds an open issue and a closed one and asserts only the open
+one comes back. Written the obvious way it proves nothing:
+
+```go
+seed(1, "open",   "...", "2029-01-01")   // newest
+seed(2, "closed", "...", "2020-01-01")   // oldest
+```
+
+With `LIMIT 50` and that ordering, the closed row is last. On a build with the
+filter deleted the query still returns the open row first, the assertion still
+passes, and the test has verified that a list containing one open issue
+contains an open issue.
+
+The fixture has to be arranged so the bug, if present, **must** show up:
+
+```go
+seed(1, "closed", "...", "2030-01-01")   // newest - what closing actually does
+seed(2, "open",   "...", "2029-01-01")
+```
+
+Now the closed row is the first thing an unfiltered query returns, so nothing
+but the predicate can produce a pass. And the test also asserts the open issue
+IS returned, so "filter everything" fails too - one assertion for each
+direction the fix can be wrong in.
+
+**The general rule:** a fixture is part of the check, not scenery. After
+writing one, ask which arrangement the bug survives, and use that one. If the
+data is arranged so the defect cannot appear, the test documents the intent and
+verifies nothing - the same failure as §1, arriving through the setup instead
+of the assertion.
+
+### The same principle, applied to placement
+
+Some rules are wrong in a way no output reveals. The 300-approval cap is
+checked inside the decision transaction, after a `pg_advisory_xact_lock`. Move
+that check into the handler, before the transaction, and it returns the right
+answer for every request that arrives alone - which is every request a test
+makes. It fails only when two admins approve at the same moment, and then it
+fails silently, by admitting more people than the cap allows.
+
+So the test asserts **where the check is**, by reading the source: that the
+lock is taken, that the count is read *after* it, and that the bulk path has no
+second copy of the rule. Asserting the outcome would have passed on the broken
+placement every time.
+
+**When a check can be in the wrong place and still return the right answer,
+test the placement.**
+
 ### The easiest place for this to hide is a test named after a guard
 
 `kycReasonForWarning` excludes the `ip_analysis` feature from reason mapping so
