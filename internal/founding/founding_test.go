@@ -344,8 +344,20 @@ func TestCompute_DividesPoolByEffectiveShares(t *testing.T) {
 	}
 
 	// Same shares, but never followed -> ineligible, excluded entirely.
+	//
+	// Assigned with the gate OFF, then settled with it on. That is not a
+	// contrivance: it is exactly how the seventeen members who hold a position
+	// without an approved submission came to exist - they were assigned before
+	// the gate existed, and AssignWave's short-circuit deliberately never
+	// re-examines an existing member, so they keep their number for good.
+	//
+	// Entry is permanent; payment is not. This test pins the second half, and
+	// the gate does not change it: a member who cannot be paid is excluded
+	// from the divisor rather than silently shrinking everyone else's payout.
 	b := newUser(t, d)
-	if _, err := AssignWave(ctx, d.Pool, b, cfg); err != nil {
+	ungated := defaults()
+	ungated["founding_require_social_follow"] = "false"
+	if _, err := AssignWave(ctx, d.Pool, b, ungated); err != nil {
 		t.Fatalf("assign b: %v", err)
 	}
 	srcB := uuid.New()

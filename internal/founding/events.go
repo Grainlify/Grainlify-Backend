@@ -36,8 +36,17 @@ func OnVerified(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[s
 	}
 
 	if _, err := AssignWave(ctx, pool, userID, cfg); err != nil {
-		slog.Warn("founding: wave assignment failed", "user_id", userID, "error", err)
-		return
+		if errors.Is(err, ErrNotEligibleForWave) {
+			// Not a failure. They verified without an approved social-follow
+			// submission, so they hold no position yet; approving them later
+			// calls OnSocialFollowApproved, which assigns one then. Info
+			// rather than warn precisely so this does not read as breakage in
+			// the logs - it is the gate working.
+			slog.Info("founding: no wave yet, awaiting social follow approval", "user_id", userID)
+		} else {
+			slog.Warn("founding: wave assignment failed", "user_id", userID, "error", err)
+			return
+		}
 	}
 
 	if _, err := Grant(ctx, pool, userID,
@@ -197,4 +206,69 @@ SELECT referrer_user_id, id FROM referrals WHERE referred_user_id = $1
 		return uuid.Nil, uuid.Nil, false, fmt.Errorf("founding.referrerOf: %w", err)
 	}
 	return referrer, referralID, true, nil
+}
+
+// OnSocialFollowApproved is called when an admin approves a social-follow
+// submission. It is the other half of the gate.
+//
+// Wave assignment now needs two facts - the account is verified, and the
+// submission is approved - and they arrive in either order from two unrelated
+// events. Whichever happens second does the work:
+//
+//	verify then approve   OnVerified refuses (ErrNotEligibleForWave); this
+//	                      assigns
+//	approve then verify   this refuses (not verified); OnVerified assigns
+//
+// Without this, only verification could ever assign, so anybody approved after
+// verifying would be stranded permanently by the gate that was meant to admit
+// them. Twelve people are currently approved and unverified, waiting on
+// exactly this path.
+//
+// Idempotent for free, because it converges on AssignWave: MembershipFor
+// short-circuits a second call, the transaction-scoped advisory lock
+// serialises a verify and an approve landing simultaneously, and the sequence
+// is still allocated as max+1 under that lock, so it stays gapless.
+//
+// Deliberately does NOT grant shares. Only the wave is gated; an unapproved
+// contributor still accrues the verification share, which settles to zero.
+// Gating Grant is a separate policy question and is not decided here.
+//
+// Best-effort: an approval must succeed whatever happens to the assignment.
+func OnSocialFollowApproved(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[string]string) {
+	if pool == nil {
+		return
+	}
+
+	// Assignment is for verified accounts. Checked here rather than inside
+	// AssignWave because it is this event's precondition, not the gate's: the
+	// gate is about approval, and conflating the two would mean a config flag
+	// that says "social follow not required" also stopped requiring
+	// verification.
+	var status string
+	if err := pool.QueryRow(ctx, `
+SELECT COALESCE(kyc_status, '') FROM users WHERE id = $1
+`, userID).Scan(&status); err != nil {
+		slog.Warn("founding: could not read verification status after approval", "user_id", userID, "error", err)
+		return
+	}
+	if status != "verified" {
+		slog.Info("founding: approved but not yet verified, no wave assigned",
+			"user_id", userID, "kyc_status", status)
+		return
+	}
+
+	m, err := AssignWave(ctx, pool, userID, cfg)
+	if err != nil {
+		if errors.Is(err, ErrNotEligibleForWave) {
+			// Should not happen - this runs after an approval commits - but a
+			// revoke racing the approval could produce it, and a wrong log
+			// line is worse than a surprising one.
+			slog.Warn("founding: approval did not confer eligibility", "user_id", userID, "error", err)
+			return
+		}
+		slog.Warn("founding: wave assignment after approval failed", "user_id", userID, "error", err)
+		return
+	}
+	slog.Info("founding: wave assigned on social follow approval",
+		"user_id", userID, "sequence_number", m.Sequence, "wave", m.Wave)
 }
