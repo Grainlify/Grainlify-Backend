@@ -370,6 +370,7 @@ func (h *KYCAdminHandler) Pending() fiber.Handler {
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT u.id, COALESCE(ga.login, ''), COALESCE(ga.avatar_url, ''),
        u.kyc_status, u.updated_at::text, u.kyc_data,
+       COALESCE(u.kyc_session_id, ''),
        (SELECT count(*) FROM kyc_reset_audit r WHERE r.subject_user_id = u.id)
 FROM users u
 LEFT JOIN github_accounts ga ON ga.user_id = u.id
@@ -385,10 +386,10 @@ ORDER BY u.updated_at ASC
 		out := []fiber.Map{}
 		for rows.Next() {
 			var id uuid.UUID
-			var login, avatarURL, status, updatedAt string
+			var login, avatarURL, status, updatedAt, sessionID string
 			var kycData []byte
 			var resetCount int
-			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &resetCount); err != nil {
+			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &sessionID, &resetCount); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
 			}
 
@@ -403,6 +404,21 @@ ORDER BY u.updated_at ASC
 				"avatar_url":    avatarURL,
 				"kyc_status":    status,
 				"waiting_since": updatedAt,
+				// The provider's session identifier, and the only field from
+				// their side this endpoint carries.
+				//
+				// It is an identifier, not data: no document, no decision, no
+				// warning text. Without it a reviewer has to match a row to a
+				// session in the provider console by GitHub username, which
+				// the console does not index by and which is not unique to
+				// anything it stores - so the match is done by eye, on the
+				// screen where identity decisions are made.
+				//
+				// Empty after a reset, because Reset() nulls the column. That
+				// is correct rather than lossy: the id of a detached session
+				// is kept on the audit row (previous_session_id), and a row
+				// with no live session is one nothing is waiting on.
+				"kyc_session_id": sessionID,
 				// How many times this person has been reset before. A second
 				// or third reset is a different decision from a first, and an
 				// admin should not have to open another screen to know which
