@@ -204,7 +204,9 @@ LIMIT 1
 		if issueURL == "" {
 			issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", fullName, issueNumber)
 		}
-		applicationLinkPath := fmt.Sprintf("/dashboard?tab=browse&project=%s&issue=%d", projectID.String(), githubIssueID)
+		// The maintainer surface, not Browse: Browse renders the contributor
+		// view of the issue, where Reject/Assign/Unassign do not exist.
+		applicationLinkPath := notifications.MaintainerApplicationLink(projectID.String(), githubIssueID)
 		commentBody := fmt.Sprintf("**📋 Grainlify Application**\n\n**@%s has applied to work on this issue as part of the Grainlify program.**\n\n%s\n\n---\n\n**Repo Maintainers:** To accept this application, [review their application](%s) or [assign @%s](%s) to this issue.",
 			linked.Login, quotedMsg, reviewURL, linked.Login, issueURL)
 		gh := github.NewClient()
