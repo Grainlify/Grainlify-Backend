@@ -75,7 +75,7 @@ func TestKYCReset_UnblocksARejectedContributor(t *testing.T) {
 	subject := seedKYCUser(t, d, "rejected", "didit-session-"+uuid.New().String()[:8])
 	app := kycAdminApp(d, actor)
 
-	code, body := kycAdminPost(t, app, subject, `{"reason":"documents were blurry, contributor asked to retry"}`)
+	code, body := kycAdminPost(t, app, subject, `{"reason_code":"document_unreadable","reason":"documents were blurry, contributor asked to retry"}`)
 	if code != fiber.StatusOK {
 		t.Fatalf("reset returned %d: %v", code, body)
 	}
@@ -118,7 +118,11 @@ func TestKYCReset_RequiresAReason(t *testing.T) {
 	subject := seedKYCUser(t, d, "rejected", "s1")
 	app := kycAdminApp(d, actor)
 
-	for _, body := range []string{`{}`, `{"reason":""}`, `{"reason":"   "}`} {
+	for _, body := range []string{
+		`{"reason_code":"document_unreadable"}`,
+		`{"reason_code":"document_unreadable","reason":""}`,
+		`{"reason_code":"document_unreadable","reason":"   "}`,
+	} {
 		code, out := kycAdminPost(t, app, subject, body)
 		if code != fiber.StatusBadRequest {
 			t.Errorf("body %s returned %d, want 400 - the audit row is the point of this endpoint", body, code)
@@ -142,7 +146,7 @@ func TestKYCReset_RefusesToUnverifySomebody(t *testing.T) {
 	subject := seedKYCUser(t, d, "verified", "s2")
 	app := kycAdminApp(d, actor)
 
-	code, out := kycAdminPost(t, app, subject, `{"reason":"misclick"}`)
+	code, out := kycAdminPost(t, app, subject, `{"reason_code":"document_unreadable","reason":"misclick"}`)
 	if code != fiber.StatusConflict {
 		t.Fatalf("resetting a verified contributor returned %d, want 409", code)
 	}
@@ -165,7 +169,7 @@ func TestKYCReset_IsAudited(t *testing.T) {
 	app := kycAdminApp(d, actor)
 
 	reason := "contributor " + uuid.New().String()[:6] + " asked to retry after a document upload error"
-	if code, body := kycAdminPost(t, app, subject, fmt.Sprintf(`{"reason":%q}`, reason)); code != fiber.StatusOK {
+	if code, body := kycAdminPost(t, app, subject, fmt.Sprintf(`{"reason_code":"document_unreadable","reason":%q}`, reason)); code != fiber.StatusOK {
 		t.Fatalf("reset returned %d: %v", code, body)
 	}
 
@@ -220,11 +224,11 @@ func TestKYCReset_RecordsEveryResetNotJustTheLast(t *testing.T) {
 
 	// A contributor reset twice is a fact worth being able to see; a column on
 	// users could only hold the most recent one.
-	if code, _ := kycAdminPost(t, app, subject, `{"reason":"first attempt, blurry documents"}`); code != fiber.StatusOK {
+	if code, _ := kycAdminPost(t, app, subject, `{"reason_code":"document_unreadable","reason":"first attempt, blurry documents"}`); code != fiber.StatusOK {
 		t.Fatalf("first reset failed")
 	}
 	_, _ = d.Pool.Exec(t.Context(), `UPDATE users SET kyc_status='rejected' WHERE id=$1`, subject)
-	if code, _ := kycAdminPost(t, app, subject, `{"reason":"second attempt, wrong document type"}`); code != fiber.StatusOK {
+	if code, _ := kycAdminPost(t, app, subject, `{"reason_code":"document_type_not_recognised","reason":"second attempt, wrong document type"}`); code != fiber.StatusOK {
 		t.Fatalf("second reset failed")
 	}
 
@@ -243,7 +247,7 @@ func TestKYCReset_UnknownUserIs404(t *testing.T) {
 	actor := leaderboardSuiteUser(t, d.Pool)
 	app := kycAdminApp(d, actor)
 
-	code, _ := kycAdminPost(t, app, uuid.New(), `{"reason":"typo in the id"}`)
+	code, _ := kycAdminPost(t, app, uuid.New(), `{"reason_code":"document_unreadable","reason":"typo in the id"}`)
 	if code != fiber.StatusNotFound {
 		t.Errorf("unknown user returned %d, want 404", code)
 	}

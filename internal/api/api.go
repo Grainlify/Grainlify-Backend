@@ -438,6 +438,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// resolve anything. Audited to kyc_reset_audit: who reset whom, from what
 	// status, and why.
 	kycAdmin := handlers.NewKYCAdminHandler(deps.DB, notifSvc)
+	// The review queue and the closed reason list. Static route before the
+	// parameterised one: Fiber matches in registration order, so /kyc/pending
+	// registered after /kyc/:id/resets would be shadowed by it.
+	adminGroup.Get("/kyc/pending", requireAdmin, kycAdmin.Pending())
+	adminGroup.Get("/kyc/reason-codes", requireAdmin, kycAdmin.ReasonCodes())
 	adminGroup.Post("/kyc/:id/reset", requireAdmin, kycAdmin.Reset())
 	adminGroup.Get("/kyc/:id/resets", requireAdmin, kycAdmin.History())
 
