@@ -355,6 +355,16 @@ func (h *KYCAdminHandler) ReasonCodes() fiber.Handler {
 // of one job - the second is somebody a decision has already been made about
 // who may still need telling why.
 //
+// THE TEST FOR ADDING A FIELD HERE: does it carry a document, a decision, or
+// provider text? If it does, it does not belong. If it does not, it can.
+//
+// That distinction is why kyc_session_id IS here while everything else from
+// the provider is not. It is an IDENTIFIER, not data - it names a session
+// without describing it, and without it a reviewer matches a queue row to a
+// session in the Didit console by GitHub username, which the console does not
+// index by. The rule was originally written as "nothing from the provider",
+// which was too blunt and cost a reviewer real time.
+//
 // What it deliberately does NOT return: kyc_data, any document image, or any
 // provider warning text. The admin reads the provider console for the detail;
 // this endpoint carries only what is needed to identify the person, see how
