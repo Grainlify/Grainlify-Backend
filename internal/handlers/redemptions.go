@@ -242,7 +242,7 @@ RETURNING user_id
 		h.notify.Notify(c.Context(), recipientID, notifications.TypeRedemptionPaid,
 			"Redemption paid",
 			"Your points redemption has been paid out.",
-			"/settings?tab=rewards",
+			notifications.SettingsLink(notifications.SubtabRewards),
 		)
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
@@ -303,7 +303,7 @@ RETURNING user_id, points_spent
 		h.notify.Notify(c.Context(), recipientID, notifications.TypeRedemptionRejected,
 			"Redemption rejected",
 			"Your points redemption was rejected and the points have been refunded to your balance.",
-			"/settings?tab=rewards",
+			notifications.SettingsLink(notifications.SubtabRewards),
 		)
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
