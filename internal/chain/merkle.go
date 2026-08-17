@@ -41,17 +41,42 @@ var (
 // **The salt is never published, at any point.** Not in the rules page, not in
 // an API response, not in the operations log, not after the event settles.
 //
-// This is the whole privacy mechanism. Claim transactions already put wallet
-// addresses on-chain by their own nature, and the leaf commits to an identity
-// hash beside the address. If the salt were ever released, anyone holding a
-// list of GitHub logins - which is public - could compute every identity hash,
-// match them against the leaves, and read off each contributor's address:
-// reconstructing exactly the github_login to wallet mapping §4 exists to
-// prevent. That linkage is permanent and, for some contributors, a safety
-// issue rather than a preference.
+// # What this actually protects, stated accurately
+//
+// An earlier version of this comment said the salt prevents anyone deriving a
+// github_login to address mapping from the chain. **That claim is too strong and
+// should not be repeated**, least of all in anything user-facing.
+//
+// What the salt does: it raises the cost of **bulk** correlation. Without it,
+// anyone holding the list of GitHub logins - which is public - could compute
+// every identity hash, match them against the leaves, and read off every
+// contributor's address in one pass. The salt makes that impossible without also
+// holding the salt.
+//
+// What the salt does not do: prevent a **targeted** correlation. A claim puts an
+// address on-chain receiving an exact amount at an exact time, and the allocation
+// is a deterministic function of merged pull requests, which are public. So for a
+// contributor whose amount is distinctive, the leaf never needs to be reversed -
+// the amount identifies them. With a pool of a few dozen members and a
+// share-based allocation, some amounts are unique.
+//
+// This is not a defect being papered over: at this size the alternatives cost
+// more than they buy, and rounding amounts until they collide would corrupt the
+// allocation. It is written down because the flattering version of the sentence
+// is the one that ends up in a grant application, and somebody will eventually
+// rely on it more heavily than it can bear.
 //
 // The salt is per event, so leaves cannot be correlated across events even by
 // someone who later learns one event's salt.
+//
+// # What holding the salt means
+//
+// For as long as we hold it, we retain the ability to link a leaf to a GitHub
+// login - so it is not only a secret to protect, it is a capability we possess.
+// Destroying it is what makes that link unrecoverable by anyone, ourselves
+// included, and destruction is therefore irreversible in both directions: it
+// forecloses bulk deanonymisation by a future leaker, and forecloses our own
+// ability to answer "was this leaf really mine?" for a contributor who asks.
 //
 // Lowercasing the login before hashing is load-bearing: GitHub records
 // capitalisation inconsistently, and hashing the raw value would give one

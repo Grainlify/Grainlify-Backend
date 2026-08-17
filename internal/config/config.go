@@ -66,6 +66,25 @@ type Config struct {
 	// Used to encrypt stored OAuth access tokens at rest. Must be 32 bytes base64 (AES-256-GCM key).
 	TokenEncKeyB64 string
 
+	// SaltEncKeyB64 encrypts per-event Merkle identity salts at rest.
+	//
+	// **Deliberately separate from TokenEncKeyB64**, which protects GitHub
+	// access tokens, because the two secrets have opposite recoverability. A
+	// leaked token key is survivable: rotate it, re-encrypt, and the exposure
+	// ends. A leaked salt is not recoverable by any action - the identity
+	// hashes it protects are on a permanent chain, so anyone holding the salt
+	// and the public list of GitHub logins can correlate the leaf set in bulk,
+	// forever, and no rotation can undo it because a published root cannot be
+	// republished.
+	//
+	// One key protecting both would mean one compromise costs both, and only
+	// one of them can be recovered from.
+	//
+	// 32 bytes, base64-standard-encoded, same shape as TokenEncKeyB64 and
+	// validated by cryptox.KeyFromB64. Generated and held outside this
+	// application; nothing in this repository should ever produce it.
+	SaltEncKeyB64 string
+
 	// Dev/admin convenience: allow promoting a logged-in user to admin via a shared token.
 	AdminBootstrapToken string
 
@@ -155,6 +174,7 @@ func Load() Config {
 		CORSOrigins:     getEnv("CORS_ORIGINS", ""),
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
+		SaltEncKeyB64:  getEnv("SALT_ENC_KEY_B64", ""),
 
 		AdminBootstrapToken: strings.TrimSpace(getEnv("ADMIN_BOOTSTRAP_TOKEN", "")),
 
