@@ -64,6 +64,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_chain_operations_attempt
 -- which selects rows in 'built' or 'submitted', **cannot return a claim row**,
 -- because such a row cannot exist. The mistake stops being a discipline and
 -- becomes a storage error.
+--
+-- DO NOT DROP THIS BECAUSE internal/chainops ALREADY GUARDS IT.
+--
+-- It does, and that is not a reason. The two layers fail in different
+-- directions, and neither covers the other's case:
+--
+--   * The Go gate (a Submittable that cannot be constructed from a claim) is
+--     bypassed by anybody writing their own SQL, or a new query, or a script.
+--     Plenty of code will touch this table without importing that package.
+--
+--   * This constraint is bypassed by a database restored, branched or migrated
+--     without it - at which point the only thing standing between a stale row
+--     and a push payout is a Go type somebody has to remember to route through.
+--
+-- The pair is deliberate. Reading one and concluding the other is redundant is
+-- the specific mistake this paragraph exists to interrupt: they look like
+-- duplicates and are not.
 ALTER TABLE chain_operations
   ADD CONSTRAINT chain_operations_claims_are_observed_not_submitted
   CHECK (kind <> 'claim' OR state IN ('confirmed', 'paid', 'reorged'));
