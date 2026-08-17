@@ -541,3 +541,31 @@ projectsFxSeedManyContributors(t, d.Pool, id, 40)
 limited result, the fixture must be seeded high on the ranking key. A fixture
 at zero is asserting "nobody else in the shared database has any data", which
 is true exactly once — the first time it runs.
+
+## The related trap: a migration that travelled invisibly
+
+Migration `000069` (`merged_by_login`) reached production inside PR #453, a
+**notification link fix**. It was committed as WIP on `feat/store-merged-by`,
+and `fix/notification-links` was then branched from that branch instead of from
+`main` - so an unrelated migration rode along with a copy change and nobody
+looked, because nobody expected a migration in that PR.
+
+**It was safe only because it was nullable and additive.** The column exists in
+production, nothing writes it yet, and the deployed code is unaffected.
+
+A migration that renamed or dropped a column, arriving the same way, would have
+broken production - and it would have broken it from a pull request whose title
+said nothing about the schema, which is the worst place to look for the cause.
+
+**The hazard is not the ordering. It is that the migration was invisible.**
+The two-open-migrations trap above is about numbering; this one is about a
+change nobody knew was in the diff.
+
+### What to check
+
+- **Branch from `main`, not from a WIP branch.** A branch point carries
+  everything on it, including things you were not finished with.
+- **Before merging, confirm the migrations in the diff are the ones the pull
+  request is about.** `git diff --name-only main...HEAD -- migrations/` takes a
+  second and answers it exactly. An empty result on a copy change is the
+  expected answer; anything else needs explaining before the merge, not after.
