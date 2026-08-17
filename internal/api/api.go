@@ -430,11 +430,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/users", requireAdmin, admin.ListUsers())
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
 
-	// Admin KYC reset. A refused verification is terminal in the UI
-	// (canStartNewKYCSession allows only "", expired and not_started), so
-	// without this the only way to unblock a contributor is an UPDATE against
-	// production - which is how four of them were unblocked, invisibly.
-	// Audited to kyc_reset_audit: who reset whom, from what status, and why.
+	// Admin KYC reset. Contributors can now retry a *refused* verification
+	// themselves (canStartNewKYCSession accepts "rejected"), so this is no
+	// longer the only exit from a dead end. It remains the exit for the
+	// states a contributor cannot leave alone - chiefly a session stuck in
+	// in_review, where re-attempting would create a duplicate rather than
+	// resolve anything. Audited to kyc_reset_audit: who reset whom, from what
+	// status, and why.
 	kycAdmin := handlers.NewKYCAdminHandler(deps.DB, notifSvc)
 	adminGroup.Post("/kyc/:id/reset", requireAdmin, kycAdmin.Reset())
 	adminGroup.Get("/kyc/:id/resets", requireAdmin, kycAdmin.History())

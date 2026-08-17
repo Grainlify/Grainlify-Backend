@@ -16,11 +16,16 @@ import (
 
 // Admin reset of a contributor's KYC status.
 //
-// A refused verification is terminal in the product: canStartNewKYCSession
-// allows only "", "expired" and "not_started", so a contributor whose documents
-// were rejected cannot start again from the UI at all. Until this existed the
-// only exit was an admin running UPDATE by hand against production - which
-// happened, for four contributors, and left no record of who did it or why.
+// This existed because the only alternative was an admin running UPDATE by
+// hand against production - which happened, for four contributors, and left no
+// record of who did it or why.
+//
+// Its scope narrowed once canStartNewKYCSession began accepting "rejected": a
+// refused contributor can now retry without anybody's help, so this is no
+// longer the exit from that dead end. What it still covers is every state a
+// contributor cannot leave on their own - above all in_review, where a session
+// is waiting on a decision that may never come, and where re-attempting would
+// produce a duplicate session rather than resolve the first.
 //
 // What it deliberately does NOT do:
 //

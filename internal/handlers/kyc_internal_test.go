@@ -25,7 +25,12 @@ func TestCanStartNewKYCSession(t *testing.T) {
 		{"pending", ptr("pending"), false, "verification is genuinely in flight"},
 		{"in review", ptr("in_review"), false, "submitted, awaiting a decision"},
 		{"verified", ptr("verified"), false, "already done"},
-		{"rejected", ptr("rejected"), false, "has a result; reopening needs an admin"},
+		// Was false. A refusal is a result, not progress: there is nothing in
+		// flight to lose by starting over, which is the same argument that
+		// already allows "expired" and "abandoned". Blocking it made the UI
+		// tell people "please try again" beside no way to do so, and produced
+		// a support ticket that said only "my kyc was rejected".
+		{"rejected", ptr("rejected"), true, "refused, but may try again without an admin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := canStartNewKYCSession(tc.status); got != tc.want {
