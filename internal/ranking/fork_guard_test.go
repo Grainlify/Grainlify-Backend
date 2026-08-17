@@ -60,7 +60,7 @@ func TestEligibilityPredicateAppliesEverywhere(t *testing.T) {
 		}
 		window := text[m[0]:windowEnd]
 
-		want := "notAFork"
+		want := "NotAFork"
 		if alias == "p2" {
 			want = "notAForkP2"
 		}
@@ -77,7 +77,7 @@ func TestEligibilityPredicateAppliesEverywhere(t *testing.T) {
 	// And the definitions themselves must still say what they are meant to say.
 	// A guard that only checks a name is satisfied by a constant set to "".
 	for _, def := range []string{
-		`const notAFork = "AND COALESCE(p.is_fork, FALSE) = FALSE"`,
+		`const NotAForkCondition = "COALESCE(p.is_fork, FALSE) = FALSE"`,
 		`const notAForkP2 = "AND COALESCE(p2.is_fork, FALSE) = FALSE"`,
 	} {
 		if !strings.Contains(text, def) {
