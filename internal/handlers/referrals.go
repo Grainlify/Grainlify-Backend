@@ -264,5 +264,5 @@ WHERE id = $2 AND status = 'pending'
 		title = "Someone you referred is verified"
 		body = "They completed verification, and your referral is recorded. Rewards are moving to the Founding Contributor Pool - we'll share the details before it opens."
 	}
-	notify.Notify(ctx, referrerUserID, notifications.TypeReferralCompleted, title, body, "/settings?tab=referrals")
+	notify.Notify(ctx, referrerUserID, notifications.TypeReferralCompleted, title, body, notifications.SettingsLink(notifications.SubtabReferrals))
 }

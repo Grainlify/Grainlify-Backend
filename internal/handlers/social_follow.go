@@ -589,7 +589,7 @@ func (h *SocialFollowHandler) notifyDecision(c *fiber.Ctx, userID uuid.UUID, to,
 	default:
 		return
 	}
-	h.notify.Notify(c.Context(), userID, notifications.TypeSocialFollowCompleted, title, body, "/settings?subtab=rewards")
+	h.notify.Notify(c.Context(), userID, notifications.TypeSocialFollowCompleted, title, body, notifications.SettingsLink(notifications.SubtabRewards))
 }
 
 // Approve handles POST /admin/social-follow/submissions/:id/approve.

@@ -47,6 +47,14 @@ type PRListItem struct {
 	} `json:"user"`
 	Merged   bool    `json:"merged"`
 	MergedAt *string `json:"merged_at"`
+	// MergedBy is who accepted the work, which is the entire reason ranking
+	// counts merges at all. Absent from the LIST endpoint this sync uses -
+	// like `merged` itself - and present only on the single-PR GET and on the
+	// pull_request webhook payload, so it arrives by webhook or not at all
+	// unless somebody pays an API call per pull request.
+	MergedBy *struct {
+		Login string `json:"login"`
+	} `json:"merged_by"`
 	// The commit the PR was merged as. Used to pin judging citations to
 	// the diff as merged, so a link to "file.go:44-61" still points at the
 	// right lines after the branch moves on.

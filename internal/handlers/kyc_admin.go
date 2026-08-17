@@ -154,7 +154,7 @@ VALUES ($1, $2, $3, $4, $5)
 			h.notify.Notify(c.Context(), subjectID, notifications.TypeKYCReset,
 				"You can verify your identity again",
 				"An admin has reset your verification so you can try again: "+reason,
-				"/settings?tab=payout")
+				notifications.SettingsLink(notifications.SubtabPayout))
 		}
 
 		return c.JSON(fiber.Map{"ok": true, "previous_status": prev, "status": "expired"})
