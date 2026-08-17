@@ -350,6 +350,12 @@ WHERE state = $1
 			RedirectURL:  effectiveGitHubRedirect(h.cfg),
 		})
 		if err != nil {
+			// Both this and github_user_fetch_failed answer 401 and, until
+			// now, logged nothing at all - so a failed callback was two
+			// indistinguishable causes behind one silence. Signup broke for
+			// several hours and the only evidence was a status code.
+			slog.Error("OAuth callback - token exchange failed",
+				"kind", storedKind, "error", err)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "token_exchange_failed"})
 		}
 
@@ -365,6 +371,12 @@ WHERE state = $1
 		gh := github.NewClient()
 		u, err := gh.GetUser(c.Context(), tr.AccessToken)
 		if err != nil {
+			// The error carries GitHub's status, body and rate-limit headers
+			// (github.APIError). The scope is logged because a token minted
+			// with the wrong scopes and a token rejected outright present
+			// identically here, and only one of them is our fault.
+			slog.Error("OAuth callback - GitHub /user fetch failed",
+				"kind", storedKind, "granted_scope", tr.Scope, "error", err)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "github_user_fetch_failed"})
 		}
 

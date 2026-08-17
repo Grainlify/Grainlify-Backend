@@ -52,6 +52,20 @@ type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	Scope       string `json:"scope"`
+
+	// GitHub answers a REFUSED exchange with HTTP 200 and an error payload
+	// rather than a 4xx, so the status code alone cannot tell a rejected code
+	// from an accepted one. Without these fields the three causes collapse
+	// into one useless message:
+	//
+	//   bad_verification_code    the code was reused, or expired (10 min)
+	//   incorrect_client_credentials  the client secret is wrong or rotated
+	//   redirect_uri_mismatch    the callback URL no longer matches the app
+	//
+	// The middle one is a credential incident and the first is routine. They
+	// are worth being able to tell apart at a glance.
+	ErrorCode        string `json:"error"`
+	ErrorDescription string `json:"error_description"`
 }
 
 func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenResponse, error) {
@@ -85,15 +99,22 @@ func ExchangeCode(ctx context.Context, code string, cfg OAuthConfig) (TokenRespo
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return TokenResponse{}, fmt.Errorf("token exchange failed: status %d", resp.StatusCode)
+		// Deliberately not newAPIError: a 2xx body from this endpoint carries
+		// the access token, and an error formatter that ever prints the body
+		// is one refactor away from printing a token. Only the parsed error
+		// fields below are ever surfaced from here.
+		return TokenResponse{}, fmt.Errorf("github token exchange failed: status %d", resp.StatusCode)
 	}
 
 	var tr TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return TokenResponse{}, err
 	}
+	if tr.ErrorCode != "" {
+		return TokenResponse{}, fmt.Errorf("github token exchange refused: %s (%s)", tr.ErrorCode, tr.ErrorDescription)
+	}
 	if tr.AccessToken == "" {
-		return TokenResponse{}, fmt.Errorf("token exchange returned empty token")
+		return TokenResponse{}, fmt.Errorf("github token exchange returned no token and no error")
 	}
 	return tr, nil
 }
