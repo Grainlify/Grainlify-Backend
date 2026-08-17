@@ -1,0 +1,14 @@
+-- Deliberately a no-op.
+--
+-- A wave assignment is permanent by design: AssignWave is idempotent precisely
+-- so nobody can be moved between waves or leave a gap in the sequence, and
+-- founding_members.sequence_number is UNIQUE and gapless on purpose. Removing
+-- a row here would burn its number - the next allocation reads max+1, so the
+-- gap is never refilled - in the one tier whose entire value is that it is
+-- countable.
+--
+-- Rolling this back therefore does more damage than the forward migration
+-- could, and it is not something a `migrate down` should manage. If a
+-- backfilled member genuinely has to be removed, that is a deliberate,
+-- reviewed operation with the sequence consequences decided in advance.
+SELECT 1;
