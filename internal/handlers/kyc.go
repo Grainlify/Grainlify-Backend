@@ -647,11 +647,22 @@ WHERE id = $2
 					if kycStatus != nil {
 						oldStatusStr = *kycStatus
 					}
+					// Stamped on the TRANSITION into verified only - see the
+					// matching write in didit_webhook.go. The unqualified
+					// kyc_status here is the row's pre-update value, so a poll
+					// that observes somebody still verified leaves their
+					// original date alone. This path re-stamped on every poll,
+					// and since the poll runs whenever the contributor opens
+					// their billing page, the date drifted forward for as long
+					// as somebody kept looking at it.
 					_, updateErr := h.db.Pool.Exec(c.Context(), `
 UPDATE users
 SET kyc_status = $1,
     kyc_data = $2,
-    kyc_verified_at = CASE WHEN $1 = 'verified' THEN now() ELSE kyc_verified_at END,
+    kyc_verified_at = CASE
+      WHEN $1 = 'verified' AND kyc_status IS DISTINCT FROM 'verified' THEN now()
+      ELSE kyc_verified_at
+    END,
     updated_at = now()
 WHERE id = $3
 `, newStatus, decisionJSON, userID)
