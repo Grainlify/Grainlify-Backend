@@ -502,3 +502,42 @@ loud rather than silent.
 The reason it is written down is that the error names a migration and a version
 number, so the obvious first move is to go and read the migration — which is
 correct, and wastes the time it takes to establish that.
+
+# Shared-fixture accumulation, fourth occurrence: a top-N query plus a zero-value fixture
+
+## What happened
+
+`TestRecommended_DoesNotRecommendForks` passed on its own and failed in the
+full suite, on a change that had nothing to do with it.
+
+The recommendations query orders by `contributors_count DESC, stars DESC` and
+takes a limit. The test seeded two projects with **zero contributors** and
+asserted that the non-fork one appeared. Alone in a near-empty database it
+ranked fine. Run after the rest of the suite, every project seeded by every
+other test outranked it and it fell outside the limit — so the assertion
+"a real project is still recommended" failed, and the failure pointed at
+recommendations rather than at the fixture.
+
+## Why this shape is invisible
+
+A zero-value fixture against a top-N query has no failure signal of its own.
+It works until somebody else's data grows, and the test that breaks is not the
+test that grew. Nothing in the failing test mentions ordering, so the first
+instinct is to look at the query it is asserting on.
+
+It is the same family as the third occurrence (top-N assertions rot) but a
+distinct cause: there, the assertion drifted as data accumulated; here, the
+FIXTURE was never competitive to begin with.
+
+## What to do
+
+Seed the fixture above the field it competes against, not at zero:
+
+```go
+projectsFxSeedManyContributors(t, d.Pool, id, 40)
+```
+
+**The general rule:** if a test asserts that a seeded row appears in a ranked,
+limited result, the fixture must be seeded high on the ranking key. A fixture
+at zero is asserting "nobody else in the shared database has any data", which
+is true exactly once — the first time it runs.
