@@ -2,6 +2,9 @@ package founding
 
 import (
 	"context"
+	"errors"
+	"math/big"
+	"sort"
 	"sync"
 	"testing"
 
@@ -324,7 +327,7 @@ func TestGrant_IsIdempotentPerSourceEvent(t *testing.T) {
 // things around it that are easy to get wrong: the multiplier applies to a
 // member's whole total, and an ineligible member is excluded from the divisor
 // rather than silently shrinking everyone else's payout.
-func TestCompute_DividesPoolByEffectiveShares(t *testing.T) {
+func TestDryRun_DividesPoolByEffectiveShares(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
 	resetFounding(t, d)
@@ -365,35 +368,360 @@ func TestCompute_DividesPoolByEffectiveShares(t *testing.T) {
 		t.Fatalf("grant b: %v", err)
 	}
 
-	res, err := Compute(ctx, d.Pool, nil, cfg)
+	res, err := DryRun(ctx, d.Pool, cfg)
 	if err != nil {
-		t.Fatalf("Compute: %v", err)
+		t.Fatalf("DryRun: %v", err)
 	}
-	if res.TotalShares != 15 {
-		t.Errorf("total effective shares = %v, want 15 (the ineligible member must not be in the divisor)", res.TotalShares)
-	}
-	if res.ShareValueUSDC < 66.66 || res.ShareValueUSDC > 66.67 {
-		t.Errorf("share value = %v, want ~66.667 (1000/15)", res.ShareValueUSDC)
+	if want := big.NewRat(15, 1); res.TotalEffective.Cmp(want) != 0 {
+		t.Errorf("total effective shares = %v, want 15 (the ineligible member must not be in the divisor)", res.TotalEffective)
 	}
 
 	byUser := map[uuid.UUID]Line{}
 	for _, l := range res.Lines {
 		byUser[l.UserID] = l
 	}
-	if got := byUser[a].USDCAmount; got < 999.99 || got > 1000.01 {
-		t.Errorf("eligible member payout = %v, want the whole 1000 pool", got)
+	// The whole 1000 pool, exactly, in minor units - not "about 1000".
+	if got := byUser[a].AmountMinor; got.Cmp(big.NewInt(1_000_000_000)) != 0 {
+		t.Errorf("eligible member payout = %s minor units, want exactly 1000000000", got)
 	}
-	if got := byUser[b].USDCAmount; got != 0 {
-		t.Errorf("ineligible member payout = %v, want 0", got)
+	if got := byUser[b].AmountMinor; got.Sign() != 0 {
+		t.Errorf("ineligible member payout = %s, want 0", got)
 	}
 	if byUser[b].IneligibleReason == "" {
 		t.Error("ineligible member has no recorded reason; why somebody got nothing has to be answerable")
+	}
+
+	// A zero line must never reach a tree: the contract rejects amount <= 0,
+	// so the leaf would be permanently unclaimable, and it would commit "this
+	// person got nothing" to a root that cannot be edited.
+	for _, l := range res.PayableLines() {
+		if l.UserID == b {
+			t.Error("the ineligible member appears in PayableLines")
+		}
+	}
+
+	// DryRun writes nothing. This is the property that lets the output be read
+	// and re-read before a chain step without recording a settlement.
+	var settlements int
+	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM founding_settlements`).Scan(&settlements); err != nil {
+		t.Fatalf("count settlements: %v", err)
+	}
+	if settlements != 0 {
+		t.Errorf("DryRun wrote %d settlement rows; it must write none", settlements)
+	}
+	if res.SettlementID != uuid.Nil {
+		t.Error("DryRun set a SettlementID; only Persist may do that")
+	}
+}
+
+// TestDryRun_LinesSumExactlyToThePool is the invariant that cannot be checked
+// after the fact.
+//
+// A root larger than the escrow is refused by the contract, so an over-
+// allocation will simply not publish. An under-allocation is worse: it
+// publishes, and the difference is stranded in escrow behind the sweep
+// timelock with no way to pay it to the people it belonged to.
+//
+// The share counts here are chosen to force a remainder - three members
+// splitting a pool that does not divide by three.
+func TestDryRun_LinesSumExactlyToThePool(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000"
+	cfg["founding_require_social_follow"] = "true"
+
+	for i := 0; i < 3; i++ {
+		u := newUser(t, d)
+		completeSocialFollow(t, d, u)
+		if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+			t.Fatalf("assign: %v", err)
+		}
+		src := uuid.New()
+		if _, err := Grant(ctx, d.Pool, u, 1, ReasonMergedPR, &src, cfg); err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+	}
+
+	res, err := DryRun(ctx, d.Pool, cfg)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	want := big.NewInt(1_000_000_000) // 1000 USDC at 6 decimals
+	if got := res.TotalAllocatedMinor(); got.Cmp(want) != 0 {
+		t.Fatalf("allocated %s minor units, want exactly %s", got, want)
+	}
+	if res.PoolMinor.Cmp(want) != 0 {
+		t.Fatalf("pool = %s minor units, want %s", res.PoolMinor, want)
+	}
+
+	// 1000000000 / 3 = 333333333 remainder 1. Exactly one member receives the
+	// extra unit; the other two receive the floor.
+	var extra int
+	for _, l := range res.Lines {
+		switch l.AmountMinor.Int64() {
+		case 333_333_334:
+			extra++
+		case 333_333_333:
+		default:
+			t.Errorf("unexpected allocation %s", l.AmountMinor)
+		}
+	}
+	if extra != 1 {
+		t.Errorf("%d members received the leftover unit, want exactly 1", extra)
+	}
+}
+
+// TestDryRun_RemainderGoesToTheLowestUserIDOnATie pins the tie-break rule.
+//
+// Three identical members means three identical remainders, so the rule is the
+// only thing deciding who gets the odd minor unit. Left to map or query order
+// it would differ between runs, and a settlement nobody can recompute cannot
+// answer a dispute months later.
+func TestDryRun_RemainderGoesToTheLowestUserIDOnATie(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000"
+	cfg["founding_require_social_follow"] = "true"
+
+	var ids []uuid.UUID
+	for i := 0; i < 3; i++ {
+		u := newUser(t, d)
+		completeSocialFollow(t, d, u)
+		if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+			t.Fatalf("assign: %v", err)
+		}
+		src := uuid.New()
+		if _, err := Grant(ctx, d.Pool, u, 1, ReasonMergedPR, &src, cfg); err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+		ids = append(ids, u)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a].String() < ids[b].String() })
+
+	// Same inputs, twice: the same person must win both times.
+	for run := 0; run < 2; run++ {
+		res, err := DryRun(ctx, d.Pool, cfg)
+		if err != nil {
+			t.Fatalf("DryRun: %v", err)
+		}
+		for _, l := range res.Lines {
+			if l.AmountMinor.Int64() == 333_333_334 && l.UserID != ids[0] {
+				t.Errorf("run %d: leftover unit went to %s, want the lowest user id %s", run, l.UserID, ids[0])
+			}
+		}
+	}
+}
+
+// TestDryRun_LargestRemainderWinsTheLeftoverUnit pins the apportionment rule
+// itself, as distinct from the tie-break.
+//
+// Three members at 1, 2 and 4 raw shares split 1000 USDC in a ratio of 1:2:4,
+// which divides by seven and so leaves a remainder for everybody:
+//
+//	1/7 of 1e9 = 142857142.857...  floor 142857142  remainder 6/7  <- largest
+//	2/7 of 1e9 = 285714285.714...  floor 285714285  remainder 5/7
+//	4/7 of 1e9 = 571428571.428...  floor 571428571  remainder 3/7  <- smallest
+//
+// The floors sum to 999999998, so exactly two leftover units exist and the two
+// largest remainders take them. The member with the FEWEST shares therefore
+// gains a unit and the member with the MOST does not, which is the assertion
+// that separates largest-remainder from smallest-remainder - a distinction the
+// identical-member tie test above cannot see, because there every remainder is
+// equal and any ordering produces the same totals.
+func TestDryRun_LargestRemainderWinsTheLeftoverUnit(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000"
+	cfg["founding_require_social_follow"] = "true"
+
+	rawByUser := map[uuid.UUID]int64{}
+	for _, raw := range []int64{1, 2, 4} {
+		u := newUser(t, d)
+		completeSocialFollow(t, d, u)
+		if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+			t.Fatalf("assign: %v", err)
+		}
+		src := uuid.New()
+		if _, err := Grant(ctx, d.Pool, u, float64(raw), ReasonMergedPR, &src, cfg); err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+		rawByUser[u] = raw
+	}
+
+	res, err := DryRun(ctx, d.Pool, cfg)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	got := map[int64]int64{}
+	for _, l := range res.Lines {
+		got[rawByUser[l.UserID]] = l.AmountMinor.Int64()
+	}
+
+	// The smallest holder took a leftover unit; the largest did not.
+	want := map[int64]int64{
+		1: 142_857_143,
+		2: 285_714_286,
+		4: 571_428_571,
+	}
+	for raw, w := range want {
+		if got[raw] != w {
+			t.Errorf("member with %d raw shares got %d minor units, want %d", raw, got[raw], w)
+		}
+	}
+	if total := res.TotalAllocatedMinor(); total.Cmp(big.NewInt(1_000_000_000)) != 0 {
+		t.Errorf("allocated %s, want exactly 1000000000", total)
+	}
+}
+
+// TestApportion_RefusesAnInconsistentDivisor exercises the over-allocation
+// guard directly.
+//
+// The guard cannot be reached through DryRun while the apportionment is
+// correct, so it is driven here with a divisor smaller than the shares it is
+// meant to divide - the shape a future change to the method could produce. No
+// database is involved.
+func TestApportion_RefusesAnInconsistentDivisor(t *testing.T) {
+	lines := []Line{
+		{UserID: uuid.New(), EffectiveShares: big.NewRat(3, 1)},
+		{UserID: uuid.New(), EffectiveShares: big.NewRat(3, 1)},
+	}
+	// A divisor of 1 against 6 shares means the floors alone claim six times
+	// the pool.
+	err := apportion(lines, big.NewInt(1_000_000), big.NewRat(1, 1))
+	if !errors.Is(err, ErrAllocationMismatch) {
+		t.Errorf("apportion error = %v, want ErrAllocationMismatch", err)
+	}
+}
+
+// TestDryRun_RefusesAPoolItCannotExpressExactly covers the other end of the
+// conversion. A pool configured with more precision than the asset carries
+// would settle a different number from the one announced, so it is refused
+// rather than rounded.
+func TestDryRun_RefusesAPoolItCannotExpressExactly(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000.0000001" // 7 dp, USDC has 6
+	cfg["founding_require_social_follow"] = "true"
+
+	u := newUser(t, d)
+	completeSocialFollow(t, d, u)
+	if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	src := uuid.New()
+	if _, err := Grant(ctx, d.Pool, u, 1, ReasonMergedPR, &src, cfg); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	if _, err := DryRun(ctx, d.Pool, cfg); err == nil {
+		t.Error("DryRun accepted a pool with more precision than USDC can express")
+	}
+}
+
+// TestPersist_RecordsWhatWasApproved covers the half DryRun deliberately does
+// not do, including that the exact integer reaches the row rather than only a
+// decimal rendering of it.
+func TestPersist_RecordsWhatWasApproved(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000"
+	cfg["founding_require_social_follow"] = "true"
+
+	u := newUser(t, d)
+	completeSocialFollow(t, d, u)
+	if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	src := uuid.New()
+	if _, err := Grant(ctx, d.Pool, u, 3, ReasonMergedPR, &src, cfg); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	res, err := DryRun(ctx, d.Pool, cfg)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if err := Persist(ctx, d.Pool, nil, res); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	if res.SettlementID == uuid.Nil {
+		t.Fatal("Persist did not set a SettlementID")
+	}
+
+	var poolMinor, amountMinor int64
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT pool_minor FROM founding_settlements WHERE id = $1`, res.SettlementID,
+	).Scan(&poolMinor); err != nil {
+		t.Fatalf("read settlement: %v", err)
+	}
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT amount_minor FROM founding_settlement_lines WHERE settlement_id = $1 AND user_id = $2`,
+		res.SettlementID, u,
+	).Scan(&amountMinor); err != nil {
+		t.Fatalf("read line: %v", err)
+	}
+	if poolMinor != 1_000_000_000 {
+		t.Errorf("stored pool_minor = %d, want 1000000000", poolMinor)
+	}
+	if amountMinor != 1_000_000_000 {
+		t.Errorf("stored amount_minor = %d, want the whole pool", amountMinor)
+	}
+}
+
+// TestPersist_RefusesAResultThatDoesNotSumToThePool checks the invariant at
+// the moment of recording, not only at the moment of computation. A Result is
+// an ordinary struct a caller can mutate between the two.
+func TestPersist_RefusesAResultThatDoesNotSumToThePool(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	resetFounding(t, d)
+	cfg := defaults()
+	cfg["founding_pool_usdc"] = "1000"
+	cfg["founding_require_social_follow"] = "true"
+
+	u := newUser(t, d)
+	completeSocialFollow(t, d, u)
+	if _, err := AssignWave(ctx, d.Pool, u, cfg); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	src := uuid.New()
+	if _, err := Grant(ctx, d.Pool, u, 1, ReasonMergedPR, &src, cfg); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	res, err := DryRun(ctx, d.Pool, cfg)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	res.Lines[0].AmountMinor.Sub(res.Lines[0].AmountMinor, big.NewInt(1))
+
+	if err := Persist(ctx, d.Pool, nil, res); !errors.Is(err, ErrAllocationMismatch) {
+		t.Errorf("Persist error = %v, want ErrAllocationMismatch", err)
+	}
+	var settlements int
+	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM founding_settlements`).Scan(&settlements); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if settlements != 0 {
+		t.Errorf("a refused Persist wrote %d settlement rows; it must write none", settlements)
 	}
 }
 
 // TestCompute_RefusesWhenNobodyEarnedAnything: dividing by zero would hand
 // the first person the entire pool.
-func TestCompute_RefusesWhenNobodyEarnedAnything(t *testing.T) {
+func TestDryRun_RefusesWhenNobodyEarnedAnything(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
 	resetFounding(t, d)
@@ -402,8 +730,8 @@ func TestCompute_RefusesWhenNobodyEarnedAnything(t *testing.T) {
 	if _, err := AssignWave(ctx, d.Pool, newUser(t, d), cfg); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
-	if _, err := Compute(ctx, d.Pool, nil, cfg); err == nil {
-		t.Error("Compute succeeded with zero shares earned; it must refuse")
+	if _, err := DryRun(ctx, d.Pool, cfg); !errors.Is(err, ErrNoShares) {
+		t.Errorf("DryRun error = %v, want ErrNoShares; dividing by zero would pay the first person everything", err)
 	}
 }
 
