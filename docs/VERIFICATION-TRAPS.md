@@ -303,3 +303,58 @@ for a tree that was neither `origin/main` nor `origin/main` plus the change
 under test. The result was not wrong so much as about something else. Verify in
 an isolated worktree by default — `git worktree add --detach <path> <branch>` —
 so the thing being tested is exactly the thing being shipped.
+
+## 8. An intermittent failure invites you to blame the environment
+
+The environment is usually innocent.
+
+Three new tests went green twice and red on the third run, with no code change
+between them. The first explanation reached for was the shared test database -
+a second session was working in the same checkout that day, the suite touches
+a database several things use, and "flaky, probably the shared DB" is a
+complete-sounding story that requires nothing further of you.
+
+It was wrong. The tests were the problem, and specifically their fixtures:
+
+```go
+const reason = "subject-deletion audit survival probe"   // fixed, every run
+// ...
+`SELECT ... FROM kyc_reset_audit WHERE reason = $1`, reason
+```
+
+Each run inserted a row with that same reason and left it behind. By the third
+run four rows shared it, `QueryRow` returned an arbitrary one - typically an
+earlier run's, already nulled by an earlier deletion - and the assertions ran
+against a row the test had never written. The count made it deterministic in
+hindsight and random-looking at the time.
+
+**The tell:** "flaky" is a description, not a diagnosis, and it is the only bug
+class whose most popular explanation lives outside the code. Nobody says "it's
+probably the environment" about a test that fails every time.
+
+**The check, in order, before the word flaky is used at all:**
+
+1. Run it N times in a row and count. Truly external noise is rarely 1-in-3.
+2. Ask what the test leaves behind. Anything written with a fixed identifier -
+   a constant string, a hardcoded id, a well-known email - accumulates, and a
+   read keyed on that identifier drifts onto a stranger's row.
+3. Ask what else writes to the same rows.
+4. Only then consider the environment.
+
+Keying on an identifier the test itself created (`INSERT ... RETURNING id`) is
+immune to all of it, and `t.Cleanup` keeps the table from growing whatever the
+outcome. Both were applied, and the five consecutive runs that followed are the
+evidence - one green run would have proved nothing, since one green run is what
+started this.
+
+### The related habit worth keeping
+
+These same tests were written to execute a real `DELETE` rather than to read
+`information_schema`. That mattered: the constraint under test was
+self-contradictory - `NOT NULL` together with `ON DELETE SET NULL` - and a
+catalogue query reported both facts happily, each looking correct on its own.
+Only running the delete showed which one won.
+
+**A schema check that reads metadata tests what was declared. Executing the
+operation tests what happens.** When those can differ, the second is the one
+that matters.
