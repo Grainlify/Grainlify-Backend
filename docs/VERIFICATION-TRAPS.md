@@ -139,3 +139,37 @@ and fixed.
 Caught by asking "who else holds one of these?", not by a test. The fix
 translates the legacy parameter into the shared selection and strips it, and
 there is now an assertion for that too.
+
+## 8. A substring match reporting old copy as still live
+
+Verifying that landing-page copy had actually deployed, the check searched the
+live bundles for the new strings (present) and the old ones (should be absent).
+It reported:
+
+```
+OLD copy gone:
+  STILL PRESENT in assets/index-BN-ddiY8.js  <- "Assignment by Weighted Draw"
+```
+
+The old string had not survived. It is **contained in the new one**:
+`"GrainHack: Assignment by Weighted Draw"`. One string, matched twice, reported
+as a failed replacement.
+
+This is the family the contrast tool and the blank e2e page belong to: not a
+null result, a **confident wrong answer**. Acting on it would have meant
+hunting a leftover that did not exist, and possibly "fixing" the correct copy.
+
+### The rule
+
+When verifying a copy replacement, assert **both**:
+
+1. the new string is present, and
+2. the old string does not appear **outside** the new one
+
+Counting occurrences is enough in most cases: if `old` appears exactly as many
+times as `new`, every match is accounted for. Where the strings do not nest
+cleanly, strip the new string from the text before searching for the old one.
+
+The general shape: **a substring is not an occurrence.** Any check that asks
+"is X gone" against text that may contain a superstring of X will answer
+wrongly, and it will answer confidently.
