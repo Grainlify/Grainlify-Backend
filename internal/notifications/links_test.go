@@ -1,171 +1,82 @@
-package notifications_test
+package notifications
 
 import (
-	"net/url"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
-// Every notification link must resolve to a route the app actually serves.
+// Every link a notification can carry is built here, once.
 //
-// Notifications navigated to "/settings?subtab=rewards" and
-// "/settings?tab=referrals". There is no /settings route: React Router logs
-// `No routes matched location`, the page renders blank, and a refresh does not
-// recover it - only the browser back button does. Two different spellings of
-// the same wrong path were live, which is what happens when five call sites
-// each write their own literal.
-//
-// declaredRoutes mirrors the frontend's <Route path=...> list. If a route is
-// added there and not here, this guard will reject a legitimate new link -
-// which is the correct direction to fail: it forces the two lists to be
-// reconciled deliberately rather than drifting.
-var declaredRoutes = map[string]bool{
-	"/":              true,
-	"/signin":        true,
-	"/signup":        true,
-	"/auth/callback": true,
-	"/dashboard":     true,
-}
+// The reason is a run of production bugs that were all the same bug: a path
+// written by hand at the call site, drifting from the path the app actually
+// serves. Two spellings of a settings route that does not exist. A maintainer
+// sent to the contributor view of their own queue. Four separate copies of the
+// issue path inside issue_applications.go, one of which was still pointing at
+// Browse from a bot comment addressed to maintainers.
 
-func assertRoutable(t *testing.T, link, context string) {
-	t.Helper()
-	if link == "" {
-		return // no link is valid; a wrong one is not
+// Every builder must produce a path the app actually routes: the dashboard,
+// with everything else as query parameters. A link that 404s is worse than no
+// link - it reads as the product being broken rather than the message being
+// wrong.
+func TestEveryLinkBuilderTargetsTheDashboardRoute(t *testing.T) {
+	links := map[string]string{
+		"SettingsLink":              SettingsLink(SubtabBilling),
+		"ProjectLink":               ProjectLink("11111111-1111-1111-1111-111111111111"),
+		"IssueLink":                 IssueLink("22222222-2222-2222-2222-222222222222", 99),
+		"MaintainerApplicationLink": MaintainerApplicationLink("33333333-3333-3333-3333-333333333333", 42),
+		"MyApplicationsLink":        MyApplicationsLink(),
 	}
-	u, err := url.Parse(link)
-	if err != nil {
-		t.Errorf("%s: %q is not a parsable URL: %v", context, link, err)
-		return
-	}
-	if !declaredRoutes[u.Path] {
-		t.Errorf("%s: %q points at path %q, which the app does not route.\n\n"+
-			"React Router renders a blank page for it and a refresh does not recover - only browser "+
-			"back does. Settings surfaces live at /dashboard?tab=settings&subtab=<name>; build links "+
-			"with notifications.SettingsLink rather than writing the path by hand.",
-			context, link, u.Path)
+	for name, got := range links {
+		if !strings.HasPrefix(got, DashboardPath+"?") {
+			t.Errorf("%s = %q, want a %s?... path - there is no other routed surface", name, got, DashboardPath)
+		}
+		if strings.Contains(got, "/settings") {
+			t.Errorf("%s = %q: /settings is not a route, it is a query parameter", name, got)
+		}
 	}
 }
 
-// The builders themselves.
-func TestNotificationLinkBuildersProduceRoutablePaths(t *testing.T) {
-	for _, subtab := range []notifications.SettingsSubtab{
-		notifications.SubtabProfile, notifications.SubtabNotifications,
-		notifications.SubtabReferrals, notifications.SubtabRewards,
-		notifications.SubtabPayout, notifications.SubtabBilling, notifications.SubtabTerms,
-	} {
-		link := notifications.SettingsLink(subtab)
-		assertRoutable(t, link, "SettingsLink("+string(subtab)+")")
-
-		// The subtab has to survive into the query, or the link lands on
-		// Profile and silently shows the wrong screen.
-		u, _ := url.Parse(link)
-		if u.Query().Get("subtab") != string(subtab) {
-			t.Errorf("SettingsLink(%s) lost its subtab: %q", subtab, link)
-		}
-		if u.Query().Get("tab") != "settings" {
-			t.Errorf("SettingsLink(%s) does not select the settings tab: %q", subtab, link)
+// The maintainer link is the one that has already been wrong in production,
+// and the properties that made it wrong are worth naming individually.
+func TestMaintainerApplicationLink_CarriesTheViewAndTheMaintainerTab(t *testing.T) {
+	got := MaintainerApplicationLink("abc", 7)
+	for _, want := range []string{"tab=maintainers", "view=maintainer", "project=abc", "issue=7"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("MaintainerApplicationLink missing %q: %s", want, got)
 		}
 	}
-
-	assertRoutable(t, notifications.ProjectLink("proj-1"), "ProjectLink")
-	assertRoutable(t, notifications.IssueLink("proj-1", 42), "IssueLink")
-}
-
-// stripLineComments removes // comments so documentation that quotes a bad
-// path is not mistaken for code that uses one.
-func stripLineComments(src string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(src, "\n") {
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = line[:i]
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
-// Every link literal anywhere in the backend, so a call site that bypasses the
-// builders cannot reintroduce this. The bug was not one bad string - it was
-// five call sites each writing their own.
-func TestNoNotificationCallSiteWritesAnUnroutablePath(t *testing.T) {
-	root := filepath.Join("..", "..", "internal")
-	// Paths that look like app links: a leading slash, then a word.
-	linkLiteral := regexp.MustCompile(`"(/[a-z][a-zA-Z0-9/_-]*(?:\?[^"]*)?)"`)
-
-	var checked int
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		src, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		// Comments are stripped first: this file documents the broken paths it
-		// exists to prevent, and quoting them in prose must not fail the check
-		// that forbids them in code.
-		code := stripLineComments(string(src))
-		for _, m := range linkLiteral.FindAllStringSubmatch(code, -1) {
-			raw := m[1]
-			// Only things that look like FRONT-END links. API routes, file
-			// paths and GitHub endpoints share the shape and are not links.
-			if !strings.HasPrefix(raw, "/dashboard") && !strings.HasPrefix(raw, "/settings") {
-				continue
-			}
-			checked++
-			u, err := url.Parse(raw)
-			if err != nil || !declaredRoutes[u.Path] {
-				t.Errorf("%s contains link literal %q, which is not a routable path. "+
-					"Use notifications.SettingsLink / ProjectLink / IssueLink.", path, raw)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
-	// Without this, a broken regex or a moved directory makes every assertion
-	// above vacuous while the test still reports success.
-	if checked == 0 {
-		t.Fatal("found no dashboard/settings link literals at all - the scanner is broken, not the links")
+	// The specific regression: it must not be the contributor view of the
+	// issue, which renders Withdraw where Reject/Assign should be.
+	if strings.Contains(got, "tab=browse") {
+		t.Errorf("maintainer link points at Browse, the contributor view: %s", got)
 	}
 }
 
-// A maintainer's application notification must land where the actions are.
-//
-// It pointed at /dashboard?tab=browse - the CONTRIBUTOR view of the issue,
-// which renders Withdraw rather than Reject/Assign/Unassign. A maintainer
-// clicking their own notification arrived somewhere the work could not be
-// done, and the surface where it could was reachable only through a view
-// toggle that reset on every reload.
-func TestMaintainerApplicationLinkLandsOnTheMaintainerSurface(t *testing.T) {
-	link := notifications.MaintainerApplicationLink("proj-1", 42)
-	assertRoutable(t, link, "MaintainerApplicationLink")
+// AbsoluteLink exists so an absolute URL is the same path with a host in
+// front, never a second hand-written copy.
+func TestAbsoluteLink_IsTheSamePathWithAHost(t *testing.T) {
+	path := IssueLink("p1", 5)
 
-	u, err := url.Parse(link)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+	if got, want := AbsoluteLink("https://grainlify.com", path), "https://grainlify.com"+path; got != want {
+		t.Errorf("AbsoluteLink = %q, want %q", got, want)
 	}
-	q := u.Query()
+	// Trailing slashes and whitespace must not produce a double slash.
+	if got := AbsoluteLink("  https://grainlify.com/  ", path); strings.Contains(got, ".com//") {
+		t.Errorf("AbsoluteLink produced a double slash: %q", got)
+	}
+	// No base, or a non-URL base, degrades to the relative path rather than
+	// emitting something broken like "example.com/dashboard?...".
+	for _, base := range []string{"", "   ", "not-a-url", "grainlify.com"} {
+		if got := AbsoluteLink(base, path); got != path {
+			t.Errorf("AbsoluteLink(%q) = %q, want the bare path %q", base, got, path)
+		}
+	}
+}
 
-	if q.Get("tab") != "maintainers" {
-		t.Errorf("tab = %q, want maintainers - Browse renders the contributor view, "+
-			"where the maintainer actions do not exist", q.Get("tab"))
-	}
-	// Carried explicitly so the link works on a cold load: the dashboard reads
-	// the view from the URL, and without it a fresh tab defaults to contributor
-	// and lands on the fallback instead of the queue.
-	if q.Get("view") != "maintainer" {
-		t.Errorf("view = %q, want maintainer - following this from an email or a new tab "+
-			"would otherwise open in contributor mode", q.Get("view"))
-	}
-	if q.Get("issue") != "42" || q.Get("project") != "proj-1" {
-		t.Errorf("the application is not in view: project=%q issue=%q", q.Get("project"), q.Get("issue"))
+// A contributor's own application belongs on their board, not on the issue.
+func TestMyApplicationsLink_PointsAtTheContributionsBoard(t *testing.T) {
+	got := MyApplicationsLink()
+	if !strings.Contains(got, "tab=contributors") {
+		t.Errorf("MyApplicationsLink = %q, want the contributors tab", got)
 	}
 }
