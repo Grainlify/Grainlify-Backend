@@ -211,22 +211,38 @@ func NewKYCHandler(cfg config.Config, d *db.DB, notify *notifications.Service) *
 //	nil          no session has ever been created
 //	expired      the session was deleted in the Didit dashboard
 //	not_started  a session exists but the user never opened the link
+//	rejected     the verification was refused; they may try again
 //
-// The third is the one that changed. It reads as "in progress" and is the
-// opposite: the link was created and never followed, so there is no in-flight
-// verification to interrupt and no result to lose. Treating it as active left
-// users permanently unable to start - the only exit was an admin deleting the
-// session by hand - and it is the state you land in by clicking "verify" once
-// and closing the tab.
+// "not_started" reads as "in progress" and is the opposite: the link was
+// created and never followed, so there is no in-flight verification to
+// interrupt and no result to lose. Treating it as active left users
+// permanently unable to start, and it is the state you land in by clicking
+// "verify" once and closing the tab.
 //
-// pending, in_review, verified and rejected all represent real progress and
-// are still protected.
+// **"rejected" is the one that changed.** A refusal was terminal: the UI told
+// the contributor "please try again" while hiding the only control that could,
+// and the sole exit was an admin running a reset. Two contributors sat in that
+// state, one of whom opened a support ticket saying only "my kyc was
+// rejected", which is all the product had told them.
+//
+// A refusal is a *result*, not progress, and there is nothing in flight to
+// lose by starting over - which is exactly the argument that already applies
+// to "expired" and "abandoned". Requiring an admin to reopen it was never a
+// fraud control; it was an accident of the same list that stranded
+// not_started.
+//
+// Note what this does NOT do: it does not tell them why they were refused.
+// That is a separate piece of work, and it is the reason a contributor may
+// retry blindly and be refused again. Retrying blindly still beats a dead end.
+//
+// pending, in_review and verified all represent real progress - a live
+// session, a pending decision, or a completed one - and are still protected.
 func canStartNewKYCSession(status *string) bool {
 	if status == nil {
 		return true
 	}
 	switch *status {
-	case "", "expired", "not_started":
+	case "", "expired", "not_started", "rejected":
 		return true
 	default:
 		return false
@@ -263,21 +279,12 @@ WHERE id = $1
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user_lookup_failed"})
 		}
 
-		// A new session is allowed when there is nothing worth protecting:
+		// A new session is allowed when there is nothing worth protecting -
+		// see canStartNewKYCSession for the full list and the reasoning. In
+		// short: no session, expired, never-opened, or refused.
 		//
-		//   NULL         no session has ever been created
-		//   expired      the session was deleted in the Didit dashboard
-		//   not_started  a session exists but the user never opened the link
-		//
-		// "not_started" used to be treated as an active session and blocked. It
-		// is the opposite: it means the link was created and never followed, so
-		// there is no in-flight verification to interrupt and no result to lose.
-		// Blocking it left users permanently unable to start - the only way out
-		// was an admin deleting the session by hand - and it is the state a user
-		// lands in simply by clicking "verify" once and closing the tab.
-		//
-		// Anything else (pending, in_review, verified, rejected) represents real
-		// progress and is still protected.
+		// Anything else (pending, in_review, verified) is a live session, a
+		// decision in progress, or a completed one, and is still protected.
 		if existingSessionID != nil && !canStartNewKYCSession(existingStatus) {
 			// Get stored KYC data to find session URL
 			var kycDataBytes []byte

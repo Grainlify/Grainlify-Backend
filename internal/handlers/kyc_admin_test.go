@@ -16,10 +16,12 @@ import (
 
 // The admin KYC reset, and the properties that make it safe to hand somebody.
 //
-// It exists because a refused verification is terminal in the UI -
-// canStartNewKYCSession allows only "", "expired" and "not_started" - so the
-// only way to unblock a contributor was an UPDATE against production. That
-// happened for four of them, and left no record of who ran it or why.
+// It exists because the alternative was an UPDATE against production, which
+// happened for four contributors and left no record of who ran it or why.
+//
+// Its scope narrowed once canStartNewKYCSession began accepting "rejected" - a
+// refused contributor retries without help now - but the reset still covers
+// every state they cannot leave alone, chiefly in_review.
 
 // kycAdminApp mounts the two routes with a fixed actor, standing in for
 // RequireAuth + requireAdmin (both are exercised by their own tests; what
