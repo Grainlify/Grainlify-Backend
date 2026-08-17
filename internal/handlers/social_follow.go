@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/founding"
+	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
@@ -382,6 +385,9 @@ type socialFollowDecisionRequest struct {
 // button would have refused.
 type socialFollowDecisionOutcome struct {
 	SubmitterID uuid.UUID
+	// ApprovedCount is set only on a cap refusal, so the message can state the
+	// actual number rather than restating the constant back at the admin.
+	ApprovedCount int
 	// PriorStatus is what the row was before, for reporting a skip honestly:
 	// "already approved" and "already rejected" are different facts and a
 	// reviewer wants to know which.
@@ -394,7 +400,27 @@ type socialFollowDecisionOutcome struct {
 var (
 	errSocialFollowNotActionable = errors.New("submission is not in an actionable state")
 	errSocialFollowNotFound      = errors.New("submission not found")
+	// The cap is reached. Its own sentinel rather than a generic failure,
+	// because it is a deliberate refusal with a specific answer for the admin
+	// - and because the bulk loop has to report it per row rather than
+	// aborting the batch.
+	errSocialFollowCapReached = errors.New("approval cap reached")
 )
+
+// socialFollowApprovalCap bounds how many people can be admitted to the
+// Founding Contributor Pool by approval.
+//
+// Enforced rather than intended, which is the whole distinction: it is checked
+// inside applyDecision, in the same transaction and under the same advisory
+// lock as the write, so two admins approving simultaneously cannot both read
+// 299 and both commit. Checking it in the handler before the transaction would
+// produce exactly that, and would look correct in every test that ran one
+// request at a time.
+//
+// The bulk path gets per-row enforcement for free by calling applyDecision per
+// row. A single check before the loop would admit a whole batch against the
+// last remaining slot.
+const socialFollowApprovalCap = 300
 
 func (h *SocialFollowHandler) applyDecision(
 	ctx context.Context, submissionID, adminID uuid.UUID, to, reasonCode, note string,
@@ -428,6 +454,31 @@ SELECT status, user_id FROM social_follow_submissions WHERE id = $1 FOR UPDATE
 	// all of it, because the queue moves underneath them.
 	if !socialFollowCanTransition(prior, to) {
 		return socialFollowDecisionOutcome{PriorStatus: prior}, errSocialFollowNotActionable
+	}
+
+	// The cap, inside the transaction.
+	//
+	// The advisory lock is what makes the count trustworthy: without it two
+	// concurrent approvals both read 299, both pass, and both commit, so the
+	// cap is exceeded by exactly the number of admins working at once. Same
+	// technique the founding wave allocator uses, and for the same reason -
+	// a number that must be true rather than usually true.
+	//
+	// Only approvals are counted and only approvals are refused; a rejection
+	// or a revocation is always allowed, since neither admits anybody.
+	if to == socialFollowApproved {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('social_follow_approval_cap', 0))`); err != nil {
+			return socialFollowDecisionOutcome{PriorStatus: prior}, err
+		}
+		var approvedNow int
+		if err := tx.QueryRow(ctx, `
+SELECT count(*)::int FROM social_follow_submissions WHERE status = 'approved'
+`).Scan(&approvedNow); err != nil {
+			return socialFollowDecisionOutcome{PriorStatus: prior}, err
+		}
+		if approvedNow >= socialFollowApprovalCap {
+			return socialFollowDecisionOutcome{PriorStatus: prior, ApprovedCount: approvedNow}, errSocialFollowCapReached
+		}
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -505,11 +556,20 @@ func (h *SocialFollowHandler) decide(c *fiber.Ctx, to string, requireReason bool
 			"current_status": outcome.PriorStatus,
 			"message":        socialFollowNotActionableMessage(to, outcome.PriorStatus),
 		})
+	case errors.Is(err, errSocialFollowCapReached):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":    "approval_cap_reached",
+			"cap":      socialFollowApprovalCap,
+			"approved": outcome.ApprovedCount,
+			"message": fmt.Sprintf(
+				"The Founding Contributor Pool is full: %d of %d approvals used. Nobody else can be admitted, "+
+					"and this submission was left as it was.", outcome.ApprovedCount, socialFollowApprovalCap),
+		})
 	case err != nil:
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "decision_failed"})
 	}
 
-	h.notifyDecision(c, outcome.SubmitterID, to, socialFollowDecisionText(nullableString(code), note))
+	h.afterDecision(c, outcome.SubmitterID, to, socialFollowDecisionText(nullableString(code), note))
 	return c.JSON(fiber.Map{"ok": true, "status": to})
 }
 
@@ -571,6 +631,32 @@ func nullableString(s string) *string {
 // A revocation is the one that matters. Eligibility disappearing silently,
 // and only becoming visible when the pool is shared out, is exactly how a
 // fair decision comes to look arbitrary.
+// afterDecision runs every post-commit side effect of one decision.
+//
+// Both the single-decision handler and the bulk loop call this, so an effect
+// added here cannot reach one path and miss the other - which is the shape
+// that has produced most of this codebase's worst bugs. The bulk loop calls it
+// per row for the same reason.
+func (h *SocialFollowHandler) afterDecision(c *fiber.Ctx, userID uuid.UUID, to, reason string) {
+	h.notifyDecision(c, userID, to, reason)
+
+	// An approval is now the other half of wave assignment. Somebody who
+	// verified before being approved has no position; approving them gives
+	// them one. Whichever of (verify, approve) happens second does the work,
+	// and OnSocialFollowApproved is idempotent, so an approval for an
+	// already-assigned member is a no-op.
+	//
+	// Best-effort and after the commit: the approval is durable regardless.
+	if to == socialFollowApproved && h.db != nil && h.db.Pool != nil {
+		cfg, err := hackathon.EffectiveValues(c.Context(), h.db.Pool, nil)
+		if err != nil {
+			slog.Warn("social_follow: config load failed, wave not assigned", "user_id", userID, "error", err)
+			return
+		}
+		founding.OnSocialFollowApproved(c.Context(), h.db.Pool, userID, cfg)
+	}
+}
+
 func (h *SocialFollowHandler) notifyDecision(c *fiber.Ctx, userID uuid.UUID, to, reason string) {
 	if h.notify == nil {
 		return
@@ -704,6 +790,13 @@ func (h *SocialFollowHandler) BulkApprove() fiber.Handler {
 				skipped = append(skipped, fiber.Map{
 					"id": id, "reason": "not_pending", "current_status": outcome.PriorStatus,
 				})
+			case errors.Is(err, errSocialFollowCapReached):
+				// Skipped, not failed, and the loop continues rather than
+				// aborting: every remaining row hits the same wall, and the
+				// admin needs the whole list to know none of them landed.
+				skipped = append(skipped, fiber.Map{
+					"id": id, "reason": "cap_reached", "approved": outcome.ApprovedCount,
+				})
 			case err != nil:
 				slog.Error("social_follow: bulk approve failed for one submission",
 					"submission_id", id, "admin_id", adminID, "error", err)
@@ -717,7 +810,7 @@ func (h *SocialFollowHandler) BulkApprove() fiber.Handler {
 		// After every decision is durable. A notification failure must not make
 		// an approval look like it did not happen.
 		for _, submitter := range notify {
-			h.notifyDecision(c, submitter, socialFollowApproved, "")
+			h.afterDecision(c, submitter, socialFollowApproved, "")
 		}
 
 		return c.JSON(fiber.Map{

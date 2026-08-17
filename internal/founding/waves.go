@@ -131,8 +131,37 @@ func CheckBoundaryConfig(ctx context.Context, pool db.DBPool, cfg map[string]str
 // members 1, 2, 4. With 100 Founding slots that is a slot nobody can ever
 // hold, in the tier whose entire value is that it is countable.
 func AssignWave(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[string]string) (Membership, error) {
+	// Existing members short-circuit BEFORE the gate, and that is deliberate
+	// rather than incidental. It is what makes the gate apply only to
+	// allocations that have not happened yet: everybody who already holds a
+	// number keeps it, unexamined, whether or not they would pass the check
+	// today. "Permanent" stays true.
 	if existing, ok, err := MembershipFor(ctx, pool, userID); err != nil || ok {
 		return existing, err
+	}
+
+	// The gate. Same key and same definition settlement uses - see
+	// internal/founding/gate.go for why there is exactly one switch.
+	//
+	// A sequence number therefore records THE ORDER IN WHICH THE SECOND OF
+	// (verify, approve) COMPLETED. That is a change in what the number means,
+	// and it is the same principle migration 000071 already recorded when it
+	// appended a pre-pool member: sequence is observation order, not
+	// verification order. This widens what "observed" means; it does not
+	// reverse it.
+	//
+	// Both events call this function, so whichever happens second does the
+	// work and the first is a no-op. Without the second caller
+	// (OnSocialFollowApproved) a contributor who verified before being
+	// approved would never be assigned at all, because verification is the
+	// only thing that used to reach here - which would have silently stranded
+	// every person in that order.
+	eligible, reason, err := approvedForFoundingPool(ctx, pool, userID, cfg)
+	if err != nil {
+		return Membership{}, fmt.Errorf("founding.AssignWave: eligibility: %w", err)
+	}
+	if !eligible {
+		return Membership{}, fmt.Errorf("%w (%s)", ErrNotEligibleForWave, reason)
 	}
 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})

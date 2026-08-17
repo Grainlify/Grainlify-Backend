@@ -7,7 +7,6 @@ import (
 	"sort"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 )
@@ -36,40 +35,20 @@ var ErrNoShares = errors.New("no shares were earned, so there is nothing to sett
 // LinkedIn effectively cannot - so what this actually guarantees is that the
 // approval has not been revoked, not that the follow still exists.
 func Eligible(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[string]string) (bool, string, error) {
-	if cfg["founding_require_social_follow"] == "false" {
-		return true, "", nil
-	}
-
-	// Read the submission's own status rather than a separate "completed"
-	// record. The old social_follow_completions table existed to hold
-	// points_awarded and nothing else; a row in it meant "was paid", which is
-	// not the same claim as "is eligible now" and would have kept somebody
-	// eligible after their approval was withdrawn.
-	//
-	// Only 'approved' passes. 'revoked' is the case this distinction exists
-	// for: an approval that has since been withdrawn must not confer
-	// eligibility, and it is the path most likely to break silently, because
-	// a revoked submission still looks like a submission.
-	var status string
-	err := pool.QueryRow(ctx, `
-SELECT status FROM social_follow_submissions WHERE user_id = $1
-`, userID).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, "no social follow submission at settlement", nil
-	}
+	// One definition, shared with AssignWave - see internal/founding/gate.go.
+	// Entry and payment are the same rule, and expressed twice they drift
+	// exactly when somebody flips the switch.
+	ok, reason, err := approvedForFoundingPool(ctx, pool, userID, cfg)
 	if err != nil {
 		return false, "", fmt.Errorf("founding.Eligible: %w", err)
 	}
-
-	switch status {
-	case "approved":
+	if ok {
 		return true, "", nil
-	case "revoked":
-		return false, "social follow approval was revoked before settlement", nil
-	default:
-		// pending or rejected.
-		return false, "social follow not approved at settlement (" + status + ")", nil
 	}
+	// Settlement's wording says "at settlement", because that is when this
+	// runs and the distinction matters in a dispute: the approval was absent
+	// at the moment the pool was shared out, whatever was true earlier.
+	return false, reason + " at settlement", nil
 }
 
 // Line is one member's computed settlement.
