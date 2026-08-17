@@ -80,14 +80,19 @@ type Config struct {
 	DiditWorkflowID    string
 	DiditWebhookSecret string
 
-	// Soroban configuration
-	SorobanRPCURL            string
-	SorobanNetworkPassphrase string
-	SorobanNetwork           string // "testnet" or "mainnet"
-	SorobanSourceSecret      string
-	EscrowContractID         string
-	ProgramEscrowContractID  string
-	TokenContractID          string
+	// No chain configuration is read here.
+	//
+	// Seven keys used to be: four SOROBAN_* including a signing secret, plus
+	// three contract ids. Every one had zero consumers - they were read into
+	// this struct and used by nothing - and the two contract ids named the
+	// escrow and program-escrow contracts whose clients have been deleted for
+	// calling functions that exist nowhere.
+	//
+	// Config that reads a secret and feeds nothing is a liability with no
+	// upside: it makes an unused signing key look provisioned, and it invites
+	// the next person to wire something to it. When a real adapter needs chain
+	// configuration it comes back with the code that consumes it, and the key
+	// lives in a signer service rather than in this process.
 
 	// Notification emails, sent via Mailercloud
 	// (https://apidoc.mailercloud.com). If MailerCloudAPIKey is empty,
@@ -158,15 +163,6 @@ func Load() Config {
 		AnthropicAPIKey:    getEnv("ANTHROPIC_API_KEY", ""),
 		DiditWorkflowID:    getEnv("DIDIT_WORKFLOW_ID", ""),
 		DiditWebhookSecret: getEnv("DIDIT_WEBHOOK_SECRET", ""),
-
-		// Soroban configuration
-		SorobanRPCURL:            getEnv("SOROBAN_RPC_URL", ""),
-		SorobanNetworkPassphrase: getEnv("SOROBAN_NETWORK_PASSPHRASE", ""),
-		SorobanNetwork:           getEnv("SOROBAN_NETWORK", "testnet"),
-		SorobanSourceSecret:      getEnv("SOROBAN_SOURCE_SECRET", ""),
-		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
-		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
-		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),

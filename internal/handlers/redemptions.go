@@ -22,9 +22,11 @@ import (
 const usdcPerPoint = 0.01
 const minRedemptionPoints = 100
 
-// Actually sending USDC is intentionally NOT wired here - there is no
-// funded treasury Stellar account configured yet (see internal/soroban,
-// which is bounty-escrow shaped, not a redeem-on-demand primitive anyway).
+// Actually sending USDC is intentionally NOT wired here - there is no funded
+// treasury account on any chain, and no payout path has ever run. The escrow
+// design being built (internal/chain, plus a per-chain contract) is a
+// pull-based Merkle claim against a published root, which is not a
+// redeem-on-demand primitive and cannot serve this flow as it stands.
 // A redemption is created 'pending' with points deducted immediately (so
 // the same points can't fund two simultaneous requests) and an admin sends
 // the USDC manually, then marks it paid or rejects it (refunding the
