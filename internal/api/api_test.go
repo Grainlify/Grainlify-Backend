@@ -142,31 +142,41 @@ func TestAPICORSAllowOriginsFunc(t *testing.T) {
 		{"https localhost with a port is allowed", "https://localhost:9999", true},
 		{"http 127.0.0.1 with a port is allowed", "http://127.0.0.1:3000", true},
 		{"https 127.0.0.1 with a port is allowed", "https://127.0.0.1:4000", true},
-		{"vercel preview deployment is allowed", "https://grainlify-git-feature-branch.vercel.app", true},
-		{"0xo.in production subdomain is allowed", "https://grainlify.0xo.in", true},
-		{"api subdomain of 0xo.in is allowed", "https://api.grainlify.0xo.in", true},
-		// grainlify.com is the new production domain, kept alongside .0xo.in
-		// during the migration (see the api.go comment right above this
-		// check). Unlike .0xo.in, the bare apex IS allowed here (exact-match
-		// check), not just subdomains - grainlify.com itself is the frontend.
+
+		// The two origins that actually run the frontend.
 		{"grainlify.com apex domain is allowed", "https://grainlify.com", true},
 		{"www subdomain of grainlify.com is allowed", "https://www.grainlify.com", true},
-		{"api subdomain of grainlify.com is allowed", "https://api.grainlify.com", true},
+
+		// The suffix rules that used to be here granted credentialed access to
+		// every host under two domains this project does not control, and
+		// AllowCredentials is true. Both are gone. These cases are the point of
+		// the change, so they assert the refusal directly rather than leaving it
+		// implied by the absence of a case.
+		{"vercel preview deployment is no longer blanket-allowed", "https://grainlify-git-feature-branch.vercel.app", false},
+		{"any other vercel app is rejected", "https://someone-elses-project.vercel.app", false},
+		{"0xo.in production subdomain is rejected", "https://grainlify.0xo.in", false},
+		{"api subdomain of 0xo.in is rejected", "https://api.grainlify.0xo.in", false},
+		{"an unrelated project on the same personal domain is rejected", "https://stellopay.0xo.in", false},
+		{"bare 0xo.in apex domain is rejected", "https://0xo.in", false},
+
+		// Subdomains of grainlify.com are no longer allowed as a class either.
+		// docs is a Docusaurus site whose only reference to the API is a navbar
+		// link, and api is the backend itself; neither makes browser calls that
+		// need CORS. If that ever changes it is one CORS_ORIGINS entry, and the
+		// rejection is logged in the meantime rather than failing silently.
+		{"docs subdomain is rejected (it makes no API calls)", "https://docs.grainlify.com", false},
+		{"api subdomain is rejected (it is the backend, not a browser origin)", "https://api.grainlify.com", false},
+
 		{"lookalike grainlify.com suffix without a leading dot is rejected", "https://evilgrainlify.com", false},
 		{"unrelated origin is rejected", "https://evil-phishing-site.example.com", false},
 		{"lookalike suffix without a leading dot is rejected", "https://notvercel.app", false},
-		// The AllowOriginsFunc suffix check is strictly "*.0xo.in" (must be
-		// preceded by a literal dot); the bare apex domain has no such dot
-		// before it, so it does NOT match on its own - consistent with the
-		// api.go comment "Allow production domain (*.0xo.in) for
-		// grainlify.0xo.in / api.grainlify.0xo.in" (subdomains only).
-		{"bare 0xo.in apex domain (no subdomain) is rejected", "https://0xo.in", false},
-		// Surfacing an actual behavior gap found while writing this test:
-		// the localhost/127.0.0.1 rules in api.go match on the literal
-		// prefix "http://localhost:" (colon included), so an Origin with
-		// no port at all - which is exactly what a browser sends when the
-		// frontend is served on the scheme's default port, e.g. plain
-		// "http://localhost" on port 80 - does NOT match and is rejected.
+
+		// Surfacing an actual behavior gap found while writing this test: the
+		// localhost/127.0.0.1 rules in api.go match on the literal prefix
+		// "http://localhost:" (colon included), so an Origin with no port at
+		// all - which is what a browser sends when served on the scheme's
+		// default port - does NOT match and is rejected. Left as-is; widening
+		// it is a separate decision.
 		{"bare http://localhost with no port is rejected (prefix check requires a trailing colon+port)", "http://localhost", false},
 	}
 

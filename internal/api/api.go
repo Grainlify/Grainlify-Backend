@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -128,8 +129,37 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		}
 	}
 
+	// Cross-origin access is an explicit list.
+	//
+	// It used to contain two suffix rules, "*.0xo.in" and "*.vercel.app", and
+	// AllowCredentials is true, so each granted credentialed browser access to
+	// every host under a domain this project does not control. ".0xo.in" is a
+	// personal domain carrying four unrelated projects; ".vercel.app" is every
+	// site anyone has ever deployed to Vercel. Neither was needed. The only
+	// browser origin that calls this API is the frontend, plus localhost while
+	// developing.
+	//
+	// The escape hatch is CORS_ORIGINS, which is read into explicitOrigins
+	// above - a new origin is one environment variable, not a code change and
+	// not a wildcard.
+	allowedOrigins := map[string]struct{}{
+		"https://grainlify.com":     {},
+		"https://www.grainlify.com": {},
+	}
+	for o := range explicitOrigins {
+		allowedOrigins[o] = struct{}{}
+	}
+	// FrontendBaseURL is the same fact under a different name; an Origin header
+	// never carries a path, so this is an exact match rather than a prefix.
+	if cfg.FrontendBaseURL != "" {
+		allowedOrigins[strings.TrimSuffix(cfg.FrontendBaseURL, "/")] = struct{}{}
+	}
+
 	corsConfig.AllowOriginsFunc = func(origin string) bool {
-		// Always allow localhost origins for development / local frontend testing.
+		// Localhost, for development. Unchanged, including the quirk that the
+		// prefix requires a trailing colon, so a bare "http://localhost" on the
+		// default port is not matched - documented in the test rather than
+		// altered here, since widening it is a separate decision.
 		if strings.HasPrefix(origin, "http://localhost:") ||
 			strings.HasPrefix(origin, "http://127.0.0.1:") ||
 			strings.HasPrefix(origin, "https://localhost:") ||
@@ -137,38 +167,15 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 			return true
 		}
 
-		// Allow all Vercel preview deployments (*.vercel.app)
-		if strings.HasSuffix(origin, ".vercel.app") {
+		if _, ok := allowedOrigins[origin]; ok {
 			return true
 		}
 
-		// Allow production domain (*.0xo.in) for grainlify.0xo.in / api.grainlify.0xo.in
-		if strings.HasSuffix(origin, ".0xo.in") {
-			return true
-		}
-
-		// Allow the new production domain (grainlify.com and its subdomains,
-		// e.g. www.grainlify.com) - kept alongside .0xo.in above during the
-		// migration rather than replacing it, so the still-live .0xo.in
-		// frontend doesn't lose CORS access before DNS/OAuth app settings for
-		// grainlify.com are actually cut over.
-		if origin == "https://grainlify.com" || strings.HasSuffix(origin, ".grainlify.com") {
-			return true
-		}
-
-		// Check explicit CORS origins from config
-		if _, ok := explicitOrigins[origin]; ok {
-			return true
-		}
-
-		// If FrontendBaseURL is set, allow it (exact match or with path)
-		if cfg.FrontendBaseURL != "" {
-			frontendBase := strings.TrimSuffix(cfg.FrontendBaseURL, "/")
-			if origin == frontendBase || strings.HasPrefix(origin, frontendBase+"/") {
-				return true
-			}
-		}
-
+		// A CORS refusal is invisible server-side and surfaces only in a browser
+		// console nobody is watching. If this list is missing something real,
+		// that must be findable in the logs rather than reported as a bug weeks
+		// later.
+		noteRejectedOrigin(origin)
 		return false
 	}
 
@@ -615,4 +622,44 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	)
 
 	return app
+}
+
+// noteRejectedOrigin logs each distinct origin refused by CORS, once.
+//
+// Once, because the alternative is a log line per preflight, and a scanner
+// walking the API would drown everything else. Distinct, because the fact
+// worth knowing is *which* origins are being refused, not how often - and a
+// legitimate origin wrongly left out of the allowlist shows up the first time
+// anybody loads that frontend.
+//
+// The set is capped so a hostile caller cycling random Origin values cannot
+// grow it without bound. Reaching the cap is itself logged, so the silence
+// after it is explained rather than mysterious.
+const maxTrackedRejectedOrigins = 512
+
+var (
+	rejectedOriginsMu sync.Mutex
+	rejectedOrigins   = make(map[string]struct{}, 16)
+	rejectedOriginCap bool
+)
+
+func noteRejectedOrigin(origin string) {
+	if origin == "" {
+		return
+	}
+	rejectedOriginsMu.Lock()
+	defer rejectedOriginsMu.Unlock()
+	if _, seen := rejectedOrigins[origin]; seen {
+		return
+	}
+	if len(rejectedOrigins) >= maxTrackedRejectedOrigins {
+		if !rejectedOriginCap {
+			rejectedOriginCap = true
+			slog.Warn("cors rejected-origin log capped; further distinct origins will not be reported",
+				"cap", maxTrackedRejectedOrigins)
+		}
+		return
+	}
+	rejectedOrigins[origin] = struct{}{}
+	slog.Warn("cors origin rejected", "origin", origin)
 }
