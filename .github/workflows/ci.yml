@@ -40,6 +40,54 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # A migration version is chosen by hand, and two branches choosing the
+      # same one is a clean git merge that stops the API from booting:
+      # golang-migrate refuses to run with a duplicate version. Nothing about
+      # the merge looks wrong, and the failure arrives on the next deploy.
+      #
+      # The Go test catches a collision already sitting in one tree. This
+      # catches it while the number is still free to change, which is the only
+      # moment the fix is cheap.
+      #
+      # Only migrations THIS branch adds are checked, deliberately. Checking
+      # every migration would fail every build on collisions between two other
+      # branches - a check that is red on arrival is a check somebody turns
+      # off, and the branch that has to renumber is the one introducing the
+      # duplicate, which is the branch whose CI this is.
+      - name: Migration versions do not collide with another branch
+        run: |
+          git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*'
+          base=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
+          if [ -z "$base" ]; then
+            echo "No merge base with origin/main; skipping."
+            exit 0
+          fi
+          added=$(git diff --name-only --diff-filter=A "$base"...HEAD -- 'migrations/*.up.sql' || true)
+          if [ -z "$added" ]; then
+            echo "This branch adds no migrations."
+            exit 0
+          fi
+          fail=0
+          for f in $added; do
+            b=$(basename "$f" .up.sql)
+            version=${b%%_*}
+            for ref in $(git branch -r --format='%(refname:short)' | grep -v HEAD); do
+              other=$(git ls-tree --name-only "$ref" migrations/ 2>/dev/null \
+                        | grep -E "^migrations/${version}_.*\.up\.sql$" | head -1)
+              [ -z "$other" ] && continue
+              o=$(basename "$other" .up.sql)
+              if [ "$o" != "$b" ]; then
+                echo "::error file=$f::version $version is already used by '$o' on $ref"
+                fail=1
+              fi
+            done
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Renumber to a version free on EVERY branch. A duplicate merges cleanly and then stops the API from starting."
+            exit 1
+          fi
+          echo "Migrations added by this branch collide with nothing."
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

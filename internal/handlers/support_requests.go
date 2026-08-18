@@ -216,23 +216,39 @@ WHERE user_id IS NULL AND created_at > now() - interval '1 hour'
 		if screenshot != "" {
 			screenshotStored = &screenshot
 		}
-		var pageURL, userAgent, ip *string
+		var pageURL, userAgent *string
 		if v := strings.TrimSpace(body.PageURL); v != "" {
 			pageURL = &v
 		}
 		if v := strings.TrimSpace(c.Get("User-Agent")); v != "" {
 			userAgent = &v
 		}
-		if v := strings.TrimSpace(c.IP()); v != "" {
-			ip = &v
-		}
+		// The caller's IP is deliberately NOT recorded.
+		//
+		// The column exists and was justified as "for abuse investigation",
+		// and it has never once held a real address: Fiber's c.IP() returned
+		// Railway's edge, so all ten rows ever written carry a 100.64.0.x
+		// CGNAT proxy. Nothing has ever read the column, and no investigation
+		// has ever used it.
+		//
+		// Setting ProxyHeader made c.IP() return the true caller for the first
+		// time - which would have started storing real client IPs as a SIDE
+		// EFFECT of a rate-limiting fix, with nobody having decided to collect
+		// them and no deletion path anywhere in the product to remove them
+		// again. Acquiring personal data that way is the wrong way round, so
+		// the write stops here.
+		//
+		// The global hourly cap does not need it: it counts anonymous rows and
+		// keys on nothing. If a real investigation need ever appears, the thing
+		// to discuss is a salted hash with a stated retention, decided
+		// deliberately - not this column quietly filling up.
 
 		// PERSIST FIRST. Everything after this point is best-effort.
 		if _, err := h.db.Pool.Exec(c.Context(), `
 INSERT INTO support_requests
-  (id, user_id, category, message, page_url, user_agent, screenshot_url, reporter_ip)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-`, id, userID, category, message, pageURL, userAgent, screenshotStored, ip); err != nil {
+  (id, user_id, category, message, page_url, user_agent, screenshot_url)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`, id, userID, category, message, pageURL, userAgent, screenshotStored); err != nil {
 			// The only remaining path where a report can be lost. Say so: a
 			// success here would tell somebody their problem had been reported
 			// when nothing exists, and they would wait for a reply that is
