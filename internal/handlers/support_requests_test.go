@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -182,9 +183,23 @@ func TestSupport_AnonymousIsAllowedAndCarriesNoIdentity(t *testing.T) {
 	}
 }
 
-// The IP is recorded for abuse investigation and must never reach a sink. It
-// was a field on the Discord embed; a public Telegram topic must not see it.
-func TestSupport_RecordsIPOnTheRowOnly(t *testing.T) {
+// The caller's IP is NOT recorded, and never reaches a sink.
+//
+// This test previously asserted the opposite - that reporter_ip WAS written,
+// "needed for abuse investigation". It never was: Fiber's c.IP() returned
+// Railway's edge, so every row ever written held a 100.64.0.x CGNAT proxy
+// address, nothing ever read the column, and no investigation ever used it.
+//
+// Setting ProxyHeader made c.IP() resolve to the true caller for the first
+// time, which would have begun storing real client IPs as a side effect of a
+// rate-limiting fix - personal data acquired by accident, with no deletion
+// path anywhere in the product to remove it again. So the write stops, and
+// this test now pins that.
+//
+// The half worth keeping is unchanged: whatever the endpoint knows about the
+// caller must not reach a sink or the response. A public Telegram topic must
+// never see it.
+func TestSupport_DoesNotRecordTheReporterIP(t *testing.T) {
 	d := testDB(t)
 	app := supportApp(d)
 
@@ -194,17 +209,40 @@ func TestSupport_RecordsIPOnTheRowOnly(t *testing.T) {
 	}
 	id := uuid.MustParse(body["support_id"].(string))
 
-	var ip *string
-	_ = d.Pool.QueryRow(t.Context(), `SELECT reporter_ip FROM support_requests WHERE id = $1`, id).Scan(&ip)
-	if ip == nil || *ip == "" {
-		t.Error("reporter_ip was not recorded; it is needed for abuse investigation")
+	// The column is gone entirely, not merely left NULL. Asserted against the
+	// schema because "we stopped writing it" and "it cannot be written" are
+	// different guarantees, and only the second survives somebody adding the
+	// field back to an INSERT without thinking about it.
+	var columnExists bool
+	if err := d.Pool.QueryRow(t.Context(), `
+SELECT EXISTS(
+  SELECT 1 FROM information_schema.columns
+  WHERE table_name = 'support_requests' AND column_name = 'reporter_ip'
+)`).Scan(&columnExists); err != nil {
+		t.Fatalf("schema check: %v", err)
 	}
-	// And it must not be echoed back to the caller either.
+	if columnExists {
+		t.Error("support_requests.reporter_ip still exists; the caller's address is not stored and " +
+			"the column is not there to be filled in later")
+	}
+	_ = id
+
+	// Nothing resembling an address may come back to the caller either.
 	for k, v := range body {
-		if s, ok := v.(string); ok && ip != nil && s == *ip {
-			t.Errorf("response field %q leaked the reporter IP", k)
+		if str, ok := v.(string); ok && looksLikeAnIPAddress(str) {
+			t.Errorf("response field %q looks like an IP address: %q", k, str)
 		}
 	}
+}
+
+// looksLikeAnIPAddress is deliberately crude and deliberately broad: it exists
+// to fail loudly on anything address-shaped rather than to parse correctly.
+func looksLikeAnIPAddress(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	return net.ParseIP(s) != nil
 }
 
 func TestSupport_ValidatesCategoryAndMessage(t *testing.T) {

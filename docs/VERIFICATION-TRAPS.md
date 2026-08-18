@@ -180,6 +180,35 @@ wrong - the change, the assertion, or the setup. If the setup constructs a
 state the system is now supposed to prevent, the test was asserting the bug
 was permitted, and rewriting the setup is the fix rather than an accommodation.
 
+### Accumulated state producing a pass, not a failure
+
+The mirror of the flaky test above, and harder to notice because the symptom is
+green.
+
+`TestSocialFollow_AdminListCarriesNoScreenshots` **passed in the full suite and
+failed 6 times out of 6 when run alone** — and failed on `main` too, so it had
+nothing to do with the change being tested. The review queue pages at 50, and
+550 pending submissions had accumulated in the shared test database across
+months of runs, so a freshly created submission no longer appeared on the first
+page the assertion looked at.
+
+Both directions come from the same cause — a shared database nothing truncates
+— but they behave oppositely, and only one of them is loud:
+
+| | symptom | how it is usually explained away |
+|---|---|---|
+| earlier case | passes twice, fails the third time | "flaky, probably the environment" |
+| this case | **passes in CI, fails alone** | never noticed, because CI is green |
+
+The second is worse. Nobody investigates a passing test, and running one test in
+isolation is what you do when you are already suspicious — so the failure is
+only ever seen by somebody who went looking for something else.
+
+**The check:** a test that passes in the suite should pass alone. `go test -run
+TestTheOneYouCareAbout` is one command, and disagreeing with the full run means
+the test depends on state some other test leaves behind. Whichever way that
+disagreement points, the test is not measuring what it claims.
+
 ### A check that ran, went green, and measured somewhere adjacent
 
 CI smoke-tested production after every deploy — health, then the sign-in
@@ -461,6 +490,49 @@ reversible and deleting afterwards is theatre. Either probe somewhere inert —
 `/health` and `/version` would have answered this question exactly as well — or
 decide to accept the residue in advance, so it is a decision rather than a
 discovery.
+
+### The reference was in a deployed build, not the source
+
+Twice in one day, which is what makes it the general rule rather than an
+incident.
+
+Removing the old API hostname took sign-in down. The audit beforehand had
+searched three repositories for the hostname and reported the complete
+dependency list: backend CI, frontend CI, a settings doc, the CORS allowlist.
+Every one of those was real. The one that mattered was not in any repository.
+
+`VITE_API_BASE_URL` is a Vite variable, set in Vercel, **inlined into the
+bundle at build time**. The deployed frontend had `https://api.grainlify.0xo.in`
+compiled into it as a string literal. No grep of any checkout would ever have
+found it, because the value does not live in a checkout - it lives in a build
+environment and then inside an artifact.
+
+The same shape had already appeared hours earlier: a `200` from an SPA proved
+a route existed, when the CDN was rewriting every path to the shell. Both are
+the same mistake - **reading the source and reporting on the running system.**
+
+**The guard, which is one command in both cases:** ask what the RUNNING BUILD
+contains, not only what the source says.
+
+```sh
+# what host does the deployed bundle actually talk to?
+curl -s https://grainlify.com/ | grep -o '/assets/index-[^"]*\.js' \
+  | xargs -I{} curl -s "https://grainlify.com{}" | grep -o 'https://api\.[a-z.]*'
+
+# does the route exist, or is the CDN answering everything?
+curl -s -o /dev/null -w '%{http_code}' https://example.com/definitely-not-a-route
+```
+
+Applied after the outage it found the reference in seconds. Applied before,
+it would have prevented it - and it is now the final gate before removing any
+hostname.
+
+**The wider form:** configuration that exists only in a deployment environment
+is a dependency no repository records, no audit reports, and no test covers.
+Anything read from `import.meta.env`, `process.env` or `os.Getenv` and set in
+a platform dashboard is invisible to every check that starts from the code.
+Inventory those separately, and ask of each one whether a wrong value fails
+loudly or silently - the silent ones are the ones that ship.
 
 **The guard.** At every external boundary, log the upstream status, the bounded
 body, and the rate-limit budget *before* returning our own error name. One

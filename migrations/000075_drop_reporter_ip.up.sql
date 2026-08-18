@@ -1,0 +1,39 @@
+-- Drop support_requests.reporter_ip.
+--
+-- The column was added with a stated purpose: "Recorded for abuse
+-- investigation, and deliberately NOT sent to any sink." The second half was
+-- honoured. The first half never happened.
+--
+-- WHAT WAS ACTUALLY IN IT
+--
+-- Every row it ever held carried a 100.64.0.x address - Railway's edge, not a
+-- caller. Fiber's c.IP() returns the connecting peer, which behind Railway is
+-- the proxy, so ten reports over eight months recorded six distinct CGNAT
+-- addresses belonging to infrastructure. Not one identified a person.
+--
+-- WHY IT IS GOING RATHER THAN BEING FIXED
+--
+-- Setting ProxyHeader made c.IP() resolve to the real caller for the first
+-- time. That would have started storing genuine client IPs as a SIDE EFFECT of
+-- a rate-limiting fix - personal data acquired because a header setting
+-- changed, not because anyone decided to collect it, and with no deletion path
+-- anywhere in the product to remove it again.
+--
+-- Nothing read it. No handler, no export, no query, no frontend reference; the
+-- support history endpoint never selected it. The global hourly cap that now
+-- bounds anonymous submissions counts rows and keys on nothing, so it does not
+-- need an address either.
+--
+-- THE TEST THAT DEFENDED IT WAS ASSERTING SOMETHING THAT WAS NEVER TRUE
+--
+-- TestSupport_RecordsIPOnTheRowOnly failed with "reporter_ip was not recorded;
+-- it is needed for abuse investigation" - a guard protecting a capability that
+-- did not exist, on a column that had never held a usable value. It is
+-- inverted now.
+--
+-- IF A REAL NEED APPEARS
+--
+-- The thing to discuss is a salted hash with a stated retention and a
+-- deletion path, decided on its own terms. Not this column quietly filling up.
+-- A decision with a trigger, rather than a default.
+ALTER TABLE support_requests DROP COLUMN IF EXISTS reporter_ip;

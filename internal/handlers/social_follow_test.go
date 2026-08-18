@@ -29,6 +29,21 @@ func socialFollowSuiteToken(t *testing.T, userID uuid.UUID, role string) string 
 }
 
 func socialFollowSuiteApp(d *db.DB) *fiber.App {
+	// Clear the queue first.
+	//
+	// dbtest.DB is shared and nothing truncates this table, so submissions
+	// accumulate across every run - 550 pending rows had built up. The review
+	// queue pages at socialFollowPageSize (50), so a freshly created
+	// submission no longer appears on the first page and
+	// TestSocialFollow_AdminListCarriesNoScreenshots fails looking for it.
+	//
+	// It failed in ISOLATION and passed in a full-suite run, which is the
+	// wrong way round and why it went unnoticed: run alone the table is at its
+	// dirtiest, and a full run happens to reorder things. A test that is green
+	// only in company is not green.
+	if d != nil && d.Pool != nil {
+		_, _ = d.Pool.Exec(context.Background(), `TRUNCATE social_follow_decisions, social_follow_submissions CASCADE`)
+	}
 	app := fiber.New()
 	h := handlers.NewSocialFollowHandler(d, nil)
 	app.Post("/social-follow/submit", auth.RequireAuth(socialFollowSuiteJWTSecret), h.SubmitAll())
