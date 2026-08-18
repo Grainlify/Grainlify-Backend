@@ -1,22 +1,29 @@
 # GitHub OAuth App Settings - Production Configuration
 
-## 🚧 Domain migration in progress (grainlify.0xo.in → grainlify.com)
+## ✅ Domain migration complete (grainlify.0xo.in → grainlify.com)
 
-The values below already show the **new** `grainlify.com` domain, but as of
-this writing `grainlify.com` DNS still resolves to GoDaddy's default parked
-page (not Vercel) and `api.grainlify.com` doesn't resolve at all - the new
-domain is not actually serving the app yet. The backend's CORS allowlist
-accepts both domains during the transition (see `internal/api/api.go`), but
-the GitHub OAuth App itself only has room for **one** live Authorization
-callback URL.
+The values below are live. `grainlify.com` serves the app from Vercel and
+`api.grainlify.com` serves the backend through Cloudflare; both hold valid
+certificates and the apex sends
+`Strict-Transport-Security: max-age=63072000; includeSubDomains`.
 
-**Do not change the GitHub OAuth App's Authorization callback URL to the
-`api.grainlify.com` value below until DNS for `api.grainlify.com` is
-confirmed pointed at the backend and serving real traffic** - changing it
-prematurely breaks every GitHub login immediately, since GitHub would start
-redirecting to a callback URL nothing answers yet. Until then, the live
-GitHub OAuth App should keep using the `.0xo.in` callback URL from git
-history / your current App settings.
+**This section previously said the opposite** - that the OAuth callback should
+stay on `.0xo.in` until `api.grainlify.com` was confirmed serving. That was
+correct when written and became wrong without anyone editing it, which is the
+whole hazard of instructions that describe a transition.
+
+The current state, established from the running system rather than from this
+file:
+
+- Railway holds `GITHUB_OAUTH_REDIRECT_URL` and `GITHUB_LOGIN_REDIRECT_URL` as
+  `https://api.grainlify.com/auth/github/login/callback`, and has **no**
+  `.0xo.in` value in any of its 44 variables.
+- Sign-ups are completing: new accounts were created today and on each of the
+  preceding days. A new account requires a full authorization round trip, which
+  GitHub refuses unless `redirect_uri` matches a registered callback URL. So the
+  App's registered set already accepts `api.grainlify.com`.
+- Because the backend only ever sends the `api.grainlify.com` value, whether the
+  old URL also remains registered no longer affects anything.
 
 ## ⚠️ Critical Settings
 
@@ -48,7 +55,11 @@ https://api.grainlify.com/auth/github/login/callback
 ```
 
 **Why this works:**
-- This is the **only** callback URL registered with GitHub
+- This is the callback URL the backend sends as `redirect_uri`, and the only
+  one it ever sends. Whether other URLs remain registered in the App from
+  earlier domains is not something this file can assert - the App settings
+  page is the only place that answers it - and it does not matter while the
+  backend sends just this one.
 - Works for production, preview deployments, and localhost
 - Backend handles redirecting to the correct frontend via the `redirect` parameter
 
