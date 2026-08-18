@@ -50,6 +50,37 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		// is a social-follow submission, two screenshots the frontend caps
 		// well below it.
 		BodyLimit: 4 * 1024 * 1024,
+
+		// Which header carries the real caller.
+		//
+		// Established by probing our own edge from outside it, on both
+		// reachable paths, with deliberately spoofed values:
+		//
+		//   via Cloudflare (api.grainlify.com)
+		//     X-Forwarded-For: "<cloudflare edge>, <railway hop>"  - caller ABSENT
+		//     X-Real-IP:       the real caller
+		//   direct to Railway (api.grainlify.0xo.in)
+		//     X-Forwarded-For: "<real caller>, <railway hop>"
+		//     X-Real-IP:       the real caller
+		//
+		// Spoofed values never arrived on either path: Railway's own edge
+		// strips an inbound X-Forwarded-For and overwrites X-Real-IP. That is
+		// Railway doing it, not Cloudflare - the direct path behaves the same.
+		//
+		// NOT X-Forwarded-For, and this is the part somebody will later try to
+		// "fix". The usual advice is to trust its leftmost entry. Here the
+		// leftmost is a CLOUDFLARE EDGE ADDRESS on the path real users take -
+		// shared by an enormous number of people, and it rotated between two
+		// requests from the same laptop minutes apart (172.68.164.67, then
+		// 162.158.108.133). Keying a rate limit on it throttles strangers
+		// together and isolates nobody, which is the same defect as keying on
+		// Fiber's default c.IP() - that returned Railway's 100.64.0.x CGNAT
+		// proxy and is why the support limiter never fired once in the
+		// platform's history.
+		//
+		// X-Real-IP is the true caller on every path and cannot be spoofed,
+		// because the edge overwrites whatever a client sends.
+		ProxyHeader: "X-Real-IP",
 	})
 	slog.Info("Fiber app created")
 

@@ -99,7 +99,7 @@ jobs:
         run: |
           echo "Waiting for the new deployment to become healthy..."
           for i in $(seq 1 24); do
-            if curl -sf -m 10 https://api.grainlify.0xo.in/health > /dev/null; then
+            if curl -sf -m 10 https://api.grainlify.com/health > /dev/null; then
               echo "Health check passed on attempt $i"
               break
             fi
@@ -111,7 +111,7 @@ jobs:
           done
 
           echo "Checking the GitHub sign-in redirect..."
-          location=$(curl -sI -m 10 "https://api.grainlify.0xo.in/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify.0xo.in" | grep -i "^location:" || true)
+          location=$(curl -sI -m 10 "https://api.grainlify.com/auth/github/login/start?redirect=https%3A%2F%2Fgrainlify.com" | grep -i "^location:" || true)
           if ! echo "$location" | grep -q "github.com/login/oauth/authorize"; then
             echo "::error::Sign-in redirect is broken - expected a redirect to github.com/login/oauth/authorize, got: $location"
             exit 1
