@@ -358,6 +358,27 @@ func (h *KYCAdminHandler) ReasonCodes() fiber.Handler {
 // THE TEST FOR ADDING A FIELD HERE: does it carry a document, a decision, or
 // provider text? If it does, it does not belong. If it does not, it can.
 //
+// ONE DELIBERATE EXCEPTION, AND IT STOPS AT ONE: the legal name.
+//
+// It is personal data and it is here anyway, because matching a queue row to a
+// session is the entire job and there is no other way to do it. Didit's console
+// lists people by legal name; it has no documented search by session id and no
+// URL that opens one session directly - the documented navigation is "click a
+// session in the verification table". Session id alone therefore identifies a
+// session we cannot look up.
+//
+// The narrowing that makes it defensible: the reviewer is the same person who
+// already sees this name in the provider console, on the same screen, minutes
+// earlier. Nothing new is disclosed to anybody - one identifier is being placed
+// beside another so two records can be matched.
+//
+// NOT the document number. NOT the date of birth, nationality, address, or
+// place of birth. NOT the document images. NOT the provider's warning text.
+// Each of those is a field somebody could argue "helps matching", and each is
+// something the reviewer already has in the console next to them. If matching
+// is failing, the answer is a better identifier - see session_number below -
+// and never one more attribute of a person.
+//
 // That distinction is why kyc_session_id IS here while everything else from
 // the provider is not. It is an IDENTIFIER, not data - it names a session
 // without describing it, and without it a reviewer matches a queue row to a
@@ -381,6 +402,16 @@ func (h *KYCAdminHandler) Pending() fiber.Handler {
 SELECT u.id, COALESCE(ga.login, ''), COALESCE(ga.avatar_url, ''),
        u.kyc_status, u.updated_at::text, u.kyc_data,
        COALESCE(u.kyc_session_id, ''),
+       -- Name and session number, read straight out of the stored decision.
+       -- COALESCE across both shapes because 'extracted' is our own parse and
+       -- is absent on rows written before it existed, while id_verification is
+       -- the provider's own block.
+       COALESCE(NULLIF(u.kyc_data->'extracted'->>'full_name', ''),
+                NULLIF(u.kyc_data->'id_verification'->>'full_name', ''),
+                trim(COALESCE(u.kyc_data->'extracted'->>'first_name', '') || ' ' ||
+                     COALESCE(u.kyc_data->'extracted'->>'last_name', '')),
+                ''),
+       COALESCE(u.kyc_data->>'session_number', ''),
        (SELECT count(*) FROM kyc_reset_audit r WHERE r.subject_user_id = u.id)
 FROM users u
 LEFT JOIN github_accounts ga ON ga.user_id = u.id
@@ -396,10 +427,10 @@ ORDER BY u.updated_at ASC
 		out := []fiber.Map{}
 		for rows.Next() {
 			var id uuid.UUID
-			var login, avatarURL, status, updatedAt, sessionID string
+			var login, avatarURL, status, updatedAt, sessionID, legalName, sessionNumber string
 			var kycData []byte
 			var resetCount int
-			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &sessionID, &resetCount); err != nil {
+			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &sessionID, &legalName, &sessionNumber, &resetCount); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
 			}
 
@@ -429,6 +460,19 @@ ORDER BY u.updated_at ASC
 				// is kept on the audit row (previous_session_id), and a row
 				// with no live session is one nothing is waiting on.
 				"kyc_session_id": sessionID,
+				// The legal name, for matching against the provider console.
+				// See the exception documented on this handler: name only, and
+				// it stops at name. Do not add document number, date of birth,
+				// nationality, address, or anything else "to help matching" -
+				// the reviewer already has all of it in the console, and the
+				// answer to a hard match is a better identifier, not more of
+				// somebody's identity.
+				"legal_name": legalName,
+				// The provider's own short, human-readable session counter
+				// (3, 12, 41...). Not personal data, and worth more than the
+				// name if their console's table shows it: matching on a number
+				// would make the name above unnecessary.
+				"session_number": sessionNumber,
 				// How many times this person has been reset before. A second
 				// or third reset is a different decision from a first, and an
 				// admin should not have to open another screen to know which
