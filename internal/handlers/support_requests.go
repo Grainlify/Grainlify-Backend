@@ -227,31 +227,6 @@ WHERE user_id IS NULL AND created_at > now() - interval '1 hour'
 			ip = &v
 		}
 
-		// DIAGNOSTIC, and temporary. Remove once the proxy question is settled.
-		//
-		// c.IP() has never once recorded a real caller: every reporter_ip in
-		// the table is a 100.64.0.x Railway CGNAT address, six distinct ones
-		// across ten reports. That is why the per-client limiter on this route
-		// has never fired - it keys on an address that rotates per request.
-		//
-		// Fixing it means setting fiber.Config.ProxyHeader, and which value to
-		// trust depends entirely on what the edge does with an INBOUND
-		// X-Forwarded-For. If it strips client-supplied copies, the leftmost
-		// entry is the caller. If it appends without stripping, the leftmost is
-		// whatever the caller made up and only the rightmost is real. Public
-		// answers contradict each other on exactly this point, so this logs
-		// what our own edge actually sends and the question gets settled with
-		// evidence rather than a citation.
-		//
-		// Logs header values, not bodies, on a route that already records an
-		// address. It changes no behaviour: c.IP() is untouched.
-		slog.Info("support: forwarding headers observed",
-			"remote_ip", c.IP(),
-			"x_forwarded_for", c.Get("X-Forwarded-For"),
-			"x_real_ip", c.Get("X-Real-IP"),
-			"x_envoy_external_address", c.Get("X-Envoy-External-Address"),
-			"forwarded", c.Get("Forwarded"))
-
 		// PERSIST FIRST. Everything after this point is best-effort.
 		if _, err := h.db.Pool.Exec(c.Context(), `
 INSERT INTO support_requests

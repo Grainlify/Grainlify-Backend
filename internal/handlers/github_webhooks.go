@@ -54,9 +54,20 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 		hookID := strings.TrimSpace(c.Get("X-GitHub-Hook-ID"))
 		hookInstallationTargetID := strings.TrimSpace(c.Get("X-GitHub-Hook-Installation-Target-ID"))
 		hookInstallationTargetType := strings.TrimSpace(c.Get("X-GitHub-Hook-Installation-Target-Type"))
+		// Which hostname GitHub actually posted to.
+		//
+		// Not a diagnostic - it stays. The service answers on more than one
+		// hostname, and until this was logged there was no way to tell which
+		// one a delivery used: both route to the same process, so the logs, the
+		// events table and the IP all look identical either way. That mattered
+		// while retiring the old production domain, because removing a
+		// hostname webhooks were still arriving on would have stopped every
+		// sync and every merge notification without erroring anywhere.
+		host := c.Hostname()
 
 		// Detailed logging of incoming webhook request
 		slog.Info("=== GitHub Webhook POST Request Received ===",
+			"host", host,
 			"method", c.Method(),
 			"path", c.Path(),
 			"original_url", c.OriginalURL(),

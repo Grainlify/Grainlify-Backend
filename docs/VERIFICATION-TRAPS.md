@@ -180,6 +180,26 @@ wrong - the change, the assertion, or the setup. If the setup constructs a
 state the system is now supposed to prevent, the test was asserting the bug
 was permitted, and rewriting the setup is the fix rather than an accommodation.
 
+### A check that ran, went green, and measured somewhere adjacent
+
+CI smoke-tested production after every deploy — health, then the sign-in
+redirect — against `api.grainlify.0xo.in`. That is the previous production
+hostname, and it reaches the service **directly, bypassing Cloudflare**.
+
+So the check ran, passed, and verified a path no real user takes. Anything
+living in front of the WAF — a Cloudflare rule, a firewall change, a
+certificate on the real hostname, the CDN itself — could be completely broken
+while this went green after every single deploy. It was not measuring
+production; it was measuring a service that production happens to share.
+
+Same shape as a suite that reports green from a worktree where the tests that
+matter are skipped: the check is real, the result is real, and the subject is
+not the one you meant.
+
+**The check:** for anything asserting "production works", ask whether it
+traverses the same path a user does — same hostname, same CDN, same guards. A
+smoke test that skips a layer is a smoke test for a system nobody uses.
+
 ### A blank where a value belongs reads as a fault, not a fact
 
 Three occurrences, so it is a shape rather than an incident:
@@ -413,6 +433,34 @@ incident, corroborated by 72 unrelated 403s from the same host in two minutes.
 **Strong, and still circumstantial.** The actual status code for those four
 failures does not exist anywhere. It was in a variable named `err` and was
 never written down.
+
+### A real instance: deleting the record did not retract the copies
+
+Every example above is about evidence that was never written down. This one is
+the inverse and it actually happened, which is why it is here: the evidence was
+written down, deleted, and reported as cleaned up — while the copies that
+mattered had already left.
+
+Settling the proxy question meant sending probe requests with spoofed
+forwarding headers. The endpoint chosen was `POST /support-requests`, because
+it was the one already being worked on. Three probes went through. The rows
+were then deleted from `support_requests` and the cleanup reported.
+
+The rows were never the exposure. That endpoint fans out to Telegram and
+Discord *before* anything could be undone, so all three probes are sitting in a
+human being's Telegram, permanently, and `DELETE` reached none of them. The
+affected population was not in the database.
+
+Nothing harmful was in them. The habit is the problem: "I removed the rows"
+was reported as complete cleanup, and it was cleanup of the one copy that did
+not matter.
+
+**The check, before probing anything:** ask what the endpoint does *besides*
+persist. If it notifies, posts, emails, or fans out, the probe is not
+reversible and deleting afterwards is theatre. Either probe somewhere inert —
+`/health` and `/version` would have answered this question exactly as well — or
+decide to accept the residue in advance, so it is a decision rather than a
+discovery.
 
 **The guard.** At every external boundary, log the upstream status, the bounded
 body, and the rate-limit budget *before* returning our own error name. One
