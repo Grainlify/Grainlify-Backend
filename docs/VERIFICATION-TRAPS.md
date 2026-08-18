@@ -95,6 +95,107 @@ data is arranged so the defect cannot appear, the test documents the intent and
 verifies nothing - the same failure as §1, arriving through the setup instead
 of the assertion.
 
+### A 200 from a single-page app is not evidence a route exists
+
+```sh
+curl -s -o /dev/null -w "%{http_code}" https://grainlify.com/support   # 200
+```
+
+That 200 meant nothing. `vercel.json` rewrites `/(.*)` to `/index.html`, so
+the CDN answers **every** path with the app shell — `/support`, `/nonsense`,
+`/a/b/c` — all 200, all identical bytes. The route did not exist. `SupportPage`
+rendered only inside `Dashboard`, which is wrapped in `ProtectedRoute`, so an
+anonymous visitor was redirected to sign-in.
+
+It was reported upward as "/support already works anonymously", and a plan was
+approved on it that would have replaced a working anonymous reporting path with
+a link to a page that bounced exactly the people who cannot sign in — the six of
+ten support reports that arrive anonymously from the landing page and `/signin`.
+
+This is §1's shape at a different layer: **a check whose success is
+indistinguishable from its failure.** A missing route and a present one return
+the same status, the same content type, and the same length.
+
+**What actually answers the question:**
+
+1. Read the route table. `grep "<Route" App.tsx` is faster than any request and
+   is the only source of truth for a client-rendered app.
+2. Check the guard, not just the path. A route inside `ProtectedRoute` exists
+   and is still unreachable for the people the feature is for.
+3. If you must probe, probe the rendered DOM, not the status:
+
+```js
+await page.goto(url)
+location.pathname          // did it redirect?
+document.body.innerText    // did it render the thing, or the shell?
+```
+
+The control that would have caught it in one line: request a path that
+certainly does not exist. If `/definitely-not-a-route` also returns 200, the
+status code is telling you about the server's rewrite rule and nothing about
+your route.
+
+### A fixture that constructs a state the system should refuse
+
+The sibling of the case above, and the more dangerous one: there the fixture
+made the bug invisible, here it encoded the bug as expected behaviour.
+
+Gating founding-pool entry on an approved social-follow proof broke a
+settlement test. Its setup did this:
+
+```go
+// Same shares, but never followed -> ineligible, excluded entirely.
+b := newUser(t, d)
+AssignWave(ctx, d.Pool, b, cfg)   // cfg has the gate ON
+```
+
+It assigned a wave to somebody with no approved proof - which is exactly what
+the gate now refuses, and exactly the defect being fixed. The test was not
+wrong about its own subject: settlement must still exclude an ineligible
+member from the divisor, and that property is real. It was wrong about how
+that member comes to exist, and in being wrong it asserted that the system
+permits the thing it should not.
+
+The instinct when a change breaks a test is to ask whether the change is
+wrong. Here the change was right, the assertion was right, and **the fixture
+was the only wrong part** - which is the hardest of the three to see, because
+setup code reads as scaffolding rather than as a claim.
+
+The fix is to construct the state the way reality did:
+
+```go
+ungated := defaults()
+ungated["founding_require_social_follow"] = "false"
+AssignWave(ctx, d.Pool, b, ungated)   // assigned before the gate existed
+// ...then settle with the gate ON
+```
+
+Not a workaround. The seventeen members who hold a position without an
+approved proof were assigned before the gate existed, and AssignWave's
+short-circuit deliberately never re-examines an existing member - so that is
+the real history, and now the fixture tells it.
+
+**The check:** when a fix breaks a test, ask which of the three parts is
+wrong - the change, the assertion, or the setup. If the setup constructs a
+state the system is now supposed to prevent, the test was asserting the bug
+was permitted, and rewriting the setup is the fix rather than an accommodation.
+
+### A blank where a value belongs reads as a fault, not a fact
+
+Three occurrences, so it is a shape rather than an incident:
+
+| surface | blank would have meant | what it says instead |
+|---|---|---|
+| pool position, failed load | "you have no position" | "couldn't load this — it doesn't affect your position" |
+| KYC queue, reset row | (looks like a broken cell) | "no live session" |
+| maintainer page, wrong view | "you have no access" | "you're viewing as a contributor" |
+
+In each case the honest empty state and the failure state render identically,
+and the reader cannot tell which they are looking at - so they assume the one
+that is about them. **An absent value needs to say which kind of absence it
+is**, and the wording differs enough per case that it cannot be solved once
+in a component.
+
 ### The same principle, applied to placement
 
 Some rules are wrong in a way no output reveals. The 300-approval cap is
@@ -185,6 +286,33 @@ The harness now asserts each patch **applied** (the pattern matched exactly
 once) **and compiled** before trusting the result. Note that `go vet` is the
 wrong gate for this: it rejects unreachable code, so a valid mutation reads as
 a compile failure. Use `go build`.
+
+### The same trap in a typed frontend
+
+A TypeScript mutation that fails `tsc` is the identical failure wearing
+different clothes, and it is easier to walk into because the mutations are
+smaller. Four of them, over two sessions:
+
+```tsx
+if (res.notified) {          →  if (true) {              // unused variable
+setReasonCode(a === 1 ? x : '')  →  setReasonCode(a[0] ?? '')  // fine
+Body: strings.TrimSpace(raw) →  Body: ""                 // unused import
+```
+
+Each one changes behaviour obviously. Each one failed to compile for a reason
+having nothing to do with the test. And because the harness reported non-zero,
+each was recorded as **caught** - a test proved nothing and got credit for it.
+
+**The tell is identical in both languages:** an obviously behaviour-changing
+edit appearing to be caught *instantly*, and the fix is the same - assert the
+patch compiles before running the test, and when it does not, write a variant
+that does rather than accepting the result. `if (true)` leaves a variable
+unused; `if (x || !x)` does not. Zeroing a field can orphan an import;
+`strings.TrimSpace(string(raw)[:0])` does not.
+
+Three of those four were only conclusive on a second attempt. Retrying is
+cheap; a mutation recorded as caught when it never ran is a test you now trust
+for no reason.
 
 ## 5. e2e checks on pages that never rendered
 
