@@ -47,6 +47,38 @@ func main() {
 		"public_base_url", cfg.PublicBaseURL,
 	)
 
+	// The boot gate. Before the database, before anything that could half-work:
+	// if a variable behind a live feature is empty, refuse to start and say which
+	// feature died. Most of these fail silently at runtime - an empty
+	// PUBLIC_BASE_URL means Didit verifications complete and never come back, and
+	// nothing logs an error - so the loud failure has to happen here or not at
+	// all.
+	//
+	// Safe because Railway keeps the previous deployment serving when a new one
+	// fails its healthcheck, proven by deploying a deliberately broken build and
+	// watching production carry on. A refused boot is therefore a blocked bad
+	// config, not an outage.
+	if missing := cfg.MissingRequired(); len(missing) > 0 {
+		if cfg.GatesBoot() {
+			slog.Error("configuration gate failed", "step", "3.5", "action", "required_config_missing",
+				"env", cfg.Env, "missing_count", len(missing))
+			for _, r := range missing {
+				slog.Error("required configuration missing",
+					"variable", r.Name, "feature", r.Feature, "consequence", r.Consequence)
+			}
+			// Also to stderr as one block: the structured lines above are precise,
+			// but a person staring at a failed deploy should not have to
+			// reassemble them.
+			fmt.Fprintln(os.Stderr, config.MissingRequiredMessage(missing))
+			os.Exit(1)
+		}
+		// dev: name them, then carry on.
+		for _, r := range missing {
+			slog.Warn("required configuration missing (not gated in dev)",
+				"variable", r.Name, "feature", r.Feature)
+		}
+	}
+
 	slog.Info("connecting to database", "step", "4", "action", "connecting_to_database")
 	var database *db.DB
 	if cfg.DBURL == "" {
