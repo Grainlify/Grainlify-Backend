@@ -95,6 +95,46 @@ data is arranged so the defect cannot appear, the test documents the intent and
 verifies nothing - the same failure as §1, arriving through the setup instead
 of the assertion.
 
+### A 200 from a single-page app is not evidence a route exists
+
+```sh
+curl -s -o /dev/null -w "%{http_code}" https://grainlify.com/support   # 200
+```
+
+That 200 meant nothing. `vercel.json` rewrites `/(.*)` to `/index.html`, so
+the CDN answers **every** path with the app shell — `/support`, `/nonsense`,
+`/a/b/c` — all 200, all identical bytes. The route did not exist. `SupportPage`
+rendered only inside `Dashboard`, which is wrapped in `ProtectedRoute`, so an
+anonymous visitor was redirected to sign-in.
+
+It was reported upward as "/support already works anonymously", and a plan was
+approved on it that would have replaced a working anonymous reporting path with
+a link to a page that bounced exactly the people who cannot sign in — the six of
+ten support reports that arrive anonymously from the landing page and `/signin`.
+
+This is §1's shape at a different layer: **a check whose success is
+indistinguishable from its failure.** A missing route and a present one return
+the same status, the same content type, and the same length.
+
+**What actually answers the question:**
+
+1. Read the route table. `grep "<Route" App.tsx` is faster than any request and
+   is the only source of truth for a client-rendered app.
+2. Check the guard, not just the path. A route inside `ProtectedRoute` exists
+   and is still unreachable for the people the feature is for.
+3. If you must probe, probe the rendered DOM, not the status:
+
+```js
+await page.goto(url)
+location.pathname          // did it redirect?
+document.body.innerText    // did it render the thing, or the shell?
+```
+
+The control that would have caught it in one line: request a path that
+certainly does not exist. If `/definitely-not-a-route` also returns 200, the
+status code is telling you about the server's rewrite rule and nothing about
+your route.
+
 ### A fixture that constructs a state the system should refuse
 
 The sibling of the case above, and the more dangerous one: there the fixture
