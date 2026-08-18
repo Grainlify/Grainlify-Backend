@@ -661,3 +661,52 @@ Only running the delete showed which one won.
 **A schema check that reads metadata tests what was declared. Executing the
 operation tests what happens.** When those can differ, the second is the one
 that matters.
+
+## 9. A check that would fail on correct output, kept alive only by never running
+
+Found while auditing what still referenced the old hostname before deleting it.
+The frontend CI smoke test asserted that the deployed bundle **contains**
+`https://api.grainlify.0xo.in`:
+
+```sh
+if ! echo "$bundle" | grep -qE "https://api\.grainlify\.0xo\.in"; then
+  echo "Attempt $i: fetched $bundle_path but it's missing the expected API URL - retrying"
+```
+
+That assertion had been correct. The migration to `api.grainlify.com` made it
+false, and the bundle it was written to protect now fails it. Run against
+today's production build it retries twelve times and emits `::error::`.
+
+Nothing had noticed, because the workflow triggers on
+`branches: [design/discover-page-redesign]` and `workflow_dispatch`. It never
+runs on `main`. **The check was not wrong-and-passing, it was wrong-and-absent**
+- and the absence is what preserved it. A test suite is audited when it fails;
+one that never executes is never audited, so its assertions drift with the
+system while continuing to look like coverage in the file.
+
+This is worse than a check that reports success without checking anything,
+because that one is at least running and can be caught by mutating what it
+covers. A dormant check cannot be caught that way: mutate the code it guards
+and nothing happens, which is indistinguishable from the check not existing.
+
+**The guard.** For any check you are relying on, establish two separate facts:
+
+1. **That it runs** - a trigger that actually fires for the branch in question.
+   Read `on:` before believing a workflow covers `main`.
+2. **That it can fail** - run it against known-bad input and watch it fail.
+
+Both, separately. Neither implies the other. The same audit that found this had
+just added an HSTS assertion to `verify-deployed.mjs` and confirmed fact 2 by
+running it against production *before* the change deployed, where it correctly
+reported `"max-age=63072000" - includeSubDomains missing` and exited 1. Fact 1
+was already true there, since that script is invoked by hand. In CI the two
+come apart, and the trigger is the half that gets forgotten.
+
+**A related way to mislead yourself, hit while verifying the repointed check.**
+Simulating the CI step locally reported `FAIL` on a bundle that was correct.
+The cause was the simulation, not the check: `zsh`'s builtin `echo` interprets
+backslash escapes, and minified JavaScript is full of them, so `echo "$bundle"`
+mangled the content before `grep` saw it. GitHub Actions runs `bash`, where the
+same line passes. **Reproduce a CI step in the shell CI uses, or the harness
+becomes the finding.** `printf '%s'` is safe in both, and greping the file
+directly is safer than either.
