@@ -320,6 +320,9 @@ UPDATE users SET kyc_data = $1 WHERE id = $2
 	if strings.Contains(string(body), "1990-01-01") {
 		t.Errorf("the date of birth reached the response:\n%s", body)
 	}
+	if strings.Contains(string(body), "Fixture Person") {
+		t.Errorf("the legal name reached the response:\n%s", body)
+	}
 
 	var out struct {
 		Pending []map[string]any `json:"pending"`
@@ -341,28 +344,25 @@ UPDATE users SET kyc_data = $1 WHERE id = $2
 		t.Error("a verified contributor is in the queue; nothing is waiting on them")
 	}
 
-	// The name is carried, and it is the ONE piece of personal data this
-	// endpoint returns. The provider console lists people by legal name, has no
-	// documented search by session id and no URL that opens one session, so a
-	// session id alone identifies a session that cannot be looked up.
-	if got, _ := byID[refused.String()]["legal_name"].(string); got == "" {
-		t.Error("legal_name is missing; a reviewer cannot match this row to a session in the console")
+	// The match key: the provider's verification table displays this number, so
+	// a reviewer pairs a queue row with a session on the number alone. Having
+	// it is what makes exposing any personal detail unnecessary.
+	if got, _ := byID[refused.String()]["session_number"].(string); got == "" {
+		t.Error("session_number is missing; it is the only thing that lets a reviewer find the session")
 	}
-	// And the exception stops at the name. Each of these is something a
-	// reviewer already sees in the console, and each is a field somebody could
-	// argue helps matching.
+	// And nothing personal, including the name. This nearly became an
+	// exception - the console lists people by name, and the argument for
+	// showing it was that the reviewer already sees it there. The number made
+	// it unnecessary. Each field below is one somebody could argue "helps
+	// matching", which is exactly why the list is explicit.
 	for _, forbidden := range []string{
+		"legal_name", "full_name", "first_name", "last_name",
 		"document_number", "date_of_birth", "nationality", "address",
 		"place_of_birth", "document_type", "face_match_score",
 	} {
 		if _, present := byID[refused.String()][forbidden]; present {
-			t.Errorf("%q is exposed; the name is a deliberate exception and it stops at the name", forbidden)
+			t.Errorf("%q is exposed; nothing describing a person belongs on this endpoint", forbidden)
 		}
-	}
-	// The provider's own session counter - not personal data, and better than
-	// the name if their table shows it.
-	if got, _ := byID[refused.String()]["session_number"].(string); got == "" {
-		t.Error("session_number is missing")
 	}
 
 	// The session id is carried, because matching a queue row to a session in
