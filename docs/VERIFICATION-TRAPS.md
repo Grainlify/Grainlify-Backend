@@ -679,10 +679,22 @@ today's production build it retries twelve times and emits `::error::`.
 
 Nothing had noticed, because the workflow triggers on
 `branches: [design/discover-page-redesign]` and `workflow_dispatch`. It never
-runs on `main`. **The check was not wrong-and-passing, it was wrong-and-absent**
-- and the absence is what preserved it. A test suite is audited when it fails;
-one that never executes is never audited, so its assertions drift with the
-system while continuing to look like coverage in the file.
+runs on `main`.
+
+**Correction to the first version of this entry**, which called the check
+"dormant" and "kept alive only by never running". The run history says
+otherwise: it ran eight times and passed every time, most recently
+2026-08-15. It passed *honestly* - before 2026-08-18 the deployed bundle
+really did contain `api.grainlify.0xo.in`, which is exactly why removing that
+hostname took sign-in down. The assertion became false at ~07:00 on
+2026-08-18, when `VITE_API_BASE_URL` was changed to `api.grainlify.com`. Zero
+runs have happened since.
+
+So the shape is not "a check that never ran" but **a check that stopped
+running three days before the world moved under it**. That is a worse trap
+than a never-run check, because the green history is real and reads as
+evidence. Eight passes in the log invite you to trust the ninth without
+running it.
 
 This is worse than a check that reports success without checking anything,
 because that one is at least running and can be caught by mutating what it
@@ -710,3 +722,59 @@ mangled the content before `grep` saw it. GitHub Actions runs `bash`, where the
 same line passes. **Reproduce a CI step in the shell CI uses, or the harness
 becomes the finding.** `printf '%s'` is safe in both, and greping the file
 directly is safer than either.
+
+
+## 10. Documentation that went stale because the world moved
+
+Not a mistake anybody made. Correct when written, wrong now, and changed
+without anyone editing the file.
+
+`GITHUB_OAUTH_APP_SETTINGS.md` carried a banner instructing the reader to keep
+the GitHub OAuth callback on `.0xo.in` **until** `api.grainlify.com` was
+confirmed serving, because changing it prematurely "breaks every GitHub login
+immediately". That was correct and careful advice on the day it was written.
+`api.grainlify.com` then started serving, the callback moved, and the banner
+kept giving the opposite of the right instruction to anybody who opened it -
+including during an audit of what still pointed at the old hostname, where it
+argued against a removal that was safe.
+
+**The distinguishing feature is the tense.** The banner described a
+*transition*, and a transition has an end. Prose describing a temporary state
+has an expiry date that nothing enforces and no reviewer sees, because the file
+does not change on the day it stops being true. Prose describing an invariant
+does not.
+
+### A second instance, found by checking rather than remembering
+
+`RAILWAY_DEPLOYMENT.md` lists the environment variables to set. It names 20.
+Production runs 44. Excluding the `RAILWAY_*` values the platform injects
+itself, **16 real ones are undocumented** - among them `GITHUB_APP_ID`,
+`GITHUB_APP_PRIVATE_KEY`, `MAILERCLOUD_API_KEY`, `DISCORD_BUG_REPORT_WEBHOOK_URL`
+and six `TELEGRAM_*` keys, each gating a live feature. Three variables it does
+document (`PORT`, `LOG_LEVEL`, `NATS_URL`) are not set at all.
+
+Nobody wrote that wrongly. Features were added, each bringing configuration,
+and none of them was a change to this file.
+
+**A caution about this section's own examples.** This entry was going to cite
+`RAILWAY_DEPLOYMENT.md` as documenting a healthcheck that was never applied.
+Checking first, that is not what happened: `git log -S healthcheck` on that path
+returns nothing, the file has exactly one commit, and the healthcheck was added
+to `railway.json` in #482 without the doc ever mentioning one. The real staleness
+in that file is the variable list above. **A remembered instance of a trap is
+itself a claim to verify** - the failure mode this whole document exists to name
+does not stop applying to the document.
+
+### The guard
+
+Documentation cannot be tested, so the answer is not "test the docs" - it is to
+**move load-bearing facts out of prose and into something that executes**:
+
+- A required-variable list belongs in a boot-time check that refuses to start,
+  not in a deployment guide. The guide drifts silently; the check fails loudly
+  on the one machine that matters.
+- A hostname belongs in configuration read by the running system, not in an
+  instruction telling a human which hostname to type.
+- Where prose is genuinely the right medium, **write the invariant, not the
+  transition** - and if a transition must be described, say what ends it, so a
+  reader can check whether it already has.
