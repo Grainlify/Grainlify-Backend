@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -26,7 +27,22 @@ import (
 
 const supportTestSecret = "support-test-secret"
 
+// supportApp also clears the last hour of support rows.
+//
+// The endpoint now enforces a GLOBAL cap on anonymous submissions per hour,
+// counted from the table rather than held in memory - so it is stateful, and
+// dbtest.DB hands out a shared database. Without this, support tests
+// accumulate anonymous rows across a package run, cross the cap partway
+// through, and every test after that point gets a 429 from a limit none of
+// them are about. That is not a test artefact: it is the same statefulness
+// behaving correctly, and seeing it here rather than in production is the
+// cheap version.
 func supportApp(d *db.DB) *fiber.App {
+	if d != nil && d.Pool != nil {
+		_, _ = d.Pool.Exec(context.Background(), `
+DELETE FROM support_requests WHERE created_at > now() - interval '1 hour'
+`)
+	}
 	h := handlers.NewSupportRequestsHandler(
 		// No Discord webhook: the sink is unconfigured and skipped, which is
 		// the state that used to 503 the whole endpoint.

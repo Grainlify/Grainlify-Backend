@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,15 @@ func discordProbe(t *testing.T) (url string, hits func() int, bodies func() []st
 }
 
 func telegramSupportApp(t *testing.T, d *db.DB, respond func(chatID, threadID string) (int, string)) (*fiber.App, func() int) {
+	// Same reason as supportApp: the endpoint enforces a global hourly cap on
+	// anonymous submissions counted from the table, and dbtest.DB is shared, so
+	// without clearing the last hour these tests cross a limit none of them are
+	// about and every one after that point gets a 429.
+	if d != nil && d.Pool != nil {
+		_, _ = d.Pool.Exec(context.Background(), `
+DELETE FROM support_requests WHERE created_at > now() - interval '1 hour'
+`)
+	}
 	t.Helper()
 	var mu sync.Mutex
 	calls := 0

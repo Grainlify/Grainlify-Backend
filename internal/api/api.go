@@ -35,11 +35,21 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 		IdleTimeout:  60 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
-		// Default is 4MB. Raised so a ~5MB bug-report screenshot (matching
-		// the frontend's own upload cap) still fits after base64 inflation
-		// (~1.37x) plus JSON overhead, instead of Fiber itself rejecting the
-		// request with a raw 413 before it reaches any handler-level check.
-		BodyLimit: 8 * 1024 * 1024,
+		// Default is 4MB. This was raised to 8MB so a ~5MB support screenshot
+		// still fit after base64 inflation (~1.37x) plus JSON overhead.
+		//
+		// Cut back to 4MB now that the screenshot bound is 2MB: 2MB inflates
+		// to ~2.8MB, so 4MB still clears it comfortably and a rejection here
+		// stays unreachable for anything using our own form. This is the
+		// ceiling on what ANY request can cost us before a handler sees it,
+		// and /support is now a public route - halving it halves the worst
+		// case per request for every endpoint at once.
+		//
+		// Global rather than per-route because Fiber's BodyLimit is app-level.
+		// Nothing else we serve accepts a payload near this: the next largest
+		// is a social-follow submission, two screenshots the frontend caps
+		// well below it.
+		BodyLimit: 4 * 1024 * 1024,
 	})
 	slog.Info("Fiber app created")
 
