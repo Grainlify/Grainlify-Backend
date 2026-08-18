@@ -358,12 +358,30 @@ func (h *KYCAdminHandler) ReasonCodes() fiber.Handler {
 // THE TEST FOR ADDING A FIELD HERE: does it carry a document, a decision, or
 // provider text? If it does, it does not belong. If it does not, it can.
 //
-// That distinction is why kyc_session_id IS here while everything else from
-// the provider is not. It is an IDENTIFIER, not data - it names a session
-// without describing it, and without it a reviewer matches a queue row to a
-// session in the Didit console by GitHub username, which the console does not
-// index by. The rule was originally written as "nothing from the provider",
-// which was too blunt and cost a reviewer real time.
+// The rule has held. Nothing personal from the provider reaches this endpoint.
+//
+// Two identifiers do, and both pass the test because they name a session
+// without describing a person:
+//
+//	kyc_session_id  the provider's UUID for the session
+//	session_number  the provider's short counter for it (3, 12, 41...), which
+//	                is what their console's verification table displays
+//
+// Worth recording how close this came to being widened, because the argument
+// was good. Matching a queue row to a submission in the Didit console looked
+// like it required the legal name: the console lists people by name, and has
+// no documented search by session id and no URL that opens a single session.
+// The case for showing the name was that the reviewer already sees it there
+// anyway, so nothing would reach anybody new.
+//
+// It was not needed. The console displays session_number, which we had been
+// storing all along and never used - so the match key was already in the data,
+// and no personal detail had to be exposed to find it.
+//
+// The general form, for the next time this comes up: when matching seems to
+// require a personal attribute, look for an identifier first. There is usually
+// one, and it is usually already stored. An exception that gets made once is an
+// invitation to make it again.
 //
 // What it deliberately does NOT return: kyc_data, any document image, or any
 // provider warning text. The admin reads the provider console for the detail;
@@ -381,6 +399,9 @@ func (h *KYCAdminHandler) Pending() fiber.Handler {
 SELECT u.id, COALESCE(ga.login, ''), COALESCE(ga.avatar_url, ''),
        u.kyc_status, u.updated_at::text, u.kyc_data,
        COALESCE(u.kyc_session_id, ''),
+       -- The provider's short session counter, which their verification
+       -- table displays. An identifier, not a description of anybody.
+       COALESCE(u.kyc_data->>'session_number', ''),
        (SELECT count(*) FROM kyc_reset_audit r WHERE r.subject_user_id = u.id)
 FROM users u
 LEFT JOIN github_accounts ga ON ga.user_id = u.id
@@ -396,10 +417,10 @@ ORDER BY u.updated_at ASC
 		out := []fiber.Map{}
 		for rows.Next() {
 			var id uuid.UUID
-			var login, avatarURL, status, updatedAt, sessionID string
+			var login, avatarURL, status, updatedAt, sessionID, sessionNumber string
 			var kycData []byte
 			var resetCount int
-			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &sessionID, &resetCount); err != nil {
+			if err := rows.Scan(&id, &login, &avatarURL, &status, &updatedAt, &kycData, &sessionID, &sessionNumber, &resetCount); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "pending_failed"})
 			}
 
@@ -429,6 +450,11 @@ ORDER BY u.updated_at ASC
 				// is kept on the audit row (previous_session_id), and a row
 				// with no live session is one nothing is waiting on.
 				"kyc_session_id": sessionID,
+				// The provider's own short session counter (3, 12, 41...).
+				// This is the match key: their verification table displays it,
+				// so a reviewer pairs a queue row with a session on the number
+				// alone. It is why no personal detail is needed here.
+				"session_number": sessionNumber,
 				// How many times this person has been reset before. A second
 				// or third reset is a different decision from a first, and an
 				// admin should not have to open another screen to know which

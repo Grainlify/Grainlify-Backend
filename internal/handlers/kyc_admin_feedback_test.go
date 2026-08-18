@@ -289,7 +289,9 @@ func TestKYCPending_ListsTheQueueWithoutProviderText(t *testing.T) {
 	const warning = "Screen capture of document detected"
 	if _, err := d.Pool.Exec(t.Context(), `
 UPDATE users SET kyc_data = $1 WHERE id = $2
-`, `{"id_verification":{"warnings":[{"risk":"SCREEN_CAPTURE_DETECTED","long_description":"`+warning+`"}]},
+`, `{"session_number":"41",
+     "extracted":{"full_name":"Fixture Person","document_number":"MUST-NOT-APPEAR","date_of_birth":"1990-01-01"},
+     "id_verification":{"warnings":[{"risk":"SCREEN_CAPTURE_DETECTED","long_description":"`+warning+`"}]},
      "ip_analysis":{"warnings":[{"risk":"DUPLICATED_IP_ADDRESS","long_description":"Duplicated IP address from another session"}]}}`,
 		refused); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -308,6 +310,18 @@ UPDATE users SET kyc_data = $1 WHERE id = $2
 	}
 	if strings.Contains(string(body), "Duplicated IP address") {
 		t.Errorf("the queue leaks a fraud signal:\n%s", body)
+	}
+	// The strongest form of the narrowing: the fixture carries a document
+	// number and a date of birth, and neither may appear anywhere in the
+	// payload at any depth - not merely be absent from a named key.
+	if strings.Contains(string(body), "MUST-NOT-APPEAR") {
+		t.Errorf("the document number reached the response:\n%s", body)
+	}
+	if strings.Contains(string(body), "1990-01-01") {
+		t.Errorf("the date of birth reached the response:\n%s", body)
+	}
+	if strings.Contains(string(body), "Fixture Person") {
+		t.Errorf("the legal name reached the response:\n%s", body)
 	}
 
 	var out struct {
@@ -328,6 +342,27 @@ UPDATE users SET kyc_data = $1 WHERE id = $2
 	}
 	if _, ok := byID[verified.String()]; ok {
 		t.Error("a verified contributor is in the queue; nothing is waiting on them")
+	}
+
+	// The match key: the provider's verification table displays this number, so
+	// a reviewer pairs a queue row with a session on the number alone. Having
+	// it is what makes exposing any personal detail unnecessary.
+	if got, _ := byID[refused.String()]["session_number"].(string); got == "" {
+		t.Error("session_number is missing; it is the only thing that lets a reviewer find the session")
+	}
+	// And nothing personal, including the name. This nearly became an
+	// exception - the console lists people by name, and the argument for
+	// showing it was that the reviewer already sees it there. The number made
+	// it unnecessary. Each field below is one somebody could argue "helps
+	// matching", which is exactly why the list is explicit.
+	for _, forbidden := range []string{
+		"legal_name", "full_name", "first_name", "last_name",
+		"document_number", "date_of_birth", "nationality", "address",
+		"place_of_birth", "document_type", "face_match_score",
+	} {
+		if _, present := byID[refused.String()][forbidden]; present {
+			t.Errorf("%q is exposed; nothing describing a person belongs on this endpoint", forbidden)
+		}
 	}
 
 	// The session id is carried, because matching a queue row to a session in
