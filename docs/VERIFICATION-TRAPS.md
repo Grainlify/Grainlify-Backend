@@ -47,6 +47,37 @@ Three examples from the same workstream, each replacing a rule with a mechanism:
 - *"Never log the salt"* was a doc comment. It became a type whose `String()` and
   `MarshalJSON` return a redaction, so the accidental log line is harmless.
 
+### A rule drawn too narrowly is a rule you get to break again
+
+Worth its own note, because the failure was in the *generalisation* rather than in
+the fix.
+
+A browser tool passed a hex string where Move bytes were required. Fixed. Then the
+same mistake, one field along. Fixed, and this time a rule was drawn: **every
+`vector<u8>` argument comes from a helper, and no helper returns a string.** That
+held — and the defect appeared a fourth time, in a value handed to a browser
+extension:
+
+```
+TypeError: this.fee_payer_address.serialize is not a function
+```
+
+The extension stored the hex string and later tried to serialise it. Not a
+`vector<u8>`, so the rule did not cover it, and the rule was not wrong — it was
+*narrower than the thing it was drawn from*. The general shape is:
+
+> **A value crossing a typed boundary must be constructed, never spelled.**
+
+An address, a digest, a signature, an amount — anywhere a string is accepted for
+something that is not text, the string will eventually be the wrong one and the
+error will surface far from the call site. Three of these four surfaced as a
+confident wrong answer somewhere else: a Move abort about a digest length, an
+escrow that did not exist, an extension's internal `TypeError`.
+
+**The check:** when a fix prompts a rule, ask whether the rule is as general as
+the mistake. If the mistake was "a string where a typed value belongs" and the rule
+says "vector<u8>", the rule will hold and the bug will return.
+
 When you catch yourself writing a rule — in a runbook, a comment, a review note —
 ask what would have to be true for the rule to be unnecessary. Sometimes nothing
 reasonable. Often it is one constraint, one type, or one assertion, and then the
