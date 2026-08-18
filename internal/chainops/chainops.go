@@ -29,7 +29,7 @@
 //  1. A database constraint. A claim row may only exist in an observed state
 //     ('confirmed', 'paid', 'reorged'), so the query that finds retryable work —
 //     state IN ('built','submitted') — **cannot return a claim row**, because
-//     such a row cannot be stored. See migration 000073.
+//     such a row cannot be stored. See migration 000077.
 //
 //  2. This package. Anything that submits or resubmits takes a Submittable,
 //     which cannot be constructed from a claim row and cannot be constructed
@@ -156,7 +156,7 @@ func (s Submittable) Op() (Op, error) {
 
 // PendingStates are the states the reconciler treats as unfinished work.
 //
-// By the database constraint added in migration 000073, a claim row can never
+// By the database constraint added in migration 000077, a claim row can never
 // hold either of these — so a query filtered on them returns only operations we
 // are allowed to resubmit. The safety here is in the data, not in the caller
 // remembering to filter by kind as well.

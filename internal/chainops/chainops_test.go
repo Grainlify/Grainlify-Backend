@@ -131,7 +131,7 @@ func TestSubmittable_DoesNotShareALeafHashBackingArray(t *testing.T) {
 }
 
 // TestPendingStates_ExcludeEveryObservedState pins the relationship between this
-// list and the database constraint in migration 000073.
+// list and the database constraint in migration 000077.
 //
 // The reconciler's query filters on these states, and the constraint guarantees
 // a claim row can never hold one. If somebody adds an observed state to this
@@ -139,7 +139,7 @@ func TestSubmittable_DoesNotShareALeafHashBackingArray(t *testing.T) {
 // would still be within its constraint, because the constraint names states, not
 // this slice.
 func TestPendingStates_ExcludeEveryObservedState(t *testing.T) {
-	// The states migration 000073 permits for a claim row.
+	// The states migration 000077 permits for a claim row.
 	observedStates := map[State]bool{
 		StateConfirmed: true,
 		StatePaid:      true,
@@ -147,7 +147,7 @@ func TestPendingStates_ExcludeEveryObservedState(t *testing.T) {
 	}
 	for _, s := range PendingStates() {
 		if observedStates[s] {
-			t.Errorf("PendingStates includes %q, which migration 000073 allows a "+
+			t.Errorf("PendingStates includes %q, which migration 000077 allows a "+
 				"claim row to hold - the reconciler's query could then return one", s)
 		}
 	}

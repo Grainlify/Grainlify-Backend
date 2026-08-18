@@ -1080,7 +1080,7 @@ means sending funds to somebody who never signed for them — a push payout, in 
 system that is pull-based specifically to prevent that.
 
 This one is not solved by asking, because there is no human in the loop at 3am. It
-is solved by making the row unstorable in a retryable state (migration `000073`)
+is solved by making the row unstorable in a retryable state (migration `000077`)
 and un-constructible as a submittable value (`internal/chainops`). **Where the
 disagreement can be resolved by a machine at all, remove the machine's ability to
 resolve it in the dangerous direction.**
