@@ -35,10 +35,41 @@ import (
 const (
 	maxSupportMessageRunes = 2000
 
-	// Bounds the DECODED image (after stripping the data-URL wrapper), matching
-	// the frontend's own upload cap so a rejection here never surprises someone
-	// who already passed client-side validation.
-	maxSupportScreenshotBytes = 5 * 1024 * 1024
+	// Bounds the DECODED image (after stripping the data-URL wrapper).
+	//
+	// Cut from 5MB to 2MB. 5 matched the frontend's own upload cap, which was
+	// the right instinct when the only way here was a widget inside the app;
+	// /support is now a public route reachable by anyone, and the per-request
+	// amplification is what an anonymous endpoint costs when it is hammered.
+	// 2MB is still generous for a screenshot - the largest we have received is
+	// well under it - and there is no judgement in the change: it reduces the
+	// worst case by 60% and rejects nothing anybody has actually sent.
+	//
+	// The frontend cap is now the LOWER of the two by design: a rejection here
+	// should be unreachable in normal use, and reachable only by something not
+	// using our form.
+	maxSupportScreenshotBytes = 2 * 1024 * 1024
+
+	// A global ceiling on anonymous submissions per hour, across everybody.
+	//
+	// Deliberately not per-client. The per-client limiter that already guards
+	// this route keys on Fiber's c.IP(), which behind Railway is the edge
+	// proxy's address and not the caller's - every one of the ten support
+	// reports we have ever received recorded a 100.64.0.x CGNAT address, six
+	// distinct ones, and 14 rapid requests from one machine never triggered
+	// the 10/minute limit. Until the proxy's forwarding behaviour is
+	// established there is no trustworthy key, so this uses none.
+	//
+	// Crude on purpose, and honest about the trade: under a flood this blocks
+	// legitimate reporters too. That is the lesser harm. What it bounds is
+	// persistence and the Telegram/Discord fan-out, which is what actually
+	// costs something - a refused submission costs a person one retry, an
+	// unbounded one costs the channel everybody else reads.
+	//
+	// 60/hour against 10 reports in the platform's entire history is invisible
+	// in normal use and still a hard stop. Anonymous only: a signed-in report
+	// is attributable, so it is bounded by the account rather than by this.
+	maxAnonymousSupportRequestsPerHour = 60
 
 	// How long the whole fan-out may take. Deliberately shorter than the sum of
 	// the sinks' own timeouts: the row is already durable, so there is nothing
@@ -143,6 +174,43 @@ func (h *SupportRequestsHandler) Create() fiber.Handler {
 		// reporter's identity, so anyone could file a report as anyone.
 		userID, reporterLogin := h.identify(c)
 
+		// The global ceiling on ANONYMOUS submissions, checked after identity
+		// is known and before anything is written.
+		//
+		// Counted from the table rather than held in memory, so it survives a
+		// restart and is not per-instance - an in-process counter would reset
+		// on every deploy and multiply by the replica count, which is the
+		// difference between a bound and a suggestion.
+		//
+		// A signed-in report is exempt: it is attributable, so the account
+		// bounds it. That also means the failure mode under a flood is
+		// "anonymous reporting pauses", not "support stops", and anybody with
+		// an account can still get through.
+		if userID == nil {
+			var recent int
+			if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT count(*)::int FROM support_requests
+WHERE user_id IS NULL AND created_at > now() - interval '1 hour'
+`).Scan(&recent); err != nil {
+				// Fail OPEN, deliberately. A counting query that errors must
+				// not become an outage on the one route somebody locked out of
+				// their account can reach. Logged loudly so it cannot be the
+				// silent removal of a bound.
+				slog.Error("support: anonymous cap check failed, allowing the request", "error", err)
+			} else if recent >= maxAnonymousSupportRequestsPerHour {
+				slog.Warn("support: anonymous hourly cap reached, refusing",
+					"recent", recent, "cap", maxAnonymousSupportRequestsPerHour)
+				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+					"error": "rate_limited",
+					// Says what to do rather than only that it failed. Somebody
+					// hitting this is far more likely to be a real person caught
+					// behind a flood than the flood itself.
+					"message": "We're getting an unusual number of reports right now. " +
+						"Please try again shortly — or sign in, which isn't affected.",
+				})
+			}
+		}
+
 		id := uuid.New()
 		var screenshotStored *string
 		if screenshot != "" {
@@ -158,6 +226,31 @@ func (h *SupportRequestsHandler) Create() fiber.Handler {
 		if v := strings.TrimSpace(c.IP()); v != "" {
 			ip = &v
 		}
+
+		// DIAGNOSTIC, and temporary. Remove once the proxy question is settled.
+		//
+		// c.IP() has never once recorded a real caller: every reporter_ip in
+		// the table is a 100.64.0.x Railway CGNAT address, six distinct ones
+		// across ten reports. That is why the per-client limiter on this route
+		// has never fired - it keys on an address that rotates per request.
+		//
+		// Fixing it means setting fiber.Config.ProxyHeader, and which value to
+		// trust depends entirely on what the edge does with an INBOUND
+		// X-Forwarded-For. If it strips client-supplied copies, the leftmost
+		// entry is the caller. If it appends without stripping, the leftmost is
+		// whatever the caller made up and only the rightmost is real. Public
+		// answers contradict each other on exactly this point, so this logs
+		// what our own edge actually sends and the question gets settled with
+		// evidence rather than a citation.
+		//
+		// Logs header values, not bodies, on a route that already records an
+		// address. It changes no behaviour: c.IP() is untouched.
+		slog.Info("support: forwarding headers observed",
+			"remote_ip", c.IP(),
+			"x_forwarded_for", c.Get("X-Forwarded-For"),
+			"x_real_ip", c.Get("X-Real-IP"),
+			"x_envoy_external_address", c.Get("X-Envoy-External-Address"),
+			"forwarded", c.Get("Forwarded"))
 
 		// PERSIST FIRST. Everything after this point is best-effort.
 		if _, err := h.db.Pool.Exec(c.Context(), `
