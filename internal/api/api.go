@@ -226,6 +226,24 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/me", auth.RequireAuth(cfg.JWTSecret), authHandler.Me())
 	app.Post("/me/github/resync", auth.RequireAuth(cfg.JWTSecret), authHandler.ResyncGitHubProfile())
 
+	// Payout: where a reward is sent, and how somebody claims it.
+	//
+	// Separate from wallet sign-in throughout - `wallets` answers "prove you hold
+	// this key" and these answer "send money here". Nothing on this path can
+	// create a user; see internal/auth/payout_nonce.go.
+	payoutAddr := handlers.NewPayoutAddressHandler(deps.DB)
+	app.Post("/me/payout-address/challenge", auth.RequireAuth(cfg.JWTSecret), payoutAddr.PostChallenge)
+	app.Post("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.PostAddress)
+	app.Get("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.GetAddress)
+
+	payoutClaims := handlers.NewPayoutClaimsHandler(deps.DB)
+	// The only route that speaks to somebody who has NOT registered an address.
+	// An empty claims list means opposite things before and after publication and
+	// looks identical either way, so silence cannot carry that distinction.
+	app.Get("/me/payout-readiness", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetReadiness)
+	app.Get("/me/claims", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaims)
+	app.Get("/me/claims/:settlement_id", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaim)
+
 	// User profile endpoints
 	userProfile := handlers.NewUserProfileHandler(cfg, deps.DB)
 	app.Get("/profile", auth.RequireAuth(cfg.JWTSecret), userProfile.Profile())

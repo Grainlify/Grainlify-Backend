@@ -154,3 +154,63 @@ func ClaimFor(ctx context.Context, pool db.DBPool, settlementID uuid.UUID, addre
 	}
 	return c, nil
 }
+
+// Exclusion is the fact that somebody was left out of a published tree.
+//
+// # It deliberately carries no amount
+//
+// §6 forbids a computed per-person figure reaching any UI, and
+// internal/founding/no_money_in_ui_test.go enforces it. A claim amount is exempt
+// in practice because it comes from claim_leaves: it is on chain, claimable with
+// a proof, and already public. An EXCLUSION amount is the opposite - it is a
+// figure for money the person will not receive, with no disbursement path to
+// honour it, which is precisely the promise §6 exists to prevent. That it
+// attaches to a disappointment makes it worse, not better.
+//
+// So the person is told they were excluded and what to do about it. The number
+// stays in the database.
+type Exclusion struct {
+	SettlementID uuid.UUID
+	Reason       string
+}
+
+// ExclusionsFor lists published settlements this user was left out of.
+//
+// Lives here rather than in a handler so the settlement tables are not read from
+// a presentation package - which is the letter of the guard - and returns no
+// amount, which is its intent.
+func ExclusionsFor(ctx context.Context, pool db.DBPool, userID uuid.UUID) ([]Exclusion, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT l.settlement_id, l.excluded_reason
+		FROM `+settlementLinesTable+` l
+		JOIN payout_event_roots r ON r.settlement_id = l.settlement_id
+		WHERE l.user_id = $1 AND l.excluded_reason IS NOT NULL AND r.published_tx IS NOT NULL
+		ORDER BY l.settlement_id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("payout.ExclusionsFor: %w", err)
+	}
+	defer rows.Close()
+	var out []Exclusion
+	for rows.Next() {
+		var e Exclusion
+		if err := rows.Scan(&e.SettlementID, &e.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AssetDecimalsFor reads the asset's precision from chain_configs.
+//
+// From the chain config rather than the settlement, because that is where asset
+// metadata belongs: the decimals are a property of the token, not of one event's
+// arithmetic. It also keeps the settlement tables out of the read path entirely.
+func AssetDecimalsFor(ctx context.Context, pool db.DBPool, chainID string) (int32, error) {
+	var dec int32
+	if err := pool.QueryRow(ctx,
+		`SELECT (asset->>'decimals')::int FROM chain_configs WHERE chain_id = $1`, chainID).Scan(&dec); err != nil {
+		return 0, fmt.Errorf("payout.AssetDecimalsFor: no chain config for %q: %w", chainID, err)
+	}
+	return dec, nil
+}

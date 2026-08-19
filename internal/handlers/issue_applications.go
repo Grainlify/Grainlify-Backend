@@ -651,7 +651,7 @@ WHERE project_id = $1 AND number = $2
 			}
 			h.notify.Notify(c.Context(), assigneeUserID, notifications.TypeIssueAssigned,
 				fmt.Sprintf("You've been assigned to issue #%d", issueNumber),
-					fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
+				fmt.Sprintf("You were assigned to work on issue #%d in %s.", issueNumber, fullName),
 				notifications.IssueLink(projectID.String(), githubIssueID),
 			)
 		}

@@ -380,8 +380,27 @@ the week after costs somebody their payout.
 | `excluded_from_published` | a root was published without them | the amount they missed, and that it needs a person to resolve |
 
 For `excluded_from_published`, `excluded_from` carries one entry per settlement
-with `settlement_id`, `amount_minor` and `excluded_reason` (`no_address` or
-`no_github_account`), so the UI can name the figure rather than gesture at it.
+with `settlement_id`, `excluded_reason` (`no_address` or `no_github_account`) and
+`remedy: "contact_support"`.
+
+**It deliberately carries no amount, and this reverses what an earlier draft of
+this document said.** `internal/founding/no_money_in_ui_test.go` enforces §6 —
+no computed per-person figure may reach a UI — and it caught the draft version
+when the handler was written.
+
+The guard draws a line I had not seen, and it is the right one:
+
+- A **claim** amount comes from `claim_leaves`. It is on chain, claimable with a
+  proof, and already public. Not a promise; a published fact. The guard does not
+  forbid it.
+- An **exclusion** amount comes from `founding_settlement_lines`. It is a figure
+  for money the person will **not** receive, with no disbursement path to honour
+  it — exactly the promise §6 exists to prevent, and worse than the case §6 was
+  written for because it attaches to a disappointment.
+
+So the person is told they were excluded and what to do about it, and the number
+stays in the database. The query lives in `internal/payout`, which renders
+nothing, rather than in a handler.
 
 ### The prompt is specified here even though the UI is not ours
 

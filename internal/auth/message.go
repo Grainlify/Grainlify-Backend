@@ -11,6 +11,3 @@ func LoginMessage(nonce string) string {
 func LegacyLoginMessage(nonce string) string {
 	return fmt.Sprintf("Patchwork login\nNonce: %s", nonce)
 }
-
-
-

@@ -14,6 +14,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/expiry"
 	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
@@ -252,6 +253,15 @@ func main() {
 	// Fill in description and topics for projects indexed before the sync
 	// stored them. Deliberately does not touch needs_metadata - see the type.
 	go handlers.NewMetadataBackfiller(cfg, database).Run(context.Background())
+
+	// Delete expired single-use tokens.
+	//
+	// A table with an expires_at and nothing acting on it grows forever:
+	// oauth_states had 242 rows in production, one per abandoned sign-in, none
+	// ever read again. Address registration issues a nonce per attempt and most
+	// attempts will not complete, so auth_nonces inherits the same shape unless
+	// something sweeps it.
+	go expiry.New(database.Pool, time.Hour).Run(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
