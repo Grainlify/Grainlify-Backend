@@ -96,12 +96,15 @@ func (h *AdminHackathonSettlementHandler) Preview() fiber.Handler {
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 		}
 
+		// Asked of internal/hackathon rather than queried here. A settlement
+		// table read from a presentation package is banned by
+		// TestSettlementFiguresNeverReachAPresentationLayer, and the ban is
+		// right: a handler holding that query is one edit from rendering a
+		// per-person figure out of it.
 		var existingID *string
-		var sid string
-		if err := h.db.Pool.QueryRow(c.Context(),
-			`SELECT id::text FROM settlements WHERE hackathon_id = $1 AND pool = $2`,
-			hackathonID, poolKind).Scan(&sid); err == nil {
-			existingID = &sid
+		if id, _ := hackathon.ExistingSettlementID(c.Context(), h.db.Pool, hackathonID, poolKind); id != nil {
+			s := id.String()
+			existingID = &s
 		}
 
 		lines := make([]settlementLineDTO, 0, len(res.Lines))

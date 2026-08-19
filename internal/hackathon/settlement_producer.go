@@ -233,3 +233,23 @@ func poolMinorFor(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID, po
 	}
 	return new(big.Int).Set(minor.Num()), nil
 }
+
+// ExistingSettlementID reports whether this event and pool have already been
+// settled, and if so which settlement it was.
+//
+// Lives here rather than in the handler that displays it, because
+// internal/founding's TestSettlementFiguresNeverReachAPresentationLayer forbids
+// a settlement table being read from anything that renders to a person - and it
+// is right to. A handler that queries settlements is one edit away from
+// rendering a per-person figure out of it; a handler that calls this gets back a
+// uuid and cannot.
+func ExistingSettlementID(ctx context.Context, pool db.DBPool, hackathonID uuid.UUID, poolKind string) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := pool.QueryRow(ctx,
+		`SELECT id FROM settlements WHERE hackathon_id = $1 AND pool = $2`,
+		hackathonID, poolKind).Scan(&id)
+	if err != nil {
+		return nil, nil //nolint:nilerr // absence is the ordinary answer, not a failure
+	}
+	return &id, nil
+}

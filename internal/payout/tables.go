@@ -7,4 +7,4 @@ package payout
 //
 // This is not a way around that rule. The query lives HERE, in a package that
 // renders nothing, and what it returns carries no figure.
-const settlementLinesTable = "founding_settlement_lines"
+const settlementLinesTable = "settlement_lines"

@@ -82,7 +82,7 @@ func event(t *testing.T, d *db.DB, root []byte, leaves map[byte]chainops.State) 
 
 	var settlement uuid.UUID
 	if err := d.Pool.QueryRow(ctx, `
-INSERT INTO settlements (pool_usdc, pool_minor, total_shares, share_value_usdc)
+INSERT INTO settlements (pool_usdc, pool_minor, total_weight, unit_value_usdc)
 VALUES (1000, 1000000000, 10, 100) RETURNING id`).Scan(&settlement); err != nil {
 		t.Fatalf("settlement: %v", err)
 	}

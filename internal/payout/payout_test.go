@@ -43,7 +43,7 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 	ctx := context.Background()
 	var sid uuid.UUID
 	if err := d.Pool.QueryRow(ctx, `
-		INSERT INTO founding_settlements (pool_usdc, total_shares, share_value_usdc, pool_minor, asset_decimals)
+		INSERT INTO settlements (pool_usdc, total_weight, unit_value_usdc, pool_minor, asset_decimals)
 		VALUES (1,1,1,$1,6) RETURNING id`, 10_000_000).Scan(&sid); err != nil {
 		t.Fatalf("settlement: %v", err)
 	}
@@ -78,7 +78,7 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 			d.Pool.Exec(ctx, `DELETE FROM github_accounts WHERE user_id=$1`, p.id)
 			d.Pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, p.id)
 		}
-		d.Pool.Exec(ctx, `DELETE FROM founding_settlements WHERE id=$1`, sid)
+		d.Pool.Exec(ctx, `DELETE FROM settlements WHERE id=$1`, sid)
 	})
 	return Settlement{
 		SettlementID: sid, ChainID: chainID, PoolMinor: big.NewInt(10_000_000),

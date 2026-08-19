@@ -3,6 +3,7 @@ package founding
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,14 +29,24 @@ func TestSettlementFiguresNeverReachAPresentationLayer(t *testing.T) {
 	// Names that only exist to carry a computed amount. The share ledger and
 	// wave tables are deliberately absent: share counts and wave membership
 	// are publishable, and /founding/me returns them.
+	// Bare identifiers, matched as substrings.
 	forbidden := []string{
-		"settlements",
-		"settlement_lines",
-		"share_value_usdc",
+		"unit_value_usdc",
 		"usdc_amount",
 		"ShareValueUSDC",
 		"USDCAmount",
 	}
+
+	// Table names, matched only in SQL position.
+	//
+	// These were "founding_settlements" and "founding_settlement_lines" until
+	// the tables were renamed to serve a second producer. A bare substring
+	// search for "settlements" then began matching ENGLISH - two comments in
+	// payout_claims.go say the word - so the guard started failing on prose
+	// while the thing it protects against was unchanged. Matching in SQL
+	// position restores exactly the precision the old, longer names gave for
+	// free.
+	forbiddenTables := regexp.MustCompile(`(?i)\b(FROM|INTO|JOIN|UPDATE|TABLE)\s+(settlements|settlement_lines)\b`)
 
 	for _, root := range presentationRoots {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -57,6 +68,13 @@ func TestSettlementFiguresNeverReachAPresentationLayer(t *testing.T) {
 			// settlement table names below are still checked here, because a
 			// founding figure appearing in it would be a genuine leak.
 			isRetiredPointsHandler := strings.HasSuffix(path, "redemptions.go")
+
+			if m := forbiddenTables.FindString(src); m != "" {
+				t.Errorf("%s reads a settlement table (%q).\n"+
+					"A computed settlement figure must never reach a UI or a notification (§6): it is a "+
+					"per-person number. Ask a domain package for what you need; do not query the table here.",
+					path, strings.Join(strings.Fields(m), " "))
+			}
 
 			for _, name := range forbidden {
 				if !strings.Contains(src, name) {
