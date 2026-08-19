@@ -386,6 +386,38 @@ railway open
 railway variables
 ```
 
+### `railway up` deploys, and blinds the check that tells you what deployed
+
+`railway up` uploads the working directory instead of building from a git
+commit, so the container is built from files with no commit attached. The
+service reports that honestly:
+
+```json
+{"commit":"","commit_known":false,"service":"patchwork-api"}
+```
+
+`scripts/verify-deployed.mjs` reads `/version` to confirm the running backend
+matches `origin/main`. When `commit_known` is `false` it cannot confirm
+anything, and says so rather than passing. So a `railway up` deploy **turns
+verification off for as long as that image is the one running**. The next
+git-based deploy sets a real SHA again and restores it; the blind spot is the
+window in between, which lasts exactly as long as nobody deploys from git.
+
+The failure is quiet in the worst way: the deploy succeeds, the service runs,
+and the only casualty is the ability to answer "is what I think is live
+actually live?".
+
+It also uploads **the linked project's `projectPath`**, not the directory the
+command was typed in. Those can differ, and when they do `railway up` deploys a
+different checkout while appearing to deploy this one. That has already
+produced an experiment which passed without ever running — see *An experiment
+that passed without ever running* in `docs/VERIFICATION-TRAPS.md`.
+
+**Prefer a git push and let Railway build from the commit.** If `railway up` is
+genuinely needed — an emergency, or something not committable — treat
+verification as off until a git-based deploy lands, and say so rather than
+reporting the next deploy as verified.
+
 ---
 
 ## Cost Estimation

@@ -1318,3 +1318,179 @@ rule later tightens and a batch of tests goes red together, that is not a
 regression. **It is the first time the assumption was stated out loud**, and the
 right response is to read what the fixtures had been asserting rather than to
 adjust them until the suite is green again.
+
+## An experiment that passed without ever running
+
+Deliberately deploying a broken build, to prove Railway's healthcheck holds
+traffic on the previous deployment, produced a clean result on the first
+attempt. The healthcheck appeared to work. It had not been tested at all.
+
+`railway up` uploads the directory named by the **linked project's**
+`projectPath`, not the directory the command was typed in. That path pointed at
+a different checkout, so the upload was clean `main` — the deliberately broken
+build never left the machine. Railway built working code, it started, the
+healthcheck passed, traffic moved, and every observation was consistent with
+the hypothesis. The experiment confirmed a property of a deployment that did
+not contain the code under test.
+
+**It was caught by a single number that should not have been possible.** The
+broken build was rigged to fail its healthcheck, so `/health` had to return
+503 or time out. It returned **200**. A hypothesis that survives its test is
+unremarkable; a control that reports the wrong value is not. Chasing the 200
+rather than accepting the tidy result is the only reason the run was thrown
+out and repeated properly, where the healthcheck did hold and the previous
+deployment did keep serving.
+
+### The general form
+
+**An experiment can pass without having run.** Every layer between "I changed
+the code" and "the system executed it" — a build cache, a stale artifact, a
+CDN, a path indirection, a deploy that silently no-ops — can sever the two
+while leaving the observations intact and agreeable. And the more the result
+matches what was expected, the less it invites the question.
+
+This is the same family as *the reference was in a deployed build, not the
+source* and *a 200 from an SPA is not evidence a route exists*: reading one
+thing and reporting on another. The difference is that those measured the
+wrong object, and this measured the right object in a state that never
+received the change.
+
+### The guard
+
+**Make the broken build prove it is broken before trusting what it tells
+you.** An experiment needs a control that fails, and the control has to be
+observed, not assumed:
+
+1. Before drawing any conclusion, confirm the artifact under test is the one
+   deployed. `/version` reporting the expected commit is one command and
+   settles it.
+2. Rig the failure so it produces an unmistakable signal — a 503, a
+   distinctive log line, a route that only the broken build serves — and check
+   for that signal explicitly.
+3. If the signal is absent, the run is void regardless of how well the rest
+   of the result fits. **A clean result from an experiment that did not run is
+   indistinguishable from a clean result from one that did**, which is exactly
+   why the control has to be verified rather than inferred.
+
+## Answering a question adjacent to the one that was asked
+
+A browser reported "Not Secure". Three consecutive investigations were run,
+each thorough, each finding something real, and none of them answering the
+question.
+
+The question was **"which hostname is in the address bar?"** What all three
+answered was **"which of our hostnames could produce this symptom?"** Those are
+different questions, and the second one has plenty of true answers:
+
+1. The first swept certificates, redirects, mixed content, DNS and HSTS across
+   four `grainlify.com` hosts. Everything was valid. It concluded, correctly,
+   that nothing there could produce the symptom — and treated that as progress.
+2. The second, prompted by a guess about Cloudflare's one-level wildcard,
+   examined the `.0xo.in` names and **did** find a real hostname mismatch:
+   `api.grainlify.0xo.in` presenting `CN=*.up.railway.app`. Real, worth fixing,
+   and not what anybody was looking at.
+3. The third re-swept data columns and bundle chunks for `http://` and found
+   only XML namespace identifiers and dead literals.
+
+Each pass ended with a defensible statement about *our* infrastructure. The
+symptom belonged to a browser on somebody's desk, and no amount of correct
+server-side work was going to reach it.
+
+**What would have collapsed it immediately** is one question asked at the
+start: *what is in the address bar, and what does the padlock dropdown say?*
+The eventual screenshot showed `grainlify.com` with "Certificate is valid" —
+which excludes certificates, redirects and DNS in a single glance, and had been
+available from the first minute.
+
+### The general form
+
+**A symptom reported without its context invites you to enumerate causes
+instead of locating one.** Enumeration feels like progress because each step
+produces a genuine finding, and genuine findings are exactly what makes it hard
+to notice that the search space was never narrowed. Three real discoveries in a
+row is not evidence of converging on the answer; it can equally mean the
+question is broad enough to keep yielding.
+
+The tell is a search that keeps succeeding without ever excluding anything. If
+finding something does not shrink the space of remaining explanations, the
+question being answered is not the one that was asked.
+
+### The guard
+
+Before enumerating causes, **pin the observation**: which host, which URL,
+which browser, which user, when. If the report is second-hand, ask for the
+screenshot before searching — one image can be worth more than a day of
+correct investigation. And when a sweep comes back clean, say *"nothing here
+could cause it"* rather than *"no problem found"*: the first keeps the
+question open, the second quietly closes it.
+
+## A claim about a dependency's behaviour that nobody ever checked
+
+Every other entry here is about a check that ran and quietly answered a
+narrower question than the one asked. This one is different: there was no
+check. A fact about how browsers behave was asserted from general knowledge,
+agreed by two people, used as the justification for building something, and was
+wrong.
+
+The claim was: *"the first project whose README carries an `http://` badge will
+show mixed content on its detail page."* It sounds unremarkable. Mixed content
+is a real thing, `http://` badges are common in old READMEs, and the page really
+does render markdown images from data fetched live from GitHub. Both of us
+stated it. Neither of us measured it.
+
+Measured, current Chrome **already auto-upgrades passive mixed content**:
+
+```
+Mixed Content: The page at 'https://…' was loaded over HTTPS, but requested an
+insecure element 'http://img.shields.io/…'. This request was automatically
+upgraded to HTTPS.
+```
+
+An `http://` badge therefore produces a working image if an HTTPS version
+exists, and a broken image if it does not. It never produces the "Not Secure"
+state the whole argument rested on. The real behaviour splits by content type,
+and neither branch matches what was assumed:
+
+| | assumed | actual |
+|---|---|---|
+| passive (`img`) | degrades the page to insecure | auto-upgraded |
+| active (stylesheet, `fetch`, script, iframe) | — | blocked outright, never upgraded |
+
+The work that followed was still worth doing, which is what makes this
+seductive. The header was the right change for a better reason — it removes a
+dependency on a browser default that varies by engine and version — and the
+conclusion "no page content could have caused that padlock" only became
+available once the behaviour was measured. **A justification can be wrong while
+the decision it produced is right**, and if the justification is never checked,
+nobody finds out which they had.
+
+### Why this shape is hard to catch
+
+A wrong check produces an anomaly eventually: a test that fails, a number that
+disagrees. An unchecked claim produces nothing. It is not contradicted, because
+it was never put in a position to be contradicted. It propagates by being
+repeated - here, from one person's report into another's instruction and back -
+and each repetition makes it sound more established.
+
+The tell is a sentence about what a browser, runtime, library or platform
+*does*, stated in the present tense, with no command or output behind it.
+"Chrome blocks that." "React sanitises that." "The CDN caches that." Every one
+of those is checkable in about a minute.
+
+### The guard
+
+**Before a claim about a dependency's behaviour becomes a reason to build
+something, measure it on the version you actually ship against.** Not the
+documentation, which describes intent and lags; not memory, which is a snapshot
+of some earlier version.
+
+For browsers specifically, that means driving a real browser and reading what it
+did - the request scheme that went out, the console message, the resulting DOM
+state - rather than reasoning from what the standard says should happen. The
+measurement here took one script and two minutes, and it changed both the
+rationale and the description of what the change does.
+
+And when the measurement contradicts the claim, **say so in the artefact**, not
+only in conversation. The commit message and PR description are where the next
+person meets this, and a correction that lives only in a chat log is a
+correction nobody will find.
