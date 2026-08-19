@@ -1084,6 +1084,29 @@ whether it still applies:
 > Checked against `origin/session/aca22d76` at `1818238`. Re-check if that
 > branch has moved.
 
+**"Recalled" is one of the values that field can take**, and writing it is the
+whole point. A finding described from memory reads exactly like one just
+verified — same confidence, same present tense, no marker distinguishing them —
+so a reader cannot weigh it and neither can the person who said it.
+
+Two instances, one on each side of a review:
+
+- *"The API takes `limit` only, so paging needs a backend change."* Described
+  from memory. The handler already accepted `limit`, `offset` and `unread_only`;
+  reading it took ten seconds and the scoped backend change did not exist.
+- *"Fifteen commits."* Stated as a count, arrived at by recollection, and it
+  survived review because it was **read as established rather than recalled**.
+
+That second half is the cost. A recalled fact is not merely unreliable, it
+consumes somebody else's trust budget at the rate of a checked one, and the
+reviewer spends their scepticism elsewhere. Marking it repairs both ends:
+
+> Checked: `internal/handlers/notifications.go:43` just now.
+> Recalled: believed true as of last week, not re-read.
+
+The register is the tell. If a claim would be phrased identically whether you
+had just verified it or last seen it a fortnight ago, it needs the marker.
+
 A finding without a scope reads as permanent, and gets quoted back weeks later
 as though it were. One with a scope carries its own expiry, which is the same
 repair as writing the invariant rather than the transition, applied to a
