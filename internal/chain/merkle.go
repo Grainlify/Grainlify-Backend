@@ -41,17 +41,42 @@ var (
 // **The salt is never published, at any point.** Not in the rules page, not in
 // an API response, not in the operations log, not after the event settles.
 //
-// This is the whole privacy mechanism. Claim transactions already put wallet
-// addresses on-chain by their own nature, and the leaf commits to an identity
-// hash beside the address. If the salt were ever released, anyone holding a
-// list of GitHub logins - which is public - could compute every identity hash,
-// match them against the leaves, and read off each contributor's address:
-// reconstructing exactly the github_login to wallet mapping §4 exists to
-// prevent. That linkage is permanent and, for some contributors, a safety
-// issue rather than a preference.
+// # What this actually protects, stated accurately
+//
+// An earlier version of this comment said the salt prevents anyone deriving a
+// github_login to address mapping from the chain. **That claim is too strong and
+// should not be repeated**, least of all in anything user-facing.
+//
+// What the salt does: it raises the cost of **bulk** correlation. Without it,
+// anyone holding the list of GitHub logins - which is public - could compute
+// every identity hash, match them against the leaves, and read off every
+// contributor's address in one pass. The salt makes that impossible without also
+// holding the salt.
+//
+// What the salt does not do: prevent a **targeted** correlation. A claim puts an
+// address on-chain receiving an exact amount at an exact time, and the allocation
+// is a deterministic function of merged pull requests, which are public. So for a
+// contributor whose amount is distinctive, the leaf never needs to be reversed -
+// the amount identifies them. With a pool of a few dozen members and a
+// share-based allocation, some amounts are unique.
+//
+// This is not a defect being papered over: at this size the alternatives cost
+// more than they buy, and rounding amounts until they collide would corrupt the
+// allocation. It is written down because the flattering version of the sentence
+// is the one that ends up in a grant application, and somebody will eventually
+// rely on it more heavily than it can bear.
 //
 // The salt is per event, so leaves cannot be correlated across events even by
 // someone who later learns one event's salt.
+//
+// # What holding the salt means
+//
+// For as long as we hold it, we retain the ability to link a leaf to a GitHub
+// login - so it is not only a secret to protect, it is a capability we possess.
+// Destroying it is what makes that link unrecoverable by anyone, ourselves
+// included, and destruction is therefore irreversible in both directions: it
+// forecloses bulk deanonymisation by a future leaker, and forecloses our own
+// ability to answer "was this leaf really mine?" for a contributor who asks.
 //
 // Lowercasing the login before hashing is load-bearing: GitHub records
 // capitalisation inconsistently, and hashing the raw value would give one
@@ -228,12 +253,33 @@ func BuildMerkleTree(leaves []ClaimLeaf) (*MerkleTree, error) {
 	for _, l := range leaves {
 		hashed = append(hashed, l.Hash())
 	}
-	sort.Slice(hashed, func(i, j int) bool {
-		return bytes.Compare(hashed[i][:], hashed[j][:]) < 0
+	return buildFromDigests(hashed)
+}
+
+// buildFromDigests is the tree stage on its own, taking leaf digests that have
+// already been computed.
+//
+// Split out so the cross-implementation tree vectors exercise **this** code
+// rather than a copy of it. A vector that pins a test-local reimplementation
+// pins nothing: it is a second implementation of the same rules, which is
+// precisely the drift the vectors exist to catch. The contract's own test
+// helper still has that weakness, and is compensated for by claiming through
+// the real verifier rather than by asserting a root alone.
+//
+// The caller passes digests in whatever order it has them; sorting is this
+// function's job and is one of the three rules the vectors pin.
+func buildFromDigests(hashed [][32]byte) (*MerkleTree, error) {
+	if len(hashed) == 0 {
+		return nil, ErrEmptyTree
+	}
+	sorted := make([][32]byte, len(hashed))
+	copy(sorted, hashed)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
 	})
 
-	level := make([][32]byte, len(hashed))
-	copy(level, hashed)
+	level := make([][32]byte, len(sorted))
+	copy(level, sorted)
 	for len(level) > 1 {
 		next := make([][32]byte, 0, (len(level)+1)/2)
 		for i := 0; i < len(level); i += 2 {
@@ -245,12 +291,17 @@ func BuildMerkleTree(leaves []ClaimLeaf) (*MerkleTree, error) {
 		}
 		level = next
 	}
-	return &MerkleTree{Root: level[0], leaves: hashed}, nil
+	return &MerkleTree{Root: level[0], leaves: sorted}, nil
 }
 
 // Proof returns the sibling path for one leaf.
 func (t *MerkleTree) Proof(leaf ClaimLeaf) ([][32]byte, error) {
-	target := leaf.Hash()
+	return t.proofForDigest(leaf.Hash())
+}
+
+// proofForDigest is Proof by leaf digest, so the pinned proof vector walks the
+// same code a real claim does rather than a test-local copy of it.
+func (t *MerkleTree) proofForDigest(target [32]byte) ([][32]byte, error) {
 	idx := -1
 	for i, h := range t.leaves {
 		if h == target {

@@ -66,6 +66,25 @@ type Config struct {
 	// Used to encrypt stored OAuth access tokens at rest. Must be 32 bytes base64 (AES-256-GCM key).
 	TokenEncKeyB64 string
 
+	// SaltEncKeyB64 encrypts per-event Merkle identity salts at rest.
+	//
+	// **Deliberately separate from TokenEncKeyB64**, which protects GitHub
+	// access tokens, because the two secrets have opposite recoverability. A
+	// leaked token key is survivable: rotate it, re-encrypt, and the exposure
+	// ends. A leaked salt is not recoverable by any action - the identity
+	// hashes it protects are on a permanent chain, so anyone holding the salt
+	// and the public list of GitHub logins can correlate the leaf set in bulk,
+	// forever, and no rotation can undo it because a published root cannot be
+	// republished.
+	//
+	// One key protecting both would mean one compromise costs both, and only
+	// one of them can be recovered from.
+	//
+	// 32 bytes, base64-standard-encoded, same shape as TokenEncKeyB64 and
+	// validated by cryptox.KeyFromB64. Generated and held outside this
+	// application; nothing in this repository should ever produce it.
+	SaltEncKeyB64 string
+
 	// Dev/admin convenience: allow promoting a logged-in user to admin via a shared token.
 	AdminBootstrapToken string
 
@@ -80,14 +99,19 @@ type Config struct {
 	DiditWorkflowID    string
 	DiditWebhookSecret string
 
-	// Soroban configuration
-	SorobanRPCURL            string
-	SorobanNetworkPassphrase string
-	SorobanNetwork           string // "testnet" or "mainnet"
-	SorobanSourceSecret      string
-	EscrowContractID         string
-	ProgramEscrowContractID  string
-	TokenContractID          string
+	// No chain configuration is read here.
+	//
+	// Seven keys used to be: four SOROBAN_* including a signing secret, plus
+	// three contract ids. Every one had zero consumers - they were read into
+	// this struct and used by nothing - and the two contract ids named the
+	// escrow and program-escrow contracts whose clients have been deleted for
+	// calling functions that exist nowhere.
+	//
+	// Config that reads a secret and feeds nothing is a liability with no
+	// upside: it makes an unused signing key look provisioned, and it invites
+	// the next person to wire something to it. When a real adapter needs chain
+	// configuration it comes back with the code that consumes it, and the key
+	// lives in a signer service rather than in this process.
 
 	// Notification emails, sent via Mailercloud
 	// (https://apidoc.mailercloud.com). If MailerCloudAPIKey is empty,
@@ -150,6 +174,7 @@ func Load() Config {
 		CORSOrigins:     getEnv("CORS_ORIGINS", ""),
 
 		TokenEncKeyB64: getEnv("TOKEN_ENC_KEY_B64", ""),
+		SaltEncKeyB64:  getEnv("SALT_ENC_KEY_B64", ""),
 
 		AdminBootstrapToken: strings.TrimSpace(getEnv("ADMIN_BOOTSTRAP_TOKEN", "")),
 
@@ -158,15 +183,6 @@ func Load() Config {
 		AnthropicAPIKey:    getEnv("ANTHROPIC_API_KEY", ""),
 		DiditWorkflowID:    getEnv("DIDIT_WORKFLOW_ID", ""),
 		DiditWebhookSecret: getEnv("DIDIT_WEBHOOK_SECRET", ""),
-
-		// Soroban configuration
-		SorobanRPCURL:            getEnv("SOROBAN_RPC_URL", ""),
-		SorobanNetworkPassphrase: getEnv("SOROBAN_NETWORK_PASSPHRASE", ""),
-		SorobanNetwork:           getEnv("SOROBAN_NETWORK", "testnet"),
-		SorobanSourceSecret:      getEnv("SOROBAN_SOURCE_SECRET", ""),
-		EscrowContractID:         getEnv("ESCROW_CONTRACT_ID", ""),
-		ProgramEscrowContractID:  getEnv("PROGRAM_ESCROW_CONTRACT_ID", ""),
-		TokenContractID:          getEnv("TOKEN_CONTRACT_ID", ""),
 
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),
