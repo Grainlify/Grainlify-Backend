@@ -1065,6 +1065,30 @@ Documentation cannot be tested, so the answer is not "test the docs" - it is to
   transition** - and if a transition must be described, say what ends it, so a
   reader can check whether it already has.
 
+### A verified fact has a scope, and the scope is the tree you checked it against
+
+"Safe on both sides" was reported about a table rename: a check across every file
+of another session's branch found the old table names referenced **zero** times,
+so the rename could not break them. That was true, and it was true of commit
+`1818238`.
+
+Six commits later the same branch had `internal/payout/tables.go`, whose entire
+contents are a constant holding the old table name, and a new function querying
+the old table directly. The finding was now false. Neither session had edited
+anything the other could see; the branch simply moved.
+
+The repair is not more care at the moment of checking — the check was correct.
+It is to **record what a fact was verified against**, so a later reader can tell
+whether it still applies:
+
+> Checked against `origin/session/aca22d76` at `1818238`. Re-check if that
+> branch has moved.
+
+A finding without a scope reads as permanent, and gets quoted back weeks later
+as though it were. One with a scope carries its own expiry, which is the same
+repair as writing the invariant rather than the transition, applied to a
+verification result instead of prose.
+
 ## Two implementations of one rule, and the vector pinned the wrong one
 
 Same family as 1-6: a check that measured a proxy. What makes this one worth its
@@ -1430,6 +1454,21 @@ cp ./*.go "$BAK/"                           # names WHAT
 const dir = "../../../Aptos-Contracts"      // names WHERE
 findUpwards("Aptos-Contracts/sources/escrow.move")  // names WHAT
 ```
+
+For an in-place edit there is no glob to reach for, and the same repair takes the
+form of an assertion on the text itself:
+
+```python
+del lines[26:40]                  # names WHERE - silently removes whatever is there now
+assert src.count(block) == 1      # names WHAT - refuses if the file moved under you
+src = src.replace(block, "", 1)
+```
+
+Both halves matter. A line range applied after an earlier edit shifted the file
+removes something real and says nothing; the count turns that from silently-wrong
+into a loud refusal. Hit while splitting a package: the assertion failed by one
+line, so nothing was deleted and a build error survived to be noticed. That was
+luck, and the assertion is what converted luck into a guarantee.
 
 The drift-check fix and the harness fix are the *same repair applied to two
 tools*, made hours apart, and neither of us connected them at the time. That is
@@ -1912,3 +1951,128 @@ The habit pairs with the previous entry. One prevents the silent destruction;
 the other notices when prevention failed. Neither is sufficient alone — the
 count only worked here because the expected value had been stated as "ten
 added" before the number was read.
+## A result that passes through a transformation reports on the transformation
+
+Three times in one session, the same line:
+
+```sh
+go build ./... 2>&1 | head -10 && echo "ALL PACKAGES BUILD"
+```
+
+It printed `ALL PACKAGES BUILD` while the build was failing. `$?` and `&&` see
+the **last** command in a pipeline, which is `head`, and `head` succeeds at
+printing whatever it was given — including a compiler error. The same line
+reported a passing test suite over a failure, and an `exit: 0` beside an
+experiment that had exited 1.
+
+Every instance was self-inflicted tooling, not a defect in the thing under test,
+which is exactly what makes it dangerous: the subject was innocent each time, so
+there was nothing to investigate and no anomaly to chase. The check simply
+agreed.
+
+### The mechanism, because a rule you must remember is not a rule
+
+The instinct is "remember not to pipe". That fails at precisely the moment it
+matters, when you are three commands into a diagnosis and reaching for `head` to
+keep the output short. Set the shell so the mistake cannot be made:
+
+```sh
+set -o pipefail      # a pipeline's status is the first non-zero, not the last
+```
+
+With `pipefail`, `go build … | head` returns the build's failure. Where that is
+not available, capture before transforming:
+
+```sh
+go build ./... > /tmp/out.txt 2>&1; echo "exit: $?"   # status first, then read
+```
+
+`$?` must be read immediately, before any other command runs — including the
+`echo` that displays it.
+
+### The general form
+
+**Anything that transforms a result also replaces its status.** A pipeline is
+the obvious case; it is not the only one:
+
+- a test harness that prints `SKIP` and exits 0, so the suite reports a clean
+  sheet over tests that never ran
+- a retry wrapper whose status is the last attempt's, hiding that the first
+  three failed
+- a formatter or reporter between a checker and the terminal, reporting on
+  itself
+- `|| true`, appended to silence noise, which converts every future failure of
+  that line into a pass
+
+The tell is a success message produced by something other than the thing being
+checked. If the words "it passed" were printed by a wrapper rather than by the
+tool, they describe the wrapper.
+
+## When a check fails, the check is a suspect too
+
+A failing check is evidence that the check and its subject disagree. Which of
+them is wrong is a second question, and it is skipped almost every time, because
+a red result arrives already labelled: the tool is the instrument and the code
+is the thing being measured.
+
+Four times in one session the instrument was wrong.
+
+**A shell that rewrote the input.** Reproducing a CI step locally reported that
+the deployed bundle was missing its API host. It was not. `zsh`'s builtin `echo`
+interprets backslash escapes, minified JavaScript is full of them, and
+`echo "$bundle" | grep` mangled the content before `grep` saw it. The same line
+passes in `bash`, which is what CI runs. **The finding was the harness.**
+
+**A flag that did not exist.** Testing a new argument check, `--confirm-host=…`
+was rejected and read as the check having broken the production safety flag. The
+real flag is `--yes-run-against-remote-host`. The rejection was correct
+behaviour on an argument that genuinely is unrecognised.
+
+**An assertion that fails on correct output.** A test asserted that rendered
+markup contained no `src=`, to prove raw HTML was inert. Escaped text still
+contains those characters — `&lt;script src="…"` — so the assertion failed
+precisely because the code was doing the right thing. A sibling test searched
+the source for `rehype-raw` and matched the comment *explaining why rehype-raw
+is absent*.
+
+**A truncated download.** A bundle saved with `curl -s > file` arrived at 117KB
+of 575KB. The occurrence count for the API host went from 3 to 0 between two
+runs, which looked exactly like production having changed under the
+investigation. Nothing had changed; the file was short.
+
+### Why it costs more than other traps
+
+A wrong check that **passes** is caught eventually — by a mutation test, by the
+bug it failed to stop. A wrong check that **fails** sends you into the subject,
+which is innocent, so every hypothesis you form there is false and every
+experiment confirms nothing. You cannot find a defect that is not present, and
+the search does not terminate on its own. This is also the shape of *an
+intermittent failure invites you to blame the environment*, seen from the other
+side: there the environment was accused and the fixtures were guilty; here the
+code is accused and the tool is. And *a tool that corrupted the source it was
+checking* is one mechanism of this entry rather than a separate fault: there the
+harness damaged its subject, so the damage presented as a bug in the code. Kept
+separate because that one has a specific fix — back up by glob — while this is
+the stance that finds it.
+
+### The guard
+
+**Before believing a red result about the subject, establish that the tool is
+asking the question you think it is.** Three cheap moves, in order of how often
+they settle it:
+
+1. **Run the check against something known-good and known-bad.** A check that
+   cannot pass is broken; a check that cannot fail measures nothing. Both are
+   one command.
+2. **Read what the check actually received**, not what you passed it. Print the
+   length, the first bytes, the resolved argument. The four cases above were all
+   visible at this step: a mangled string, an unknown flag, escaped text, a
+   short file.
+3. **Reproduce in the environment the check really runs in.** A local shell is
+   not CI, and a headless browser with no extensions is not the reporter's
+   browser.
+
+The habit to build is narrow: **say "the check and the code disagree" rather
+than "the code is broken"**, and hold both as suspects until one is excluded.
+The sentence is the whole guard — it keeps a second hypothesis alive at the only
+moment it is cheap to test.
