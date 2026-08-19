@@ -1258,6 +1258,47 @@ happens if it resolves it the wrong way. If the answer involves somebody's money
 arriving somewhere they did not choose, or arriving twice, it is not a
 reconciliation — it is a decision, and it belongs to a person.
 
+## A search that answered a narrower question than the one asked
+
+While verifying a deploy, a grep for registered routes was filtered down to
+auth-related ones:
+
+```sh
+grep -rhoE '(Get|Post)\("(/[a-zA-Z0-9/_:.-]*)"' ... | grep -iE 'auth|login|session|token|me\b|dev'
+```
+
+It returned `/auth/github/callback` and not `/auth/github/login/callback`. The
+live service was redirecting OAuth to the second one, so the obvious reading was
+that sign-in was broken in production — a route the app redirects to that does
+not exist. That would have been an outage report, thirteen commits after a push.
+
+**Sign-in was fine.** Both routes exist. The pipeline's second stage dropped the
+one that mattered, and the output looked exactly like a complete list of auth
+routes because every line in it was an auth route.
+
+That is the same defect as a substring check reporting old copy as still live,
+and as the failed view call that got compared to a leaf and printed
+**ROOT MISMATCH**: in each case a tool answered a **narrower question than the
+one being asked**, and returned a confident answer to it. Nothing errored. The
+narrowing was invisible in the result, because a filtered list and a complete
+list look identical once you are reading the list.
+
+An absence is the dangerous answer, because absence is what a filter produces.
+A search that finds something can be checked against what it found; a search that
+finds nothing offers nothing to check.
+
+### The check
+
+**When a search reports something absent, ask what the search could not have
+found.** Then re-run it without the narrowing step and diff the two. If a filter,
+a path restriction, a file-type flag or an `--include` stands between the corpus
+and the answer, the answer is about the filter until proven otherwise.
+
+Cheapest habit that would have caught this one: before believing an absence,
+grep the corpus for the *specific string you expected to be missing*, with no
+pipeline after it. Here that is one command, and it returns the route
+immediately.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
