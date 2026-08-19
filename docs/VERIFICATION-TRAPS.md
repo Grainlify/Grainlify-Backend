@@ -1423,3 +1423,74 @@ screenshot before searching — one image can be worth more than a day of
 correct investigation. And when a sweep comes back clean, say *"nothing here
 could cause it"* rather than *"no problem found"*: the first keeps the
 question open, the second quietly closes it.
+
+## A claim about a dependency's behaviour that nobody ever checked
+
+Every other entry here is about a check that ran and quietly answered a
+narrower question than the one asked. This one is different: there was no
+check. A fact about how browsers behave was asserted from general knowledge,
+agreed by two people, used as the justification for building something, and was
+wrong.
+
+The claim was: *"the first project whose README carries an `http://` badge will
+show mixed content on its detail page."* It sounds unremarkable. Mixed content
+is a real thing, `http://` badges are common in old READMEs, and the page really
+does render markdown images from data fetched live from GitHub. Both of us
+stated it. Neither of us measured it.
+
+Measured, current Chrome **already auto-upgrades passive mixed content**:
+
+```
+Mixed Content: The page at 'https://…' was loaded over HTTPS, but requested an
+insecure element 'http://img.shields.io/…'. This request was automatically
+upgraded to HTTPS.
+```
+
+An `http://` badge therefore produces a working image if an HTTPS version
+exists, and a broken image if it does not. It never produces the "Not Secure"
+state the whole argument rested on. The real behaviour splits by content type,
+and neither branch matches what was assumed:
+
+| | assumed | actual |
+|---|---|---|
+| passive (`img`) | degrades the page to insecure | auto-upgraded |
+| active (stylesheet, `fetch`, script, iframe) | — | blocked outright, never upgraded |
+
+The work that followed was still worth doing, which is what makes this
+seductive. The header was the right change for a better reason — it removes a
+dependency on a browser default that varies by engine and version — and the
+conclusion "no page content could have caused that padlock" only became
+available once the behaviour was measured. **A justification can be wrong while
+the decision it produced is right**, and if the justification is never checked,
+nobody finds out which they had.
+
+### Why this shape is hard to catch
+
+A wrong check produces an anomaly eventually: a test that fails, a number that
+disagrees. An unchecked claim produces nothing. It is not contradicted, because
+it was never put in a position to be contradicted. It propagates by being
+repeated - here, from one person's report into another's instruction and back -
+and each repetition makes it sound more established.
+
+The tell is a sentence about what a browser, runtime, library or platform
+*does*, stated in the present tense, with no command or output behind it.
+"Chrome blocks that." "React sanitises that." "The CDN caches that." Every one
+of those is checkable in about a minute.
+
+### The guard
+
+**Before a claim about a dependency's behaviour becomes a reason to build
+something, measure it on the version you actually ship against.** Not the
+documentation, which describes intent and lags; not memory, which is a snapshot
+of some earlier version.
+
+For browsers specifically, that means driving a real browser and reading what it
+did - the request scheme that went out, the console message, the resulting DOM
+state - rather than reasoning from what the standard says should happen. The
+measurement here took one script and two minutes, and it changed both the
+rationale and the description of what the change does.
+
+And when the measurement contradicts the claim, **say so in the artefact**, not
+only in conversation. The commit message and PR description are where the next
+person meets this, and a correction that lives only in a chat log is a
+correction nobody will find.
