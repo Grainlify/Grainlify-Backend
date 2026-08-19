@@ -1437,6 +1437,23 @@ the argument for writing the general form down rather than the incident: the nex
 instance will not look like a file list or a relative path, and the only thing
 that will recognise it is the rule.
 
+### A companion case: a rule scoped to the wrong verb
+
+The same day, a rule that each session works in its own git worktree — written
+about **writes**, because the incident that prompted it was one session branching
+off another's unpushed commit — was broken through **reads**. I changed directory
+into the shared checkout to *inspect* a tool, and then kept editing from where I
+had landed. Three files were modified in the wrong tree before a commit reported
+"nothing to commit" and gave it away.
+
+Nothing about the editing was careless. The navigation was, one step earlier, and
+by then the working directory was simply wrong for everything that followed.
+
+> **A habit that puts you in the wrong place does not care which verb you use
+> next.** So the rule extends: read from the worktree too. Not because reading is
+> dangerous, but because reading is how you end up somewhere, and where you are
+> is what the next command inherits.
+
 ### The check
 
 **Ask of any reference: would this still be correct if somebody added one more?**
