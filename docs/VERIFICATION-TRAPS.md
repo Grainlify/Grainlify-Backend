@@ -2147,3 +2147,63 @@ not covering it, whatever its name says. Two cheap ways to answer:
 When the right layer is unavailable — no browser in CI, no real database in a
 unit suite — say so in the test rather than substituting an assertion from the
 wrong layer and letting its green stand in for coverage it does not provide.
+
+## Verifying a destination is not verifying the journey
+
+43 notifications pointed at `/settings?...`, a route the app does not serve.
+They were enumerated, repaired by exact value, and the repair was verified: the
+migration ran, zero rows matched the dead pattern afterwards, and every stored
+path now named a route that exists.
+
+Every one of those links was still unreachable by clicking.
+
+Following a link to `/dashboard?tab=X` from inside the dashboard changed the URL
+and then reverted it, because `?tab=` was read only by a `useState` initialiser
+and nothing mapped it back into state after mount. **The addresses were correct
+and arriving was impossible, and both were true at once for a day.**
+
+### Why the repair looked complete
+
+Because it was, on its own terms. The claim under test was "these rows name a
+real route", and that claim was fully verified — enumerated, migrated, counted
+back to zero. What was never tested is the sentence a reader would actually
+infer from it: *"so the links work now."*
+
+That inference has a second half nobody stated, so nobody checked it. A
+destination has to exist **and** be arrivable, and the two are different systems:
+one is data, the other is navigation. Fixing one and reporting the other is not
+overclaiming in the moment — the gap only appears when somebody asks what the
+repair was *for*.
+
+### Why the two are indistinguishable from the sending end
+
+From the writer's side, a wrong address and an unreachable one look identical:
+
+- the row is written
+- the path is well-formed
+- nothing errors
+- the notification appears in the list
+
+Neither failure produces a signal where the link is created, stored, or
+rendered. The only place they diverge is the click, and the click happens on
+somebody else's machine.
+
+That is what makes this shape expensive rather than merely wrong. **A repair to
+one half returns the system to looking exactly as healthy as it looked while
+broken.**
+
+### The check
+
+**Follow one.** Not assert the path, not query the column, not read the router —
+take a single real link and travel it end to end, in the state a person is
+actually in.
+
+For the same reason the last leg has to be the real one: this button was checked
+in production while signed out, where every path bounced to `/signin`. That
+proved the routes resolve and nothing whatever about arriving, because the leg
+that was broken is the one an unauthenticated request never reaches.
+
+The generalisation worth carrying: **when you fix a reference, test a
+dereference.** A corrected foreign key wants a join executed; a corrected path
+wants a request made; a corrected address wants something delivered to it. The
+correction is evidence about the value, and the value was never the goal.
