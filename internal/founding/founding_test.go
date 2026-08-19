@@ -12,6 +12,7 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+	"github.com/jagadeesh/grainlify/backend/internal/settlement"
 )
 
 func defaults() map[string]string {
@@ -46,7 +47,7 @@ func defaults() map[string]string {
 func resetFounding(t *testing.T, d *db.DB) {
 	t.Helper()
 	if _, err := d.Pool.Exec(context.Background(), `
-TRUNCATE founding_settlement_lines, founding_settlements, founding_shares,
+TRUNCATE settlement_lines, settlements, founding_shares,
          founding_wave_lock, founding_members RESTART IDENTITY CASCADE
 `); err != nil {
 		t.Fatalf("reset founding tables: %v", err)
@@ -323,11 +324,11 @@ func TestGrant_IsIdempotentPerSourceEvent(t *testing.T) {
 	}
 }
 
-// TestCompute_DividesPoolByEffectiveShares checks the arithmetic and the two
+// TestCompute_DividesPoolByEffectiveWeight checks the arithmetic and the two
 // things around it that are easy to get wrong: the multiplier applies to a
 // member's whole total, and an ineligible member is excluded from the divisor
 // rather than silently shrinking everyone else's payout.
-func TestDryRun_DividesPoolByEffectiveShares(t *testing.T) {
+func TestDryRun_DividesPoolByEffectiveWeight(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
 	resetFounding(t, d)
@@ -403,7 +404,7 @@ func TestDryRun_DividesPoolByEffectiveShares(t *testing.T) {
 	// DryRun writes nothing. This is the property that lets the output be read
 	// and re-read before a chain step without recording a settlement.
 	var settlements int
-	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM founding_settlements`).Scan(&settlements); err != nil {
+	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM settlements`).Scan(&settlements); err != nil {
 		t.Fatalf("count settlements: %v", err)
 	}
 	if settlements != 0 {
@@ -590,12 +591,12 @@ func TestDryRun_LargestRemainderWinsTheLeftoverUnit(t *testing.T) {
 // database is involved.
 func TestApportion_RefusesAnInconsistentDivisor(t *testing.T) {
 	lines := []Line{
-		{UserID: uuid.New(), EffectiveShares: big.NewRat(3, 1)},
-		{UserID: uuid.New(), EffectiveShares: big.NewRat(3, 1)},
+		{UserID: uuid.New(), EffectiveWeight: big.NewRat(3, 1)},
+		{UserID: uuid.New(), EffectiveWeight: big.NewRat(3, 1)},
 	}
 	// A divisor of 1 against 6 shares means the floors alone claim six times
 	// the pool.
-	err := apportion(lines, big.NewInt(1_000_000), big.NewRat(1, 1))
+	err := settlement.Apportion(lines, big.NewInt(1_000_000), big.NewRat(1, 1))
 	if !errors.Is(err, ErrAllocationMismatch) {
 		t.Errorf("apportion error = %v, want ErrAllocationMismatch", err)
 	}
@@ -653,7 +654,7 @@ func TestPersist_RecordsWhatWasApproved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
-	if err := Persist(ctx, d.Pool, nil, res); err != nil {
+	if err := settlement.Persist(ctx, d.Pool, res); err != nil {
 		t.Fatalf("Persist: %v", err)
 	}
 	if res.SettlementID == uuid.Nil {
@@ -662,12 +663,12 @@ func TestPersist_RecordsWhatWasApproved(t *testing.T) {
 
 	var poolMinor, amountMinor int64
 	if err := d.Pool.QueryRow(ctx,
-		`SELECT pool_minor FROM founding_settlements WHERE id = $1`, res.SettlementID,
+		`SELECT pool_minor FROM settlements WHERE id = $1`, res.SettlementID,
 	).Scan(&poolMinor); err != nil {
 		t.Fatalf("read settlement: %v", err)
 	}
 	if err := d.Pool.QueryRow(ctx,
-		`SELECT amount_minor FROM founding_settlement_lines WHERE settlement_id = $1 AND user_id = $2`,
+		`SELECT amount_minor FROM settlement_lines WHERE settlement_id = $1 AND user_id = $2`,
 		res.SettlementID, u,
 	).Scan(&amountMinor); err != nil {
 		t.Fatalf("read line: %v", err)
@@ -707,11 +708,11 @@ func TestPersist_RefusesAResultThatDoesNotSumToThePool(t *testing.T) {
 	}
 	res.Lines[0].AmountMinor.Sub(res.Lines[0].AmountMinor, big.NewInt(1))
 
-	if err := Persist(ctx, d.Pool, nil, res); !errors.Is(err, ErrAllocationMismatch) {
+	if err := settlement.Persist(ctx, d.Pool, res); !errors.Is(err, ErrAllocationMismatch) {
 		t.Errorf("Persist error = %v, want ErrAllocationMismatch", err)
 	}
 	var settlements int
-	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM founding_settlements`).Scan(&settlements); err != nil {
+	if err := d.Pool.QueryRow(ctx, `SELECT count(*)::int FROM settlements`).Scan(&settlements); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if settlements != 0 {

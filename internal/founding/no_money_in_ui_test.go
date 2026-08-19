@@ -29,8 +29,8 @@ func TestSettlementFiguresNeverReachAPresentationLayer(t *testing.T) {
 	// wave tables are deliberately absent: share counts and wave membership
 	// are publishable, and /founding/me returns them.
 	forbidden := []string{
-		"founding_settlements",
-		"founding_settlement_lines",
+		"settlements",
+		"settlement_lines",
 		"share_value_usdc",
 		"usdc_amount",
 		"ShareValueUSDC",
