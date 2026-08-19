@@ -9,25 +9,48 @@ irreversible and two of them are irreversible in ways that are not obvious.
 
 ---
 
-## Before you start: THERE IS NO COMMAND FOR STEPS 3–5
+## Before you start
 
-Writing this runbook is what surfaced it, so it goes at the top rather than
-buried at the step.
+**`cmd/payout` is the entry point for every database step.** It did not exist
+when this runbook was first written — four packages were built, tested and
+mutation-tested with nothing calling them, and writing this document is what
+found it.
 
-`founding.DryRun`, `founding.Persist`, `payout.DryRun` and `payout.Build` are
-built, tested and mutation-tested. **Nothing calls them.** `cmd/` contains `api`,
-`migrate` and `worker`, and none of the three references either package. There is
-no CLI, no admin route, and no job.
+```
+READ-ONLY (repeatable, writes nothing)
+  payout dry-run  --pool-usdc <amount>
+  payout report   --settlement <id>          the gate
+  payout status   --settlement <id>
 
-So steps 3, 4 and 5 below describe what must happen and cannot yet be performed
-by a person. **A `cmd/payout` is required before this runbook is executable.**
-Until it exists, the only way to run those steps is a Go test, which is not an
-operational path and must not become one — a test writes to whatever `TEST_DB_URL`
-names, and the muscle memory of running one against a real settlement is exactly
-the habit `cmd/migrate`'s host guard exists to prevent.
+IRREVERSIBLE (each its own act, deliberately)
+  payout persist  --pool-usdc <amount>
+  payout build    --settlement <id> --digest <hex> --acknowledge-undeliverable <minor>
+  payout publish  --settlement <id> --escrow <addr> --tx <hash>
+```
 
-Everything else below — the address collection, the chain steps, the
-verification, the watching — is performable today.
+The irreversible steps are **separate subcommands, not flags**. Three of the five
+irreversible moments below complete quietly, and a subcommand somebody has to
+type is friction in exactly the right place. The read-only ones are trivially
+repeatable on purpose: the gate only works if re-reading the report is cheaper
+than arguing with it.
+
+**Every subcommand refuses a non-local database** unless you name the host with
+`--yes-run-against-remote-host=<host>` — the same guard as `cmd/migrate`, shared
+from `internal/dbguard` rather than copied. The stakes differ though: a migration
+against the wrong database is recoverable, while `persist` and `build` against
+the wrong one produce a settlement and a tree for an event that does not exist
+there, and a `publish_root` funded against that tree moves real money on its
+strength.
+
+**`--pool-usdc` is required and never defaulted.** The library falls back to 3000
+USDC when the key is absent, which is a sensible library default and a dangerous
+operator one. The number that decides how much money is distributed should be
+typed by the person distributing it, and should appear in their shell history
+next to the command that used it.
+
+**Do not run these steps through a Go test.** A test writes to whatever
+`TEST_DB_URL` names, and building the habit of pointing one at a real settlement
+is precisely what the host guard exists to prevent.
 
 ---
 
@@ -93,19 +116,24 @@ publication and nothing about it is after.
 
 ## Phase 2 — compute the settlement
 
-`founding.DryRun` writes nothing. Read the result, then `founding.Persist`.
+```sh
+go run ./cmd/payout dry-run --pool-usdc 3000     # writes nothing
+go run ./cmd/payout persist --pool-usdc 3000     # IRREVERSIBLE
+```
 
-Persist is what creates `founding_settlements.id`, and **everything downstream is
-keyed to that id.** Persisting twice creates two settlements and the second will
-happily build its own tree.
+Persist prints the `settlement_id`, and **everything downstream is keyed to it.**
+Persisting twice creates two settlements and the second will happily build its
+own tree, so record the id and use it.
 
 ---
 
 ## Phase 3 — the payout dry run · **THE GATE**
 
-*(No command exists — see the note at the top.)*
+```sh
+go run ./cmd/payout report --settlement <id>
+```
 
-`payout.DryRun` writes nothing, needs no salt, and prints the report you read.
+Writes nothing, needs no salt, and prints the report you read.
 **This is the last point at which anything is reversible.**
 
 Read all four sections, in this order:
@@ -132,10 +160,16 @@ publication it is the only account of who was excluded and why.
 
 ## Phase 4 — build the tree
 
-*(No command exists — see the note at the top.)*
+```sh
+go run ./cmd/payout build --settlement <id> \
+  --digest <64 hex from the report> \
+  --acknowledge-undeliverable <integer from the report>
+```
 
-`payout.Build` re-resolves from current data and refuses unless the input digest
-still matches and the undeliverable total is restated exactly.
+It re-resolves from current data and refuses unless the input digest still
+matches and the undeliverable total is restated exactly. Both come from the
+report, and the acknowledgement appears only in the reconciliation — so it cannot
+be produced without having read it.
 
 **If it reports `ErrInputsChanged`, do not look for a way around it.** There is no
 override, deliberately. Something moved between your reading and your building —
@@ -208,8 +242,15 @@ reconcile the two numbers and try again.
 A root is write-once. There is no second attempt at a different root for this
 escrow — you would need a fresh event id, and a fresh escrow.
 
-**Record the transaction hash into `payout_event_roots.published_tx`.** Until that
-column is set, `/me/claims` returns nothing: the published-only rule keys on it.
+Then record it:
+
+```sh
+go run ./cmd/payout publish --settlement <id> --escrow <escrow addr> --tx <hash>
+```
+
+**Until `published_tx` is set, `/me/claims` returns nothing** — the published-only
+rule keys on it, so a contributor sees an empty list until this step runs.
+`payout publish` refuses a settlement that already has one recorded.
 
 ---
 
@@ -228,6 +269,8 @@ Do not skip this because the transaction succeeded.
 3. **A person can see it.** `GET /me/claims` as a real contributor, and confirm
    `address_status` reads `current` for somebody who has not changed address.
 4. **The wallet harness, steps A and B**, against a real browser wallet.
+5. `go run ./cmd/payout status --settlement <id>` — leaves, claims, publication
+   and whether the salt is still live, in one place.
 
 ---
 

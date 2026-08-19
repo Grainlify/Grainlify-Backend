@@ -1,4 +1,4 @@
-package main
+package dbguard
 
 import "testing"
 
@@ -12,14 +12,14 @@ func TestCheckTarget_LocalNeedsNoConfirmation(t *testing.T) {
 		"host=localhost user=grainlify dbname=grainlify",
 		"host=/var/run/postgresql dbname=grainlify",
 	} {
-		if err := checkTarget(u, nil); err != nil {
+		if err := Check("cmd/migrate", u, nil); err != nil {
 			t.Errorf("local database refused: %v\n  url: %s", err, u)
 		}
 	}
 }
 
 func TestCheckTarget_RemoteIsRefusedWithoutTheFlag(t *testing.T) {
-	err := checkTarget(prodURL, nil)
+	err := Check("cmd/migrate", prodURL, nil)
 	if err == nil {
 		t.Fatal("a remote database was migrated with no confirmation")
 	}
@@ -27,11 +27,11 @@ func TestCheckTarget_RemoteIsRefusedWithoutTheFlag(t *testing.T) {
 
 func TestCheckTarget_RemoteProceedsWhenTheHostIsNamed(t *testing.T) {
 	args := []string{"--yes-run-against-remote-host=ep-cool-name.eu-central-1.aws.neon.tech"}
-	if err := checkTarget(prodURL, args); err != nil {
+	if err := Check("cmd/migrate", prodURL, args); err != nil {
 		t.Fatalf("a correctly confirmed run was refused: %v", err)
 	}
 	// The space-separated form has to work too, or the message we print is wrong.
-	if err := checkTarget(prodURL, []string{"--yes-run-against-remote-host", "ep-cool-name.eu-central-1.aws.neon.tech"}); err != nil {
+	if err := Check("cmd/migrate", prodURL, []string{"--yes-run-against-remote-host", "ep-cool-name.eu-central-1.aws.neon.tech"}); err != nil {
 		t.Fatalf("space-separated confirmation was refused: %v", err)
 	}
 }
@@ -41,17 +41,17 @@ func TestCheckTarget_RemoteProceedsWhenTheHostIsNamed(t *testing.T) {
 // it was never typed for.
 func TestCheckTarget_AConfirmationForAnotherHostDoesNotApproveThisOne(t *testing.T) {
 	args := []string{"--yes-run-against-remote-host=staging.example.com"}
-	err := checkTarget(prodURL, args)
+	err := Check("cmd/migrate", prodURL, args)
 	if err == nil {
 		t.Fatal("a confirmation naming a DIFFERENT host approved this database")
 	}
 }
 
 func TestCheckTarget_BareFlagWithNoValueDoesNotConfirm(t *testing.T) {
-	if err := checkTarget(prodURL, []string{"--yes-run-against-remote-host"}); err == nil {
+	if err := Check("cmd/migrate", prodURL, []string{"--yes-run-against-remote-host"}); err == nil {
 		t.Fatal("the flag with no value approved a remote database")
 	}
-	if err := checkTarget(prodURL, []string{"--yes-run-against-remote-host="}); err == nil {
+	if err := Check("cmd/migrate", prodURL, []string{"--yes-run-against-remote-host="}); err == nil {
 		t.Fatal("the flag with an empty value approved a remote database")
 	}
 }
@@ -61,7 +61,7 @@ func TestCheckTarget_BareFlagWithNoValueDoesNotConfirm(t *testing.T) {
 // unguarded.
 func TestCheckTarget_FailsClosedWhenTheHostCannotBeDetermined(t *testing.T) {
 	for _, u := range []string{"", "   ", "not a url at all", "mysql://user@host/db", "dbname=grainlify"} {
-		if err := checkTarget(u, nil); err == nil {
+		if err := Check("cmd/migrate", u, nil); err == nil {
 			t.Errorf("an undeterminable DB_URL was allowed to migrate: %q", u)
 		}
 	}
@@ -71,7 +71,7 @@ func TestCheckTarget_FailsClosedWhenTheHostCannotBeDetermined(t *testing.T) {
 // it lands in scrollback and in whatever they paste into a bug report.
 func TestCheckTarget_TheErrorNeverLeaksTheCredential(t *testing.T) {
 	for _, args := range [][]string{nil, {"--yes-run-against-remote-host=elsewhere.example.com"}} {
-		err := checkTarget(prodURL, args)
+		err := Check("cmd/migrate", prodURL, args)
 		if err == nil {
 			t.Fatal("expected a refusal")
 		}
@@ -91,9 +91,9 @@ func TestHostOf(t *testing.T) {
 		{"host=example.com port=5432", "example.com"},
 		{"host=/var/run/postgresql", "localhost"},
 	} {
-		got, err := hostOf(tc.in)
+		got, err := HostOf(tc.in)
 		if err != nil || got != tc.want {
-			t.Errorf("hostOf(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+			t.Errorf("HostOf(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
 	}
 }
