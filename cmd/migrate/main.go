@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -38,6 +39,50 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/dbguard"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
 )
+
+// checkArgs rejects any argument this command does not implement.
+//
+// It exists because `go run ./cmd/migrate down 1` used to log "migrations up to
+// date, no changes needed" and exit 0. The arguments were never parsed: only the
+// host confirmation was inspected, everything else fell through, and main called
+// Up unconditionally. So a rollback silently ran a no-op forward migration and
+// reported success.
+//
+// That is worse than an unimplemented command. An unrecognised argument that
+// errors tells you rollback is not available; one that exits 0 tells you
+// rollback WORKED, and the next person to reach for it will be doing so in an
+// incident.
+//
+// Exit 0 was a legal answer to a question nobody asked, which is the shape of a
+// fault presenting as a legitimate value.
+//
+// Deliberately here rather than in internal/dbguard, which cmd/payout also uses:
+// payout takes real subcommands (dry-run, persist, build, publish), so a shared
+// "no subcommands" rule would break it. This command only ever migrates forward,
+// and down migrations are applied by hand because reversing a migration against
+// real rows is a decision, not a command-line argument.
+func checkArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == dbguard.ConfirmFlag {
+			i++ // its value, if given separately
+			continue
+		}
+		if strings.HasPrefix(a, dbguard.ConfirmFlag+"=") {
+			continue
+		}
+		return fmt.Errorf(
+			"unrecognised argument %q.\n\n"+
+				"This command only migrates forward, and takes no subcommand. In "+
+				"particular there is no \"down\": rolling back is done by applying the "+
+				"matching .down.sql by hand, because reversing a migration against real "+
+				"rows is a decision rather than an argument.\n\n"+
+				"    psql \"$DB_URL\" -v ON_ERROR_STOP=1 -f migrations/<version>.down.sql\n\n"+
+				"The only accepted argument is %s=<host>.",
+			a, dbguard.ConfirmFlag)
+	}
+	return nil
+}
 
 func main() {
 	config.LoadDotenv()
@@ -50,6 +95,13 @@ func main() {
 
 	// Before connecting, not after: refusing at the door means a mistyped run
 	// never opens a connection to the wrong database at all.
+	// Arguments first: an unrecognised one is rejected before anything else, so a
+	// mistyped command cannot be answered by doing something different.
+	if err := checkArgs(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
 	if err := dbguard.Check("go run ./cmd/migrate", cfg.DBURL, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

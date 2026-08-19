@@ -545,11 +545,16 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	// GrainHack (admin)
 	adminHackathons := handlers.NewAdminHackathonsHandler(deps.DB)
+	adminHackathonSettlement := handlers.NewAdminHackathonSettlementHandler(deps.DB)
 	adminGroup.Post("/hackathons", requireAdmin, adminHackathons.Create())
 	adminGroup.Get("/hackathons", requireAdmin, adminHackathons.List())
 	adminGroup.Get("/hackathons/:id", requireAdmin, adminHackathons.GetByID())
 	adminGroup.Put("/hackathons/:id", requireAdmin, adminHackathons.Update())
 	adminGroup.Post("/hackathons/:id/transition", requireAdmin, adminHackathons.Transition())
+	// The readable artefact before the act: what this event would pay, computed
+	// and returned without writing anything. Persisting happens in the
+	// transition to `settled`.
+	adminGroup.Get("/hackathons/:id/settlement-preview", requireAdmin, adminHackathonSettlement.Preview())
 
 	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(cfg, deps.DB, notifSvc)
 	adminGroup.Get("/hackathons/:id/applications", requireAdmin, adminHackathonApps.ListAdmin())

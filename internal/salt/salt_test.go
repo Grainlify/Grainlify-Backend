@@ -20,7 +20,7 @@ func settlement(t *testing.T, d *db.DB) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
 	err := d.Pool.QueryRow(context.Background(), `
-		INSERT INTO founding_settlements (pool_usdc, total_shares, share_value_usdc, pool_minor)
+		INSERT INTO settlements (pool_usdc, total_weight, unit_value_usdc, pool_minor)
 		VALUES (1, 1, 1, 1000000) RETURNING id`).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert settlement: %v", err)
@@ -28,7 +28,7 @@ func settlement(t *testing.T, d *db.DB) uuid.UUID {
 	t.Cleanup(func() {
 		d.Pool.Exec(context.Background(), `DELETE FROM claim_leaves WHERE settlement_id=$1`, id)
 		d.Pool.Exec(context.Background(), `DELETE FROM payout_event_salts WHERE settlement_id=$1`, id)
-		d.Pool.Exec(context.Background(), `DELETE FROM founding_settlements WHERE id=$1`, id)
+		d.Pool.Exec(context.Background(), `DELETE FROM settlements WHERE id=$1`, id)
 	})
 	return id
 }

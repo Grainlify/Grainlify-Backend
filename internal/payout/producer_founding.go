@@ -14,7 +14,7 @@ import (
 // FromFounding adapts a founding settlement into the neutral shape.
 //
 // This is the seam. Everything founding-specific stops here: pool_usdc and
-// share_value_usdc are decimal USDC belonging to how founding computes a
+// unit_value_usdc are decimal USDC belonging to how founding computes a
 // settlement, and band multipliers and wave assignment are how it decides who is
 // owed what. None of that crosses into payout, which receives the answer and
 // never the derivation.
@@ -74,7 +74,7 @@ func LoadSettlement(ctx context.Context, pool db.DBPool, settlementID uuid.UUID,
 	var poolMinor int64
 	var decimals int32
 	if err := pool.QueryRow(ctx, `
-		SELECT pool_minor, asset_decimals FROM founding_settlements WHERE id = $1`,
+		SELECT pool_minor, asset_decimals FROM settlements WHERE id = $1`,
 		settlementID).Scan(&poolMinor, &decimals); err != nil {
 		return Settlement{}, fmt.Errorf("payout.LoadSettlement: no settlement %s: %w", settlementID, err)
 	}
