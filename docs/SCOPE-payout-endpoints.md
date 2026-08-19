@@ -2,6 +2,21 @@
 
 Investigation only. No code written.
 
+**Routes**
+
+| Route | Purpose |
+|---|---|
+| `POST /me/payout-address/challenge` | issue a purpose-scoped nonce |
+| `POST /me/payout-address` | verify a signature and store the address |
+| `GET /me/payout-address` | the current address for a chain |
+| `GET /me/payout-readiness` | **does this person still need to register?** |
+| `GET /me/claims` | published claims, with leaf and proof |
+| `GET /me/claims/{settlement_id}` | one of them |
+
+`/me/payout-readiness` is not an afterthought to the other five. It is the only
+route that speaks to somebody who has *not* acted, and every other route in this
+list is useless to a person who never registers an address.
+
 Everything below the HTTP layer exists — `contributor_addresses`, nonce issuance
 with `purpose`, canonicalisation, the reserved-range check, `claim_leaves`, and
 salt-free proof serving. **There is no way for a person to reach any of it.**
@@ -153,11 +168,43 @@ something to guess.
 ## What must change underneath
 
 - **`CreateNonce` gains `purpose`.** It has none today.
-- **A new consume path.** `ConsumeNonceAndUpsertUser` **creates a user** — right
-  for sign-in, wrong here, where the user is already authenticated and creating
-  one would be a second account for a person who has one.
 - **`aptos_ed25519` in `VerifySignature`**, plus Aptos address derivation
   (`sha3-256(pubkey || 0x00)` for Ed25519, the SingleKey variant otherwise).
+- **A consume path that cannot create a user.** See below — this is the one with
+  teeth.
+
+### The payout nonce path must be *structurally incapable* of creating a user
+
+`ConsumeNonceAndUpsertUser` does exactly what its name says. On the sign-in path
+that is correct: a wallet that has never been seen becomes an account. On a
+payout path it is a live hazard, because the caller is **already authenticated**,
+and minting an account there gives a person a second identity that owns their
+payout address while their real account owns their contributions.
+
+The obvious fix — a new function that happens not to call the upsert — is not
+enough. A function that *can* mint an account, sitting on a payout path, is the
+kind of thing somebody reuses in six months because the name looked close enough
+and the signature fitted.
+
+So the requirement is structural, and it is the same move as the AST surface
+tests on `internal/salt`: make the capability absent rather than unused.
+
+1. **`ConsumeNonceForPurpose` lives in its own file** with no import of the user
+   repository and no `INSERT INTO users` in it.
+2. **A source-level test asserts that**, in the manner of
+   `internal/salt/surface_test.go`: parse the file, fail if it contains an insert
+   or update against `users`, or an import that could perform one. A behavioural
+   test cannot establish this — it can only show that a user was not created *on
+   the paths it happens to exercise*, which is the weaker claim.
+3. **The two are not variants of one function with a flag.** A boolean parameter
+   deciding whether to create an account is a single edit away from being passed
+   the wrong way, and the wrong way is silent: an extra row in `users` that
+   nobody looks at until somebody's contributions and their payout address turn
+   out to belong to different people.
+
+The distinction being enforced is that **authentication mints identities and a
+payout path must never do so.** Those are different jobs and they should not be
+reachable from one another.
 
 ## Endpoint 2 — proof serving
 
@@ -201,6 +248,17 @@ Notes on specific fields, because each is there for a reason:
 - **`amount_minor` is a string.** JSON numbers are float64 in most clients and
   minor units are exact integers. A number here would round somebody's payout in
   the browser.
+
+  This is the exact-integer rule reaching **one boundary further than it had been
+  traced.** Money was moved to integer minor units in the database and in Go, and
+  both of those were treated as the fix. JSON is a third boundary, and it
+  reintroduces float64 silently — no error, no truncation warning, just a value
+  that is very slightly not the one we sent. The general form is worth keeping:
+  **an exact-value guarantee has to be re-established at every boundary the value
+  crosses, and a boundary is anywhere the representation changes hands.** Storage
+  and language were two; serialisation is a third; whatever the frontend does
+  with it is a fourth, which is why the string is accompanied by a pre-formatted
+  `amount` rather than leaving the division to the client.
 - **`identity_hash` is returned, never recomputed.** The contract takes it as a
   caller-supplied argument, and recomputing it would need the salt and would
   produce a different value for anybody who renamed on GitHub.
@@ -215,10 +273,41 @@ Notes on specific fields, because each is there for a reason:
 | Value | Meaning | What the UI must say |
 |---|---|---|
 | `current` | frozen address is their live one | nothing special |
-| `superseded` | frozen address is one they have since replaced | **"This pays to 0xb33b…4022, the address you registered on 3 July. You'll need that wallet — the payout was locked to it when the event settled and cannot be moved."** |
+| `superseded` | frozen address is one they have since replaced | see below — the copy must not stop at the bad news |
 
 With `address_status: "superseded"`, `current_address` carries their live one so
 the UI can show both.
+
+**The copy must carry a remedy, and this is the part most likely to be dropped.**
+
+> **This payout goes to `0xb33b…4022`** — the address you registered on 3 July.
+> It was locked to that address when the event settled, so it can't be moved.
+>
+> If you still have that wallet, claim with it and you're done.
+>
+> **If you don't, contact us — this is recoverable and your reward is not lost.**
+> Unclaimed funds return to Grainlify rather than being destroyed, and we can
+> arrange another way to get this to you. We can also extend the claim window
+> while you sort it out.
+
+Stopping at "cannot be moved" is accurate and is the worst possible place to
+stop, because it is exactly the moment somebody who has lost a wallet concludes
+the money is gone and never asks. **The damage is not the bad news; it is the
+person who never asks.**
+
+The remedy is real, and it is worth stating why rather than asserting it, because
+copy that promises a remedy nobody has verified is worse than none:
+
+- `sweep_unclaimed` requires `now >= claim_deadline` and the admin signer, so
+  funds cannot leave the escrow early or automatically.
+- Its destination is **fixed at initialisation** and is an address we control, so
+  swept funds come back to us rather than vanishing.
+- `extend_deadline` exists and is extend-only, so the window can be lengthened
+  while somebody recovers a wallet.
+
+That is the same principle already in the terms copy for a missed deadline: the
+date is when we *may* act, missing it is recoverable by asking, and the copy has
+to say so at the moment of bad news rather than in a document nobody reads.
 
 ### `GET /me/claims/{settlement_id}`
 
@@ -236,10 +325,83 @@ no leaf in it.
   salt exists to make expensive.
 - **Sweep, extend, or admin routes.**
 
-## Open question
+## `/me/claims` returns published settlements only — with a condition
 
-**Should `GET /me/claims` include settlements whose root is built but not yet
-published on chain?** My inclination is no — return only rows with a
-`published_tx`, so nothing appears in a contributor's list that they cannot act
-on. The alternative shows a pending state and invites "why can't I claim this
-yet" at the moment we least want the question.
+Only rows carrying a `published_tx`. Nothing should appear in a contributor's
+list that they cannot act on.
+
+**But an empty list must never be the only signal a person gets**, and this is
+the failure that decides whether the payout works at all.
+
+Somebody with no verified address sees an empty `/me/claims` before publication
+and an empty `/me/claims` after it. The two look identical and mean opposite
+things:
+
+| Before publication | After publication |
+|---|---|
+| They can still register and be included | They are **permanently excluded** from that tree |
+| Nothing is lost | Their share is residue and becomes sweepable |
+| Fixable in two minutes | Fixable only by a second settlement, if there is one |
+
+A root cannot be edited. So the moment of publication converts a recoverable gap
+into an irreversible one, and the interface says nothing different on either side
+of it. **Silence cannot be the carrier of that distinction.**
+
+### `GET /me/payout-readiness?chain_id=aptos-testnet`
+
+Independent of any settlement, answerable before one exists, and the reason we
+collect addresses early rather than at payout time.
+
+```json
+{
+  "chain_id": "aptos-testnet",
+  "may_be_owed": true,
+  "basis": "founding_member",
+  "has_verified_address": false,
+  "action_required": true,
+  "state": "register_now",
+  "excluded_from": []
+}
+```
+
+`may_be_owed` is computed from **entitlement state, not from settlements** —
+founding membership and recorded shares — so it is true from the day somebody
+becomes eligible, long before any tree exists. That is the whole point: an
+address collected the week before a settlement costs nothing, and one collected
+the week after costs somebody their payout.
+
+`state` is what the UI branches on. One name per situation:
+
+| `state` | Situation | What the UI owes the person |
+|---|---|---|
+| `not_applicable` | no entitlement basis | nothing |
+| `ready` | may be owed, address verified | nothing; optionally confirm which address |
+| `register_now` | **may be owed, no verified address, nothing published yet** | a persistent prompt — this is the one that must not be silent |
+| `excluded_from_published` | a root was published without them | the amount they missed, and that it needs a person to resolve |
+
+For `excluded_from_published`, `excluded_from` carries one entry per settlement
+with `settlement_id`, `amount_minor` and `excluded_reason` (`no_address` or
+`no_github_account`), so the UI can name the figure rather than gesture at it.
+
+### The prompt is specified here even though the UI is not ours
+
+Deliberately, because this is the piece most likely to fall between the two
+halves: it is not a screen anyone was asked to build, it belongs to no single
+endpoint, and it only matters at a moment nobody is looking. Neither side would
+naturally own it.
+
+**`register_now` must be visible without the person going looking for it** — on
+first load, not behind a payouts tab a contributor has no reason to open. Roughly:
+
+> **Add a payout address**
+>
+> You're eligible for a Grainlify reward. To receive one you'll need to add an
+> address you control — it takes about three minutes and you only do it once.
+>
+> Do it before the next payout is settled: once a payout is finalised, the list of
+> addresses is locked and can't be changed for that round.
+
+Not "or you will lose your reward" — that is the cliff wording the terms copy
+already rejects, and it is not true: a person excluded from one settlement can be
+included in a later one. What is true is that they miss *that* round, and the
+copy should say the specific thing rather than the frightening one.
