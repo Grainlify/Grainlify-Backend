@@ -54,6 +54,19 @@ const (
 	// UI, so somebody who was stuck has no way to discover that the door has
 	// been reopened.
 	TypeKYCReset Type = "kyc_reset"
+
+	// TypeFoundingPosition tells somebody where they stand in the Founding
+	// Contributor Pool: that they hold a position, that it is permanent, and
+	// what it still needs.
+	//
+	// Its own type rather than a borrowed one. social_follow_completed means "a
+	// decision was made about your proof", and sending this under it would make
+	// the message mutable by a preference that means something else, and
+	// miscategorised in a table whose link paths we have already had to repair
+	// once. Its own type is also the only way it is mutable at all: the
+	// preferences API iterates AllTypes, so a type missing from that list
+	// produces a notification nobody can turn off.
+	TypeFoundingPosition Type = "founding_position"
 	// TypeRedemptionPaid fires when an admin marks a points->USDC redemption
 	// request as paid (internal/handlers/redemptions.go).
 	TypeRedemptionPaid Type = "redemption_paid"
@@ -95,6 +108,7 @@ var AllTypes = []Type{
 	TypeReferralCompleted,
 	TypeSocialFollowCompleted,
 	TypeKYCReset,
+	TypeFoundingPosition,
 	TypeRedemptionPaid,
 	TypeRedemptionRejected,
 	TypeGrainHackIssueCapExceeded,
