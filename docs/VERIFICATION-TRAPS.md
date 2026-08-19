@@ -1318,3 +1318,56 @@ rule later tightens and a batch of tests goes red together, that is not a
 regression. **It is the first time the assumption was stated out loud**, and the
 right response is to read what the fixtures had been asserting rather than to
 adjust them until the suite is green again.
+
+## An experiment that passed without ever running
+
+Deliberately deploying a broken build, to prove Railway's healthcheck holds
+traffic on the previous deployment, produced a clean result on the first
+attempt. The healthcheck appeared to work. It had not been tested at all.
+
+`railway up` uploads the directory named by the **linked project's**
+`projectPath`, not the directory the command was typed in. That path pointed at
+a different checkout, so the upload was clean `main` — the deliberately broken
+build never left the machine. Railway built working code, it started, the
+healthcheck passed, traffic moved, and every observation was consistent with
+the hypothesis. The experiment confirmed a property of a deployment that did
+not contain the code under test.
+
+**It was caught by a single number that should not have been possible.** The
+broken build was rigged to fail its healthcheck, so `/health` had to return
+503 or time out. It returned **200**. A hypothesis that survives its test is
+unremarkable; a control that reports the wrong value is not. Chasing the 200
+rather than accepting the tidy result is the only reason the run was thrown
+out and repeated properly, where the healthcheck did hold and the previous
+deployment did keep serving.
+
+### The general form
+
+**An experiment can pass without having run.** Every layer between "I changed
+the code" and "the system executed it" — a build cache, a stale artifact, a
+CDN, a path indirection, a deploy that silently no-ops — can sever the two
+while leaving the observations intact and agreeable. And the more the result
+matches what was expected, the less it invites the question.
+
+This is the same family as *the reference was in a deployed build, not the
+source* and *a 200 from an SPA is not evidence a route exists*: reading one
+thing and reporting on another. The difference is that those measured the
+wrong object, and this measured the right object in a state that never
+received the change.
+
+### The guard
+
+**Make the broken build prove it is broken before trusting what it tells
+you.** An experiment needs a control that fails, and the control has to be
+observed, not assumed:
+
+1. Before drawing any conclusion, confirm the artifact under test is the one
+   deployed. `/version` reporting the expected commit is one command and
+   settles it.
+2. Rig the failure so it produces an unmistakable signal — a 503, a
+   distinctive log line, a route that only the broken build serves — and check
+   for that signal explicitly.
+3. If the signal is absent, the run is void regardless of how well the rest
+   of the result fits. **A clean result from an experiment that did not run is
+   indistinguishable from a clean result from one that did**, which is exactly
+   why the control has to be verified rather than inferred.
