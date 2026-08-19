@@ -47,7 +47,38 @@ import (
 // fourth layer that shortens the feedback loop by catching an edited copy before
 // the Move suite is run at all.
 
-const aptosContractsDir = "../../../Aptos-Contracts"
+// aptosContractsDir is found by searching upward, not by counting directories.
+//
+// It used to be the fixed literal "../../../Aptos-Contracts", which is correct
+// from a normal checkout and wrong from a git worktree: sessions now work in
+// <parent>/.worktrees/s<id>-backend, one level deeper, so the sibling sits at
+// ../../../../Aptos-Contracts instead. Every drift check failed on that alone.
+//
+// A hardcoded depth encodes where the repository happens to sit. Searching for
+// a marker file encodes what we are actually looking for, and survives being
+// moved - which matters more than usual here, because a check that fails for
+// environmental reasons is a check somebody eventually switches off, and these
+// are the checks whose whole purpose is to refuse to skip.
+var aptosContractsMarker = filepath.Join("sources", "escrow.move")
+
+func findAptosContractsDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for i := 0; i < 8; i++ {
+		cand := filepath.Join(dir, "Aptos-Contracts")
+		if _, err := os.Stat(filepath.Join(cand, aptosContractsMarker)); err == nil {
+			return cand
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
 
 // siblingAbsentEnv declares that the sibling repository is knowingly not present.
 //
@@ -79,9 +110,11 @@ const wantPinnedRoots = 7
 func aptosContractsPath(t *testing.T, rel string) string {
 	t.Helper()
 
-	p := filepath.Join(aptosContractsDir, rel)
-	if _, err := os.Stat(p); err == nil {
-		return p
+	if base := findAptosContractsDir(); base != "" {
+		p := filepath.Join(base, rel)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
 	}
 
 	if os.Getenv(siblingAbsentEnv) != "" {
@@ -106,7 +139,7 @@ Either way, a green run of this repository says nothing about the Move contract.
 Run its suite deliberately:
 
   cd ../Aptos-Contracts && aptos move test --dev
-`, p, siblingAbsentEnv)
+`, filepath.Join("<sibling>", rel), siblingAbsentEnv)
 	return ""
 }
 
