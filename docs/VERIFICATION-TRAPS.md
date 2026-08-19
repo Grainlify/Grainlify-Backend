@@ -1494,3 +1494,86 @@ And when the measurement contradicts the claim, **say so in the artefact**, not
 only in conversation. The commit message and PR description are where the next
 person meets this, and a correction that lives only in a chat log is a
 correction nobody will find.
+
+## Creating a file and editing a file are different operations
+
+`cat > path` does whichever the filesystem happens to allow. If the path is
+free it creates; if the path is taken it truncates and replaces. The command
+is identical either way, the output is identical either way — silence — and
+which one happened depends on state nobody looked at.
+
+Used to add a test file that already existed, it deleted four tests: HTML
+comment stripping on one line and across several, normal markdown rendering,
+and an empty-string case. The intent was "add a file". The operation performed
+was "replace a file". Nothing in the transcript distinguished them.
+
+This is the same family as **a value crossing a typed boundary must be
+constructed, never spelled**. There, a string stands in for something that is
+not text and the error surfaces far from the call site. Here, one command
+stands in for two distinct operations and the loss surfaces far from the
+command — in this case only in a test count, later, by accident.
+
+### The guard
+
+**Use a create that refuses an existing path.** Any of these fail loudly
+instead of silently replacing:
+
+```sh
+set -o noclobber; cat > path        # errors if path exists
+printf '%s' "$body" | tee path      # still clobbers - not a fix
+[ -e path ] && { echo exists; exit 1; }   # explicit precondition
+```
+
+The general rule, independent of tool: **an operation whose destructiveness
+depends on unexamined state is not one operation.** Split it. Either assert
+the file does not exist and create it, or read it, extend it, and write it
+back. Choosing between those is the work; letting the filesystem choose is
+the bug.
+
+The tell was on screen and unread. `git status` prints `A` for an added path
+and `M` for a modified one, and it printed `M`. That distinction is the entire
+finding, rendered in one character, and it scrolled past several times before
+the arithmetic caught what it had been saying all along.
+
+## A countable invariant catches what tooling does not
+
+Adding ten tests should raise the suite count by exactly ten. It read 718 where
+it should have read 722, and that four-test gap is the only reason the
+overwrite above was found. Nothing else reported it. Not the test run, which
+was green — the surviving tests passed and the new ones passed. Not typecheck,
+not build, not CI, not review. Every signal available said the change was good,
+because from each of their perspectives it was.
+
+The suite was green **because the deleted tests were gone**. A test that no
+longer exists cannot fail, so deleting tests improves every indicator a test
+suite produces. That is the inversion worth internalising: the usual instruments
+measure the tests that ran, and are structurally blind to the ones that stopped
+existing.
+
+### Why the arithmetic works when the instruments do not
+
+A count is an invariant that spans the change. It does not care what passed; it
+cares how many there are, and that quantity has an expected value known *before*
+the change was made. Predict the number, then compare. A discrepancy is
+information regardless of which direction it points:
+
+- fewer than expected → something was removed, probably not deliberately
+- more than expected → something was duplicated, or a helper is generating cases
+- exactly as expected → the change did what was described
+
+### The general form
+
+**Before a change, state a quantity it should move and by how much. After,
+check it.** It costs one sentence and catches a class of error that green
+builds cannot, because it is the only check that notices absence.
+
+It generalises past tests. Rows written by a migration, files in a build
+output, routes registered, config keys read, endpoints in an OpenAPI document,
+sections in this file. Anything countable with a predictable delta is a cheap
+independent witness, and it is independent precisely because it is not derived
+from the thing under test.
+
+The habit pairs with the previous entry. One prevents the silent destruction;
+the other notices when prevention failed. Neither is sufficient alone — the
+count only worked here because the expected value had been stated as "ten
+added" before the number was read.
