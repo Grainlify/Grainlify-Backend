@@ -1371,3 +1371,55 @@ observed, not assumed:
    of the result fits. **A clean result from an experiment that did not run is
    indistinguishable from a clean result from one that did**, which is exactly
    why the control has to be verified rather than inferred.
+
+## Answering a question adjacent to the one that was asked
+
+A browser reported "Not Secure". Three consecutive investigations were run,
+each thorough, each finding something real, and none of them answering the
+question.
+
+The question was **"which hostname is in the address bar?"** What all three
+answered was **"which of our hostnames could produce this symptom?"** Those are
+different questions, and the second one has plenty of true answers:
+
+1. The first swept certificates, redirects, mixed content, DNS and HSTS across
+   four `grainlify.com` hosts. Everything was valid. It concluded, correctly,
+   that nothing there could produce the symptom — and treated that as progress.
+2. The second, prompted by a guess about Cloudflare's one-level wildcard,
+   examined the `.0xo.in` names and **did** find a real hostname mismatch:
+   `api.grainlify.0xo.in` presenting `CN=*.up.railway.app`. Real, worth fixing,
+   and not what anybody was looking at.
+3. The third re-swept data columns and bundle chunks for `http://` and found
+   only XML namespace identifiers and dead literals.
+
+Each pass ended with a defensible statement about *our* infrastructure. The
+symptom belonged to a browser on somebody's desk, and no amount of correct
+server-side work was going to reach it.
+
+**What would have collapsed it immediately** is one question asked at the
+start: *what is in the address bar, and what does the padlock dropdown say?*
+The eventual screenshot showed `grainlify.com` with "Certificate is valid" —
+which excludes certificates, redirects and DNS in a single glance, and had been
+available from the first minute.
+
+### The general form
+
+**A symptom reported without its context invites you to enumerate causes
+instead of locating one.** Enumeration feels like progress because each step
+produces a genuine finding, and genuine findings are exactly what makes it hard
+to notice that the search space was never narrowed. Three real discoveries in a
+row is not evidence of converging on the answer; it can equally mean the
+question is broad enough to keep yielding.
+
+The tell is a search that keeps succeeding without ever excluding anything. If
+finding something does not shrink the space of remaining explanations, the
+question being answered is not the one that was asked.
+
+### The guard
+
+Before enumerating causes, **pin the observation**: which host, which URL,
+which browser, which user, when. If the report is second-hand, ask for the
+screenshot before searching — one image can be worth more than a day of
+correct investigation. And when a sweep comes back clean, say *"nothing here
+could cause it"* rather than *"no problem found"*: the first keeps the
+question open, the second quietly closes it.
