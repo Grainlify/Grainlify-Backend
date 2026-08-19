@@ -2076,3 +2076,74 @@ The habit to build is narrow: **say "the check and the code disagree" rather
 than "the code is broken"**, and hold both as suspects until one is excluded.
 The sentence is the whole guard — it keeps a second hypothesis alive at the only
 moment it is cheap to test.
+
+## An assertion made in a layer that cannot model the defect
+
+A notification body was clipped with `line-clamp-2`, so contributors could not
+read the sentence telling them what to fix. The obvious test is:
+
+```tsx
+expect(await screen.findByText(LONG_BODY)).toBeInTheDocument()
+```
+
+**That passes with the bug present.** `line-clamp` is CSS. jsdom implements the
+DOM but not layout — no boxes, no line breaking, no overflow — so the full
+string is in the document either way. The assertion is true, the component is
+broken, and nothing in the test output hints at the gap.
+
+This is why it shipped. A test existed nearby, the text was clearly present, and
+the check that would have caught it is not one anybody reaches for.
+
+### Proven, not argued
+
+The claim was not left as reasoning. A text-only test was written against the
+clamped component and **passed**; the clamp was then removed and it passed
+identically. A test with the same result in both states is measuring something
+other than the thing under test.
+
+The assertion that does work is structural, on the classes that do the clipping:
+
+```tsx
+expect(body.className).not.toMatch(/line-clamp|truncate|text-ellipsis/)
+```
+
+More brittle than a text assertion, and the only kind available in this layer.
+Mutation-confirmed: restoring `line-clamp-2` fails it.
+
+### The general form
+
+**Ask which layer the defect lives in, and whether the assertion can see that
+layer at all.** Test and defect must inhabit the same layer; when they do not,
+the test is not weak, it is blind — it will pass at full confidence forever.
+
+It generalises well past CSS:
+
+| Defect lives in | Blind to it |
+|---|---|
+| Layout, paint, stacking | jsdom — no layout engine |
+| A missing database index | a unit test — correctness is unchanged, only speed |
+| A wrong endpoint or verb | a mocked client — the mock answers whatever it is asked |
+| Schema drift | an in-memory fake — it has no schema |
+| A wrong `Content-Type` | an assertion on the parsed body |
+| Migration ordering | a test against an already-migrated database |
+| A CDN rewrite | a request that never leaves the process |
+
+Each of those is a real assertion, correctly written, that cannot fail for the
+reason you care about. The mock case is the most common and the most seductive:
+a mocked client makes the endpoint unfalsifiable, because the mock will answer a
+wrong URL exactly as readily as a right one.
+
+### The check
+
+Before trusting a green test as evidence about a specific defect, ask: **if the
+defect were present, would this assertion change?** If it would not, the test is
+not covering it, whatever its name says. Two cheap ways to answer:
+
+1. **Introduce the defect and watch the test fail.** A mutation is the only
+   direct evidence that an assertion can see what it claims to.
+2. **Name the layer out loud.** "This runs in jsdom, which has no layout" ends
+   the question in one sentence, and it is the sentence nobody says.
+
+When the right layer is unavailable — no browser in CI, no real database in a
+unit suite — say so in the test rather than substituting an assertion from the
+wrong layer and letting its green stand in for coverage it does not provide.
