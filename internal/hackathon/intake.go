@@ -247,7 +247,7 @@ func rejectOverCapIssue(ctx context.Context, gh *github.Client, notifier *notifi
 		notifier.Notify(ctx, ownerUserID, notifications.TypeGrainHackIssueCapExceeded,
 			"GrainHack issue cap reached",
 			fmt.Sprintf("%s#%d was not entered into GrainHack: your org has reached its cap of %d issues.", fullName, issueNumber, maxPerOrg),
-			"",
+			notifications.NoLink,
 		)
 	}
 }

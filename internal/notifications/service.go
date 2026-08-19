@@ -33,7 +33,7 @@ func New(d *db.DB, mailer email.Mailer, frontendBaseURL string) *Service {
 // This is a best-effort side effect: failures are logged, never returned.
 // Callers should invoke Notify only after their primary action has already
 // succeeded, and must not let notification delivery affect the response.
-func (s *Service) Notify(ctx context.Context, userID uuid.UUID, t Type, title, body, linkPath string) {
+func (s *Service) Notify(ctx context.Context, userID uuid.UUID, t Type, title, body string, link Link) {
 	if s == nil || s.db == nil || s.db.Pool == nil {
 		return
 	}
@@ -50,13 +50,13 @@ SELECT in_app, email FROM notification_preferences WHERE user_id = $1 AND type =
 		if _, err := s.db.Pool.Exec(ctx, `
 INSERT INTO notifications (user_id, type, title, body, link_path)
 VALUES ($1, $2, $3, $4, $5)
-`, userID, string(t), title, body, linkPath); err != nil {
+`, userID, string(t), title, body, link.String()); err != nil {
 			slog.Warn("notifications: insert failed", "user_id", userID, "type", t, "error", err)
 		}
 	}
 
 	if wantEmail && s.mailer != nil {
-		s.sendEmail(ctx, userID, t, title, body, linkPath)
+		s.sendEmail(ctx, userID, t, title, body, link)
 	}
 }
 
@@ -95,7 +95,7 @@ type InAppResult struct {
 //
 // Callers must still treat the result as advisory and never fail their primary
 // action on it.
-func (s *Service) NotifyInApp(ctx context.Context, userID uuid.UUID, t Type, title, body, linkPath string) InAppResult {
+func (s *Service) NotifyInApp(ctx context.Context, userID uuid.UUID, t Type, title, body string, link Link) InAppResult {
 	if s == nil || s.db == nil || s.db.Pool == nil {
 		return InAppResult{Err: errors.New("notifications: service not configured")}
 	}
@@ -114,14 +114,14 @@ SELECT in_app FROM notification_preferences WHERE user_id = $1 AND type = $2
 	if _, err := s.db.Pool.Exec(ctx, `
 INSERT INTO notifications (user_id, type, title, body, link_path)
 VALUES ($1, $2, $3, $4, $5)
-`, userID, string(t), title, body, linkPath); err != nil {
+`, userID, string(t), title, body, link.String()); err != nil {
 		slog.Warn("notifications: insert failed", "user_id", userID, "type", t, "error", err)
 		return InAppResult{Err: err}
 	}
 	return InAppResult{Created: true}
 }
 
-func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, t Type, title, body, linkPath string) {
+func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, t Type, title, body string, link Link) {
 	var to *string
 	if err := s.db.Pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&to); err != nil {
 		slog.Warn("notifications: user lookup for email failed", "user_id", userID, "type", t, "error", err)
@@ -132,8 +132,8 @@ func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, t Type, title
 	}
 
 	html := fmt.Sprintf(`<p>%s</p>`, body)
-	if linkPath != "" && s.frontendBaseURL != "" {
-		html += fmt.Sprintf(`<p><a href="%s%s">View on Grainlify</a></p>`, s.frontendBaseURL, linkPath)
+	if link.String() != "" && s.frontendBaseURL != "" {
+		html += fmt.Sprintf(`<p><a href="%s%s">View on Grainlify</a></p>`, s.frontendBaseURL, link.String())
 	}
 	if err := s.mailer.Send(ctx, *to, title, html); err != nil {
 		slog.Warn("notifications: email send failed", "user_id", userID, "type", t, "error", err)
