@@ -1538,6 +1538,61 @@ in this repository that has ever found an untested assertion. It is the argument
 for the checksum: a tool permitted to write to the tree must prove it put the
 tree back, every run, without being asked.
 
+## An empty list that meant two opposite things
+
+> **A filter on a field nothing populates is indistinguishable from an empty
+> result set.** Both render as "you have nothing", and only one of them is true.
+
+Three instances of this in a single day, on one feature. They were fixed
+separately before anybody noticed they were one shape.
+
+| Where | The empty list said | It actually meant |
+|---|---|---|
+| `/me/claims` before publication | "you have no claims" | "you have a claim; the root is not published yet" |
+| `/me/claims` for somebody with no address | "you have no claims" | "you were **permanently excluded** and your share is residue" |
+| `/me/claims` after a **successful** publication | "you have no claims" | "`published_tx` was never recorded, because nothing set it" |
+
+The third is the sharpest, because everything worked. The tree was built, the
+escrow funded, `publish_root` accepted, the transaction confirmed on chain — and
+every contributor saw an empty list, because the query filters on
+`published_tx IS NOT NULL` and no code path wrote that column. A column existed,
+a query depended on it, and nothing in between populated it.
+
+That is the same family as a config table read by code and seeded by no
+migration, and a column populated and never read: **a schema and a codebase
+disagreeing about who is responsible for a value.** What makes this variant
+worse is that the disagreement renders as a legitimate, reassuring UI state. An
+unpopulated column produces no error, no warning and no empty-state distinct from
+the real one — it produces a clean page that says nothing is wrong.
+
+### Why this defeats the usual checks
+
+- **Not an error.** The query succeeds. The handler returns `200`.
+- **Not a blank where a value belongs.** The response is well-formed; the list is
+  simply short.
+- **Correct in the test.** An integration test that publishes *and records*
+  passes. Only the real sequence, where recording is a separate act somebody must
+  perform, exposes it.
+- **Correct for most users.** Anybody genuinely owed nothing sees the identical
+  page, so the bug is invisible in aggregate and visible only to the people it
+  harms.
+
+### The checks
+
+**For every filter, ask who writes the field it filters on.** If the answer is
+"an operator, later" or "another service", then absence is a *state*, not a
+*result*, and the two need different renderings. `published_tx IS NULL` means
+"not yet"; no rows means "nothing owed". They must not collapse.
+
+**An empty result needs a reason attached, not just a count.** The fix here was
+not to remove the filter — the filter is correct, contributors must not see
+unpublishable claims. It was to add `/me/payout-readiness`, a route that speaks
+to somebody who has *not* acted and can distinguish "nothing owed" from "owed and
+blocked". Silence cannot carry that distinction; a second signal has to.
+
+**Ask what the empty state looks like when the system is working perfectly.** If
+that is identical to the failure, the interface has no way to tell you it broke.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
