@@ -163,6 +163,64 @@ published in advance.
 The holdback job selects on `due_at <= now()` with no memory of previous runs,
 so a service restart across a due date resolves it on the next tick.
 
+### Check this every time: settled events with no settlement rows
+
+The phase change and the settlement are **not** in one transaction, and that is
+deliberate — the admin's phase change lands even if the recompute or the
+settlement hits a problem, so a transient failure is retryable without any risk
+of paying somebody twice. The cost is a window where `phase = 'settled'` and no
+settlement rows exist yet.
+
+That window is safe but it is not self-announcing. **Money does not move from
+settlement rows alone** — `Build` and publishing a root are separate human acts
+with a gate between them — so this is a staleness problem, not a money problem.
+It still has to be visible, because a phase that says `settled` while nothing was
+settled is the exact thing this runbook exists to stop.
+
+Run this after every settle, and before any publication:
+
+```sql
+-- Settled events with a missing settlement. Expect zero rows.
+SELECT h.id, h.name, h.appeals_closed_at,
+       (SELECT count(*) FROM hackathon_verdicts v
+         WHERE v.hackathon_id = h.id AND v.final_bucket IS NOT NULL
+           AND v.final_bucket <> 'rejected') AS payable_verdicts
+FROM hackathons h
+WHERE h.phase = 'settled'
+  AND NOT EXISTS (
+    SELECT 1 FROM settlements s
+     WHERE s.hackathon_id = h.id AND s.pool = 'contributor'
+  )
+ORDER BY h.appeals_closed_at;
+```
+
+**A row here is not an emergency.** Read `payable_verdicts` first:
+
+- **`payable_verdicts = 0`** — nothing to settle. An event where every
+  submission was rejected settles to nothing, correctly, and the producer
+  returns `ErrNothingToSettle`. No action.
+- **`payable_verdicts > 0`** — the settlement did not complete. Re-run it; it is
+  idempotent, because `UNIQUE (hackathon_id, pool)` means a second attempt
+  either succeeds or is refused by the database rather than creating a second
+  settlement. Check the preview first:
+
+```
+GET /admin/hackathons/:id/settlement-preview?pool=contributor
+```
+
+  and confirm `sums_to_pool` is true before doing anything with the result.
+
+`appeals_closed_at` tells you which half happened: set means the recompute ran
+and the weights exist, null means it did not and the settlement has nothing to
+read.
+
+**Revisit before anything public.** For a supervised five-person test this query
+is enough. Making the two atomic is a refactor of the code that decides what
+people are paid — `pgx.Tx` does not satisfy `db.DBPool`, and
+`CloseAppealsAndRecompute` opens its own transaction with a `FOR UPDATE` lock —
+and that is worth doing deliberately rather than at the moment it is first
+needed.
+
 ---
 
 ## If something looks wrong
