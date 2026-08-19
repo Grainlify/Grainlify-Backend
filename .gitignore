@@ -101,3 +101,11 @@ Makefile.bak
 
 
 test-output.log
+
+# Per-session git worktrees (see .worktrees/s<session>-<repo>).
+#
+# Untracked and unignored, this directory is one `git add -A` away from being
+# committed into the repository it is a checkout of. That nearly happened: a
+# session ran `git add -A` here and missed only because the directory did not
+# exist yet.
+.worktrees/
