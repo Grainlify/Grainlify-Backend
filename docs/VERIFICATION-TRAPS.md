@@ -1396,11 +1396,63 @@ And when a check looks redundant because a library already validates, establish
 what the library validates *against*. `aes.NewCipher` enforces "a legal AES key".
 It has no opinion about which AES you meant.
 
+## A reference that named WHICH, not WHAT
+
+> **A reference that names which items, or where they sit, goes stale silently as
+> the thing it covers grows.** One that names what it is looking for does not.
+> The repair is always the same shape: glob, or search for a marker.
+
+This is the entry to read first, because it is four separate incidents with one
+cause, and they were fixed one at a time over a single day without anybody
+noticing they were the same fault.
+
+| Where | The reference | How it went stale |
+|---|---|---|
+| Branch migrations | `000076`, `000077`, `000078` | main added its own; the numbers had to be reassigned |
+| Drift checks | `"../../../Aptos-Contracts"` | sessions moved into worktrees, one level deeper — every check failed |
+| A script edit | replace line 34 | the line moved; the edit landed somewhere else |
+| Mutation harness | `cp resolve.go digest.go build.go dryrun.go "$BAK/"` | `serve.go` was added later, mutated, and never restored |
+
+None of them errored. A stale *which* does not announce itself, because the
+reference is still perfectly valid — it just no longer refers to everything it is
+meant to cover. That is what separates this from a broken path: a broken path
+fails loudly the first time, and an incomplete list keeps working for the items
+it happens to name.
+
+The repair, every time:
+
+```sh
+cp resolve.go digest.go build.go "$BAK/"    # names WHICH
+cp ./*.go "$BAK/"                           # names WHAT
+```
+
+```go
+const dir = "../../../Aptos-Contracts"      // names WHERE
+findUpwards("Aptos-Contracts/sources/escrow.move")  // names WHAT
+```
+
+The drift-check fix and the harness fix are the *same repair applied to two
+tools*, made hours apart, and neither of us connected them at the time. That is
+the argument for writing the general form down rather than the incident: the next
+instance will not look like a file list or a relative path, and the only thing
+that will recognise it is the rule.
+
+### The check
+
+**Ask of any reference: would this still be correct if somebody added one more?**
+If the answer depends on them remembering to update it, it names WHICH. Replace
+it with a glob, a marker search, or a query — something that finds members by
+what they are.
+
 ## A tool that corrupted the source it was checking
 
 > A harness that modifies files it did not back up leaves the working tree
 > silently wrong, and **the corruption then presents as a bug in the code under
 > test.**
+>
+> This is the file-list instance of the entry above. It is kept separate because
+> its second-order damage — a tool corrupting its own subject — is worth its own
+> warning.
 
 `internal/payout/mutate.sh` backed up an explicit list of files:
 
@@ -1455,6 +1507,19 @@ And the diagnostic habit that would have saved the whole detour: **when tests
 fail right after a tool ran over the source, check the source before debugging
 the logic.** `grep -c` for the mutation markers takes seconds; the algorithm
 hypotheses took considerably longer and were all wrong.
+
+### A note on the harness itself
+
+This is the third time the mutation harness has caught a fault in its own
+operation: first a control mutation that survived, then five mutations that
+silently never applied, and now this. The difference is that the first two were
+faults it *survived* and this one it *caused*.
+
+That is not an argument against the harness. A tool that runs over source and
+reports on it will occasionally break it, and the harness is still the only thing
+in this repository that has ever found an untested assertion. It is the argument
+for the checksum: a tool permitted to write to the tree must prove it put the
+tree back, every run, without being asked.
 
 ## What a test asserts is not what its author believed it asserted
 
