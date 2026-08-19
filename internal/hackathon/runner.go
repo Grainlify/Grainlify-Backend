@@ -253,7 +253,7 @@ func (r *AssignmentRunner) onAssigned(ctx context.Context, d dueIssue, res *Draw
 		r.notifier.Notify(ctx, *res.WinnerUserID, notifications.TypeGrainHackAssigned,
 			"You've been assigned a GrainHack issue",
 			fmt.Sprintf("You won the draw for %s#%d. Submit a PR before the deadline to keep the assignment.", fullName, d.issueNumber),
-			"",
+			notifications.NoLink,
 		)
 	}
 }
@@ -271,7 +271,7 @@ func (r *AssignmentRunner) releaseStale(ctx context.Context) error {
 			r.notifier.Notify(ctx, rel.UserID, notifications.TypeGrainHackAssignmentReleased,
 				"Your GrainHack assignment was released",
 				"You didn't submit a qualifying PR before the deadline, so the issue has gone back into the pool and this counts as an abandon.",
-				"",
+				notifications.NoLink,
 			)
 		}
 		// Put the issue straight back up for a new draw.
@@ -333,7 +333,7 @@ WHERE h.phase = 'closed'
 				r.notifier.Notify(ctx, rel.UserID, notifications.TypeGrainHackEventEnding,
 					"The GrainHack ended before your issue was merged",
 					"The event has closed, so this assignment was released and the issue has gone back to being a normal Grainlify bounty. A PR merged inside the grace period still counts.",
-					"",
+					notifications.NoLink,
 				)
 			}
 		}
@@ -371,7 +371,7 @@ func (r *AssignmentRunner) warnEndOfEvent(ctx context.Context) error {
 		r.notifier.Notify(ctx, p.UserID, notifications.TypeGrainHackEventEnding,
 			"Your GrainHack issue closes soon",
 			"This event ends within 24 hours. A PR merged inside the grace period still counts; otherwise the assignment is released and the issue reverts to a normal Grainlify bounty.",
-			"",
+			notifications.NoLink,
 		)
 	}
 	return nil
