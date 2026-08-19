@@ -77,6 +77,26 @@ func (o Outcome) Owed() bool {
 }
 
 // Entitlement is one payable person in one event, as a producer computes them.
+//
+// # This type lives here, and producers import it
+//
+// It is deliberately defined in the consumer, not in each producer. A producer
+// that defines its own entitlement type and converts at the boundary reintroduces
+// exactly what this package exists to prevent: two shapes that agree today,
+// drift quietly, and disagree the first time anybody compares two events. If a
+// producer needs a field this does not have, add it here.
+//
+// # Where the amount must come from
+//
+// AmountMinor is the output of the shared apportion rule and nothing else.
+//
+// In particular it is NOT hackathon_verdicts.payout_amount: ComputePayout has
+// already rounded that once, and re-apportioning a rounded figure rounds a
+// rounding. The path is effective_units -> apportion -> AmountMinor, and
+// **apportion is the only place a fraction becomes an integer.** A second
+// rounding does not announce itself - the totals still look plausible, they are
+// just wrong by a few minor units per person, which is the family of fault that
+// presents as a legitimate value.
 type Entitlement struct {
 	UserID uuid.UUID
 	// AmountMinor is exact integer minor units. Never a float, never decimal

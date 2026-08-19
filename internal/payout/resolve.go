@@ -2,6 +2,7 @@ package payout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -24,6 +25,11 @@ import (
 func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error) {
 	if s.ChainID == "" {
 		return nil, fmt.Errorf("payout.Resolve: chain id is empty")
+	}
+	// Refused here, so an unreconcilable settlement cannot even produce a report
+	// somebody might read and approve.
+	if err := validate(s); err != nil {
+		return nil, err
 	}
 	ids := make([]uuid.UUID, 0, len(s.Entitlements))
 	for _, e := range s.Entitlements {
@@ -109,4 +115,51 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 	// report are diffable.
 	sort.Slice(out, func(i, j int) bool { return out[i].UserID.String() < out[j].UserID.String() })
 	return out, nil
+}
+
+// ErrDoesNotReconcile is returned when the entitlements cannot be paid from the
+// pool they claim to come from.
+var ErrDoesNotReconcile = errors.New("settlement does not reconcile against its pool")
+
+// validate refuses a settlement whose arithmetic cannot be true before any of it
+// reaches a tree.
+//
+// The dangerous direction is allocation EXCEEDING the pool. The escrow is funded
+// with the leaf total and `publish_root` asserts total == funded_total, so an
+// over-allocated settlement does not fail at publication - it fails by asking us
+// to fund more than the event holds, and whoever is funding finds out by looking
+// at their balance.
+//
+// This is also the check that catches a second rounding. Amounts must come from
+// effective_units through apportion, which is the only place a fraction becomes
+// an integer; feeding an already-rounded figure back through it produces totals
+// that are plausible and wrong. Wrong by a few minor units per person is exactly
+// what a sum against the pool detects and what reading the numbers does not.
+func validate(s Settlement) error {
+	if s.PoolMinor == nil {
+		return fmt.Errorf("%w: pool is not set", ErrDoesNotReconcile)
+	}
+	if s.PoolMinor.Sign() < 0 {
+		return fmt.Errorf("%w: pool is negative (%s)", ErrDoesNotReconcile, s.PoolMinor)
+	}
+	total := new(big.Int)
+	for _, e := range s.Entitlements {
+		if e.AmountMinor == nil {
+			continue
+		}
+		if e.AmountMinor.Sign() < 0 {
+			return fmt.Errorf("%w: %s is allocated a negative amount (%s)",
+				ErrDoesNotReconcile, e.UserID, e.AmountMinor)
+		}
+		total.Add(total, e.AmountMinor)
+	}
+	if total.Cmp(s.PoolMinor) > 0 {
+		over := new(big.Int).Sub(total, s.PoolMinor)
+		return fmt.Errorf("%w: entitlements total %s minor units against a pool of %s, "+
+			"over by %s. Amounts must come from effective_units through apportion, which is "+
+			"the only place a fraction becomes an integer - an already-rounded figure fed back "+
+			"through it produces exactly this.",
+			ErrDoesNotReconcile, total, s.PoolMinor, over)
+	}
+	return nil
 }

@@ -1,6 +1,7 @@
 package payout
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -10,8 +11,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"fmt"
+
+	"github.com/jagadeesh/grainlify/backend/internal/chain"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+	"github.com/jagadeesh/grainlify/backend/internal/salt"
 )
 
 const testKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -354,5 +359,270 @@ func TestInputDigest_FieldBoundariesAreRecoverable(t *testing.T) {
 	b := []Member{{UserID: id, GitHubLogin: "abc", ClaimAddress: "d", AmountMinor: big.NewInt(1)}}
 	if InputDigest(base, a) == InputDigest(base, b) {
 		t.Fatal("field boundaries collide in the digest")
+	}
+}
+
+// A settlement allocating more than its pool must be refused before it can
+// produce a report, let alone a tree. This is the check that catches a second
+// rounding: amounts must come from effective_units through apportion, and a
+// figure that has already been rounded once produces totals that are plausible
+// and wrong.
+func TestValidate_RefusesOverAllocation(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 6_000_000},
+		{id: uuid.New(), login: "bob", addr: addrB, amount: 5_000_000},
+	}) // pool is 10_000_000
+	if _, err := DryRun(ctx, d.Pool, s); !errors.Is(err, ErrDoesNotReconcile) {
+		t.Fatalf("an over-allocated settlement produced a report: %v", err)
+	}
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{"x", big.NewInt(0)}); !errors.Is(err, ErrDoesNotReconcile) {
+		t.Fatalf("an over-allocated settlement reached Build: %v", err)
+	}
+}
+
+func TestValidate_AllowsUnderAllocation(t *testing.T) {
+	d := dbtest.DB(t)
+	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1_000_000}})
+	if _, err := DryRun(context.Background(), d.Pool, s); err != nil {
+		t.Fatalf("under-allocation is legitimate residue, not an error: %v", err)
+	}
+}
+
+// Exactly equal to the pool is the normal case for a fully apportioned event.
+func TestValidate_AllowsExactAllocation(t *testing.T) {
+	d := dbtest.DB(t)
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 7_000_000},
+		{id: uuid.New(), login: "bob", addr: addrB, amount: 3_000_000},
+	})
+	if _, err := DryRun(context.Background(), d.Pool, s); err != nil {
+		t.Fatalf("an exactly apportioned settlement was refused: %v", err)
+	}
+}
+
+func TestValidate_RefusesNegativeAmounts(t *testing.T) {
+	d := dbtest.DB(t)
+	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	s.Entitlements[0].AmountMinor = big.NewInt(-1)
+	if _, err := DryRun(context.Background(), d.Pool, s); !errors.Is(err, ErrDoesNotReconcile) {
+		t.Fatalf("a negative allocation was accepted: %v", err)
+	}
+}
+
+// Over-allocation by ONE minor unit is the realistic shape of a double rounding,
+// and the one a human reading totals would never catch.
+func TestValidate_CatchesAOneUnitOverAllocation(t *testing.T) {
+	d := dbtest.DB(t)
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 7_000_000},
+		{id: uuid.New(), login: "bob", addr: addrB, amount: 3_000_001},
+	})
+	if _, err := DryRun(context.Background(), d.Pool, s); !errors.Is(err, ErrDoesNotReconcile) {
+		t.Fatalf("over by one minor unit was not caught: %v", err)
+	}
+}
+
+// The whole cold-salt argument in one test: build a tree, DESTROY the salt, then
+// serve a working proof. If this fails, claim_leaves is not doing its job and the
+// salt can never be destroyed.
+func TestClaimFor_WorksAfterTheSaltIsDestroyed(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
+		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
+	})
+	r, _ := DryRun(ctx, d.Pool, s)
+	res, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := salt.Destroy(ctx, d.Pool, s.SettlementID, "test: proving proofs survive destruction"); err != nil {
+		t.Fatal(err)
+	}
+	// Confirm it is really gone, so this test cannot pass by the salt still
+	// being readable.
+	if err := salt.WithSalt(ctx, d.Pool, saltKey(t), s.SettlementID, func(salt.Hasher) error { return nil }); !errors.Is(err, salt.ErrDestroyed) {
+		t.Fatalf("the salt was not destroyed: %v", err)
+	}
+
+	c, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA)
+	if err != nil {
+		t.Fatalf("could not serve a proof after destroying the salt: %v", err)
+	}
+	if c.AmountMinor != 250_000 {
+		t.Fatalf("amount %d", c.AmountMinor)
+	}
+	if c.Root != res.Root {
+		t.Fatal("served a proof against a different root than was built")
+	}
+	if !chain.VerifyProof(c.Root, c.LeafHash, c.Proof) {
+		t.Fatal("the served proof does not verify")
+	}
+}
+
+func TestClaimFor_AddressFormIsIrrelevant(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	for _, form := range []string{addrA, strings.ToUpper("0X" + addrA[2:]), "  " + addrA + "  "} {
+		if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, form); err != nil {
+			t.Errorf("form %q was not found: %v", form, err)
+		}
+	}
+}
+
+func TestClaimFor_UnknownAddressIsNotAClaim(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrB); !errors.Is(err, ErrNoClaim) {
+		t.Fatalf("want ErrNoClaim, got %v", err)
+	}
+}
+
+// Every leaf in a tree must serve a proof that verifies, not just the first.
+func TestClaimFor_EveryLeafVerifies(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{}
+	addrs := []string{}
+	for i := 0; i < 5; i++ {
+		a := fmt.Sprintf("0x%064x", 0x1000+i)
+		addrs = append(addrs, a)
+		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("user%d", i), addr: a, amount: int64(1000 * (i + 1))})
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	r, _ := DryRun(ctx, d.Pool, s)
+	res, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		c, err := ClaimFor(ctx, d.Pool, s.SettlementID, a)
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if !chain.VerifyProof(res.Root, c.LeafHash, c.Proof) {
+			t.Errorf("%s: proof does not verify against the published root", a)
+		}
+	}
+}
+
+// A corrupted claim_leaves row must be caught by comparing against the PUBLISHED
+// root, not against one recomputed from the same rows. A tree rebuilt from
+// corrupted leaves is perfectly self-consistent and simply has a different root.
+func TestClaimFor_RefusesWhenLeavesDriftFromThePublishedRoot(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
+		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
+	})
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+
+	// Corrupt one leaf digest, as a bad restore or a hand-edited row would.
+	if _, err := d.Pool.Exec(ctx, `
+		UPDATE claim_leaves SET leaf_hash = decode(repeat('cd',32),'hex')
+		WHERE settlement_id=$1 AND leaf_index=1`, s.SettlementID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err == nil {
+		t.Fatal("served a proof from leaves that no longer reproduce the published root")
+	}
+}
+
+// Serving before a root is published must refuse rather than invent one.
+func TestClaimFor_RefusesBeforeARootExists(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err == nil {
+		t.Fatal("served a claim for a settlement with no leaves or root")
+	}
+}
+
+// Amounts must be right for EVERY leaf, not just whichever happens to be index
+// zero. A mutation returning all[0].amount survived until this existed, because
+// every amount assertion used the first leaf.
+func TestClaimFor_ReturnsTheRightAmountForEveryLeaf(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	want := map[string]int64{}
+	people := []person{}
+	for i := 0; i < 4; i++ {
+		a := fmt.Sprintf("0x%064x", 0x2000+i)
+		amt := int64(1000 * (i + 1))
+		want[a] = amt
+		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("u%d", i), addr: a, amount: amt})
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	for a, amt := range want {
+		c, err := ClaimFor(ctx, d.Pool, s.SettlementID, a)
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if c.AmountMinor != amt {
+			t.Errorf("%s: amount %d, want %d", a, c.AmountMinor, amt)
+		}
+		if c.ClaimAddress != a {
+			t.Errorf("%s: returned address %s", a, c.ClaimAddress)
+		}
+	}
+}
+
+// identity_hash is what the claimant hands to the contract. Serving a zeroed or
+// recomputed one produces a claim that aborts on chain, and the abort reads as
+// the contract rejecting the person rather than as us serving the wrong bytes.
+func TestClaimFor_ReturnsTheStoredIdentityHash(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	s := fixture(t, d, "aptos-testnet", []person{
+		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
+		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
+	})
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{addrA, addrB} {
+		c, err := ClaimFor(ctx, d.Pool, s.SettlementID, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored []byte
+		if err := d.Pool.QueryRow(ctx,
+			`SELECT identity_hash FROM claim_leaves WHERE settlement_id=$1 AND lower(claim_address)=lower($2)`,
+			s.SettlementID, a).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		var zero [32]byte
+		if c.IdentityHash == zero {
+			t.Fatalf("%s: identity hash is all zeroes; the claim would abort on chain", a)
+		}
+		if !bytes.Equal(c.IdentityHash[:], stored) {
+			t.Errorf("%s: served identity hash does not match claim_leaves", a)
+		}
 	}
 }

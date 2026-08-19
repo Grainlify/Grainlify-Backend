@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")"
-BAK=$(mktemp -d); cp resolve.go digest.go build.go dryrun.go "$BAK/"
-trap 'cp "$BAK"/*.go ./; rm -rf "$BAK"' EXIT
+# Back up EVERY go file in the package, not a list written when the package was
+# smaller. A harness that mutates a file it did not back up leaves the working
+# tree corrupted and silently wrong: serve.go was added after this list was, got
+# mutated, and stayed mutated - which then made an unrelated edit fail to apply
+# and produced three test failures that looked like a real bug.
+BAK=$(mktemp -d); cp ./*.go "$BAK/"
+before=$(cat ./*.go | shasum | cut -d" " -f1)
+restore_all() {
+  cp "$BAK"/*.go ./
+  after=$(cat ./*.go | shasum | cut -d" " -f1)
+  if [ "$before" != "$after" ]; then
+    echo "RESTORE FAILED: the package does not match its pre-mutation state." >&2
+    echo "  before $before" >&2; echo "  after  $after" >&2
+    exit 2
+  fi
+  rm -rf "$BAK"
+}
+trap restore_all EXIT
 export TEST_DB_URL="${TEST_DB_URL:-postgres://postgres@localhost:5432/grainlify_m79?sslmode=disable}"
 run() { go test . -count=1 >/tmp/payout-mut.log 2>&1; }
 k=0; s=0; declare -a SURV=()
@@ -40,6 +56,15 @@ mut "default an unknown pool to contributor" build.go '		return 0, fmt.Errorf("%
 mut "allow a second root"                build.go 'if exists {' 'if false {'
 mut "let the dry run create the salt"    dryrun.go '	members, err := Resolve(ctx, pool, s)' '	_ = salt.Create(ctx, pool, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", s.SettlementID)\n	members, err := Resolve(ctx, pool, s)'
 mut "excluded amounts counted as leaf total" dryrun.go 'r.ExcludedTotalMinor.Add(r.ExcludedTotalMinor, m.AmountMinor)' 'r.LeafTotalMinor.Add(r.LeafTotalMinor, m.AmountMinor)'
+mut "allow over-allocation"              resolve.go 'if total.Cmp(s.PoolMinor) > 0 {' 'if false {'
+mut "off-by-one: allow exceeding by one" resolve.go 'if total.Cmp(s.PoolMinor) > 0 {' 'if total.Cmp(new(big.Int).Add(s.PoolMinor, big.NewInt(1))) > 0 {'
+mut "allow negative allocations"         resolve.go 'if e.AmountMinor.Sign() < 0 {' 'if false {'
+mut "skip validation entirely"           resolve.go 'if err := validate(s); err != nil {' 'if err := error(nil); err != nil {'
+mut "trust the recomputed root (neutralises both guards)" serve.go 'if tree.Root != root {' 'root = tree.Root; c.Root = root; if false {'
+mut "return the wrong leaf's proof"       serve.go 'proof, err := tree.ProofForDigest(digests[target])' 'proof, err := tree.ProofForDigest(digests[0])'
+mut "return the wrong leaf's amount"      serve.go 'AmountMinor:  all[target].amount,' 'AmountMinor:  all[0].amount,'
+mut "recompute rather than return identity_hash" serve.go 'copy(c.IdentityHash[:], all[target].ident)' 'copy(c.IdentityHash[:], make([]byte, 32))'
+mut "match addresses without canonicalising" serve.go 'if r.addr == addr {' 'if r.addr == address {'
 echo ""
 echo "=== $k killed, $s survived, $skipped skipped ==="
 [ "$skipped" -gt 0 ] && { echo "REFUSING TO REPORT: $skipped mutation(s) never applied, so this run proves less than it appears to."; exit 1; }

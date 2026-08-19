@@ -370,3 +370,21 @@ func TotalMinor(leaves []ClaimLeaf) *big.Int {
 	}
 	return total
 }
+
+// BuildFromDigests builds a tree from already-computed leaf digests.
+//
+// Exported for the proof-serving path in internal/payout, which rebuilds a tree
+// from persisted claim_leaves rows. That path must work with NO salt - it is the
+// reason a per-event salt can be destroyed at all - and it therefore cannot go
+// through BuildMerkleTree, which needs ClaimLeaf values and so needs identity
+// hashes and so needs the salt.
+//
+// A wrapper rather than a second implementation, deliberately. Two tree builders
+// is the drift this repository has already paid for once.
+func BuildFromDigests(hashed [][32]byte) (*MerkleTree, error) { return buildFromDigests(hashed) }
+
+// ProofForDigest returns the sibling path for a leaf identified by its digest
+// rather than its preimage, for the same salt-free reason as BuildFromDigests.
+func (t *MerkleTree) ProofForDigest(target [32]byte) ([][32]byte, error) {
+	return t.proofForDigest(target)
+}

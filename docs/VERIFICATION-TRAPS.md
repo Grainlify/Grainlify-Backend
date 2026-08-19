@@ -1396,6 +1396,66 @@ And when a check looks redundant because a library already validates, establish
 what the library validates *against*. `aes.NewCipher` enforces "a legal AES key".
 It has no opinion about which AES you meant.
 
+## A tool that corrupted the source it was checking
+
+> A harness that modifies files it did not back up leaves the working tree
+> silently wrong, and **the corruption then presents as a bug in the code under
+> test.**
+
+`internal/payout/mutate.sh` backed up an explicit list of files:
+
+```sh
+BAK=$(mktemp -d); cp resolve.go digest.go build.go dryrun.go "$BAK/"
+```
+
+That list was written when the package had four files. `serve.go` arrived later,
+mutations were added for it, and it was never backed up — so each mutation was
+applied and never reverted. They **stacked**: five mutations deep by the end of
+the run, the file was returning the wrong leaf's amount, the wrong proof, and a
+zeroed identity hash.
+
+The run itself reported `21 killed, 1 survived`. Nothing looked wrong.
+
+The damage showed up afterwards, as three failing tests that read exactly like a
+real defect in proof serving. Time went into debugging the *algorithm* — is the
+tree sorted, is `leaf_index` the pre-sort position, is pgx aliasing the byte
+slices — before checking whether the file on disk was the file that had been
+written. It was not.
+
+Then a second-order failure: an edit intended to fix the code silently did not
+apply, because the text it searched for had been mutated out from under it. A
+`.replace()` with no assertion reports success by saying nothing.
+
+### The checks
+
+**A tool that writes to the tree must prove it put the tree back.** Not restore
+and hope — checksum before, restore, checksum after, and fail loudly if they
+differ:
+
+```sh
+BAK=$(mktemp -d); cp ./*.go "$BAK/"
+before=$(cat ./*.go | shasum | cut -d" " -f1)
+restore_all() {
+  cp "$BAK"/*.go ./
+  [ "$before" = "$(cat ./*.go | shasum | cut -d" " -f1)" ] || { echo "RESTORE FAILED" >&2; exit 2; }
+}
+trap restore_all EXIT
+```
+
+**Enumerate by glob, never by list.** A hand-written list of files is correct on
+the day it is written and silently incomplete from the next file onwards. This is
+the same defect as a filtered grep reporting a route absent: the tool answered a
+narrower question than the one being asked.
+
+**Assert that a search-and-replace matched.** `s.replace(a, b)` that finds
+nothing changes nothing and says nothing. Use an assertion, and read the failure
+rather than re-running with a different guess.
+
+And the diagnostic habit that would have saved the whole detour: **when tests
+fail right after a tool ran over the source, check the source before debugging
+the logic.** `grep -c` for the mutation markers takes seconds; the algorithm
+hypotheses took considerably longer and were all wrong.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
