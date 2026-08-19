@@ -214,13 +214,111 @@ Boot-time refusal for an empty `SALT_ENC_KEY_B64` once a salt row can exist,
 following the pattern main already set in "Refuse to boot when a live feature has
 no configuration".
 
-## Open questions for you
+## Decisions
 
-1. **Salt destruction schedule** — automatic at some age, or a deliberate act?
-   It is irreversible in both directions: it forecloses future leaks and our own
-   ability to answer "was this leaf mine?" for a contributor who asks.
-2. **Does `contributor_addresses` need a purge story**, given that it plus
-   `claim_leaves` reconstructs the mapping regardless of the salt?
-3. **One payout address per chain, or per settlement?** Per chain is simpler and
-   matches "current intent"; per settlement would let someone direct one event's
-   payout elsewhere without disturbing the rest.
+### Salt destruction is a deliberate act, never scheduled
+
+Same principle as the sweep deadline: **the cutoff is an act, not a clock.** A
+scheduled destruction fires while nobody is watching, and this one is
+irreversible in both directions.
+
+There is a second reason specific to the limit below. Because
+`contributor_addresses` joined to `claim_leaves` reconstructs the mapping
+anyway, a scheduled destruction would mostly produce *the feeling of having done
+something*. So it is an act somebody takes, and the tombstone records **a reason
+alongside `destroyed_at`** — `destroyed_reason TEXT`.
+
+### `contributor_addresses` is not purged, and the claim is not made
+
+A purge cannot work here, and the reasoning belongs in the record rather than a
+purge being invented to satisfy the shape of the problem.
+
+**The address has to stay current to receive future payouts.** So for as long as
+somebody keeps the same payout address, the join keeps reconstructing the
+mapping. That is not a gap a retention policy closes — a policy that deleted the
+address would break the next payout, and one that kept it changes nothing.
+
+The correct response is therefore **not a purge story. It is never making the
+claim that a purge would be needed to support.** `merkle.go` already states the
+property accurately: the salt raises the cost of *bulk* correlation by someone
+holding the chain and the public list of GitHub logins. Nothing anywhere else may
+overstate it — not these docs, not marketing, not a grant application, and in
+particular never a sentence of the form *"we destroyed the salt, so we cannot
+link you."* That sentence would be false.
+
+**A future lever, noted and not built:** if a real one is ever wanted, it is
+`claim_leaves` retention — dropping leaf rows after the claim window closes and
+everything is claimed or swept. The trade-off is dispute resolution: those rows
+are how we answer "you say I was paid, I say I was not", and after they are gone
+the only record is the chain, which knows addresses and amounts but nothing about
+who anyone is. Do not build it now.
+
+### One payout address per chain
+
+Per-settlement storage buys nothing, because **the freeze already provides
+per-settlement semantics.** The address is frozen into `claim_leaves` at tree
+build, so changing it between events already redirects only future ones.
+Per-settlement storage would add only the ability to change an address for an
+event whose tree has not been built yet — which is identical to changing it now.
+
+And it costs the thing we can least afford. The largest friction in the payout
+path is already a contributor installing a wallet, switching network and signing.
+Making them repeat that per event is the version nobody completes.
+
+## An eligible member with no registered address at tree build
+
+**They are excluded from the tree, the root total comes in below the pool, and
+the difference stays in the treasury as residue.** That is the intended
+behaviour, and it is the exact case the fund-the-leaf-total rule exists for.
+
+**On the chain side this is already built and enforced**, not merely planned.
+`publish_root` requires `total == funded_total` — exactly, not at most — and the
+comment above that assertion names this case directly: funding the whole pool
+would leave the excluded member's share sitting in the escrow as
+`balance - root_total`, which is precisely what `sweep_residue` returns with **no
+timelock**. Their one protection, the claim window, would not apply. So the
+operational rule is *fund the leaf total, never the pool total*, and the contract
+enforces it rather than trusting a runbook.
+
+**On the Go side it is not built, and I should not have implied otherwise.**
+Checked rather than assumed: `internal/founding.Line` has no address field,
+nothing outside `internal/chain` ever constructs a `ClaimLeaf`, and no tree
+constructor is called anywhere. The settlement-to-tree path does not exist yet.
+What exists is the rule and its on-chain enforcement; what has to be written is
+the code that applies it.
+
+Two things that path must do, neither of which exists:
+
+1. **Exclude by address, and record why.** `Line` already carries
+   `IneligibleReason` for people who got nothing, on the stated principle that
+   why somebody got nothing matters as much as why somebody got something. A
+   member excluded for having no address is a *different* case — they earned an
+   amount and have nowhere to receive it — and it needs its own recorded reason
+   rather than being silently dropped from `PayableLines()`.
+2. **Make it visible before the tree is built, not after.** Exclusion is
+   irreversible once the root is published: the tree cannot be edited, so their
+   only remedy is a later settlement. Someone in that position should be told
+   they are about to be excluded while registering an address still helps.
+
+## Known limits
+
+### Our own database reconstructs the mapping
+
+Recorded above. Not a defect to fix; a claim never to make.
+
+### Both secrets share one environment — acceptable for testnet, blocking for mainnet
+
+`SALT_ENC_KEY_B64` and `DB_URL` are both Railway environment variables, so
+encryption at rest defends a database dump, a backup leak and the Neon console,
+but not a compromise of the environment holding both.
+
+**This is accepted for testnet, where the funds have no market value.**
+
+> **Trigger: moving the salt key out of the application environment is a
+> precondition for mainnet.** Not a recommendation, not a follow-up — a gate.
+> Anyone proceeding to mainnet with both secrets in one environment is
+> overriding this decision, and should have to say so.
+
+Written as a trigger rather than a regret so that it is a decision someone takes
+deliberately, in the same spirit as the multisig requirement recorded for the
+mainnet deployer account.

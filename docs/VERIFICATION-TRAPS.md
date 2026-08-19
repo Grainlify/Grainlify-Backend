@@ -1260,6 +1260,10 @@ reconciliation — it is a decision, and it belongs to a person.
 
 ## A search that answered a narrower question than the one asked
 
+> **An absence is the dangerous answer, because absence is what a filter
+> produces.** A search that finds something can be checked against what it
+> found; a search that finds nothing offers nothing to check.
+
 While verifying a deploy, a grep for registered routes was filtered down to
 auth-related ones:
 
@@ -1282,10 +1286,6 @@ and as the failed view call that got compared to a leaf and printed
 one being asked**, and returned a confident answer to it. Nothing errored. The
 narrowing was invisible in the result, because a filtered list and a complete
 list look identical once you are reading the list.
-
-An absence is the dangerous answer, because absence is what a filter produces.
-A search that finds something can be checked against what it found; a search that
-finds nothing offers nothing to check.
 
 ### The check
 
