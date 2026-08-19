@@ -187,15 +187,27 @@ func kycReasonForWarning(feature, risk string) (string, bool) {
 // one level of indirection away.
 //
 // Returns nil when nothing maps - notably for an ip_analysis-only refusal.
+// Returns an empty slice, never nil.
+//
+// A nil []string marshals as JSON `null`, not `[]`. That reached the admin tab
+// as `suggested_reason_codes: null`, where reading `.length` off it threw during
+// render and - with no error boundary above it - unmounted the whole page. The
+// caller had every reason to expect an array: the field is documented as
+// "empty when nothing maps", and nothing maps for any refusal whose only
+// warnings are fraud signals, which is the common case.
+//
+// So the empty answer is spelled here rather than left to Go's zero value. A
+// caller across a JSON boundary cannot tell an absent list from an empty one,
+// and this function is where that distinction is decided.
 func SuggestKYCReasons(kycData map[string]interface{}) []string {
 	if kycData == nil {
-		return nil
+		return []string{}
 	}
 	// Ordered so the suggestion list is stable across calls; a queue whose
 	// suggestions reshuffle between refreshes is one an admin stops trusting.
 	features := []string{"id_verification", "face_match", "liveness", "document_ai_documents"}
 	seen := map[string]bool{}
-	var out []string
+	out := []string{}
 	for _, feature := range features {
 		block, ok := kycData[feature].(map[string]interface{})
 		if !ok {

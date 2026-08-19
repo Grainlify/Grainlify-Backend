@@ -160,8 +160,16 @@ func TestSuggestKYCReasons_SurvivesMissingAndReshapedData(t *testing.T) {
 			}
 		})
 	}
-	if got := SuggestKYCReasons(nil); got != nil {
-		t.Errorf("nil decision: got %v, want nil", got)
+	// Empty, and NOT nil. This assertion used to require nil, which pinned the
+	// defect rather than the behaviour: a nil []string marshals as JSON `null`,
+	// the admin tab read `.length` off it during render, and with no error
+	// boundary above it the whole page unmounted. Across a JSON boundary a
+	// caller cannot distinguish an absent list from an empty one, so the empty
+	// answer has to be spelled.
+	if got := SuggestKYCReasons(nil); got == nil {
+		t.Error("nil decision returned a nil slice, which marshals as JSON null and crashed the admin tab")
+	} else if len(got) != 0 {
+		t.Errorf("nil decision: got %v, want an empty slice", got)
 	}
 }
 
