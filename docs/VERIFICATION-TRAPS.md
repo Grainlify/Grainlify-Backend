@@ -1299,6 +1299,103 @@ grep the corpus for the *specific string you expected to be missing*, with no
 pipeline after it. Here that is one command, and it returns the route
 immediately.
 
+## A fail-closed default that hid the absence of a test for itself
+
+> **When the safe behaviour and the tested behaviour are the same behaviour,
+> nothing distinguishes them** — and the test you did not write looks exactly
+> like the test you did.
+
+`internal/salt` decrypts a per-event salt, hands a hasher to a closure, and
+zeroes the plaintext when the closure returns. Two protections, deliberately
+overlapping:
+
+1. the plaintext buffer is zeroed, and
+2. the hasher is marked dead, so one that escapes its closure returns
+   `ErrExpired` instead of hashing.
+
+Nineteen tests passed. A mutation that **deleted the zeroing entirely** survived
+every one of them.
+
+The reason is the second protection. Every test that could have noticed the
+plaintext still sitting in memory went through the hasher, and the hasher was
+already refusing to answer — so the observable behaviour was identical whether
+the buffer was zeroed or not. The design defended the property so well that
+nothing was left to detect whether the property held.
+
+That is the trap: **a defensive design can mask the absence of a test for the
+thing it defends.** Belt and braces are good engineering and bad evidence,
+because with both on you cannot tell from the outside whether either is holding
+the trousers up.
+
+The fix was a test that reaches past the public surface and asserts the buffer
+itself:
+
+```go
+var h *hasher
+_ = WithSalt(ctx, pool, key, id, func(got Hasher) error {
+    h = got.(*hasher)
+    if allZero(h.salt) { t.Fatal("already zeroed INSIDE the closure") }
+    return nil
+})
+if !allZero(h.salt) { t.Fatal("plaintext still in memory after the closure returned") }
+```
+
+Reaching into an unexported field is normally a smell. Here it is the only
+vantage point from which the two protections are distinguishable, and a test
+that cannot distinguish them is testing one thing while appearing to test two.
+
+### The check
+
+For any property with more than one protection, ask: **if I removed protection A
+and left B, would a single test change colour?** If not, A is unverified no
+matter how many tests pass. Mutation testing finds these; reasoning about them
+rarely does, because from the outside the redundant system looks like a working
+one — which it is, right up until somebody removes the half nobody was checking.
+
+## A fault that presented as a legitimate value
+
+> The inverse of a blank where a value belongs: **a value where a *different*
+> value belongs, with nothing to mark the difference.**
+
+`internal/salt` requires `SALT_ENC_KEY_B64` to decode to exactly 32 bytes, for
+AES-256. A mutation removing that length check survived the whole suite.
+
+The tests fed it an empty key, unparseable base64, a 9-byte key and a 64-byte
+key — and every one still failed, because `aes.NewCipher` rejects them on its
+own. What no test fed it was **16 or 24 bytes**, and those are *valid AES key
+sizes*. `aes.NewCipher` accepts them, GCM works, encryption and decryption round
+trip, every test passes.
+
+The system silently becomes AES-128. Nothing errors, nothing is blank, nothing
+is malformed. The security level drops and the only artefact is a number nobody
+prints.
+
+This is the family the rest of this file is mostly the mirror of. Elsewhere the
+danger is an **empty** result that looks like a pass — a filtered grep, a missing
+selector, an unrendered page. Here the danger is a **well-formed** result that is
+the wrong one. Both defeat "did it error?", and the second also defeats "did it
+return something?", which is the fallback people reach for once burned by the
+first.
+
+Where it lurks: anywhere a parameter has several legal values of which only one
+is correct — key sizes, hash algorithms, curve choices, rounding modes, decimal
+precision, timezone handling, chain ids. A wrong choice among legal values is
+indistinguishable from a right one at every layer that only checks legality.
+
+### The check
+
+**Test the boundary of the intended value, not the boundary of the legal one.**
+Ask what the next-most-plausible legal value is, feed it, and require rejection.
+Here that is one line:
+
+```go
+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 16)), // valid AES, wrong AES
+```
+
+And when a check looks redundant because a library already validates, establish
+what the library validates *against*. `aes.NewCipher` enforces "a legal AES key".
+It has no opinion about which AES you meant.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
