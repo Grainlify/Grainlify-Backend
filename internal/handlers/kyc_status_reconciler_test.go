@@ -192,3 +192,50 @@ func TestKYCReconciler_AgreementWritesNothing(t *testing.T) {
 		t.Errorf("updated_at moved (%s -> %s) with no status change", before, after)
 	}
 }
+
+// Run must reconcile once BEFORE the first tick.
+//
+// Without this the first pass is a whole interval after boot, and on a
+// platform that restarts the process on every deploy each deploy pushes it
+// another interval away - a day of frequent deploys can leave the reconciler
+// having never completed a pass at all. The sweeper this was written as a
+// sibling of has always done a startup pass; the requirement was in its
+// comment and was read as description.
+//
+// The interval here is an hour, so a reconcile that happens at all is the
+// startup pass and cannot be the ticker.
+func TestKYCReconciler_ReconcilesOnceAtStartupBeforeTheFirstTick(t *testing.T) {
+	d := dbtest.DB(t)
+	session := "recon-startup-" + uuid.NewString()
+	user := reconcilerFxUser(t, d, "verified", &session)
+
+	f := &fakeDecisions{bySession: map[string]didit.SessionDecisionResponse{session: {Status: "Declined"}}}
+	r := &KYCStatusReconciler{db: d, didit: f, batch: 500, interval: time.Hour}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	// Poll for the WRITE, not for the lookup.
+	//
+	// An earlier version of this test signalled on the lookup and cancelled
+	// the context as soon as it saw one - which cancelled the very UPDATE it
+	// was waiting for, because reconcileOnce does the write on the same
+	// context. It failed for a reason that had nothing to do with the
+	// behaviour under test. Waiting for the observable outcome has no such
+	// race: nothing but the startup pass can produce it inside an hour.
+	deadline := time.Now().Add(25 * time.Second)
+	for {
+		if got, _ := readKYC(t, d, user); got == "rejected" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("status unchanged after 25s with a one-hour tick interval: Run did no startup pass")
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+}
