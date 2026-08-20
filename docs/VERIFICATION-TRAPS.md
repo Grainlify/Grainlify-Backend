@@ -2385,3 +2385,81 @@ source, how many rows should be in the table, how many files should have been
 written. A run that dies mid-way will report a clean sweep of the part it
 reached, and there is nothing in its own output that distinguishes that from a
 clean sweep of everything.
+
+## A test that keeps passing for a different reason
+
+A guard was safe because the bad state was unreachable. `KYCAdminHandler`'s
+reset nulls `kyc_session_id`, and the reconciler queues on
+`WHERE kyc_session_id IS NOT NULL`, so a reset contributor left the queue
+entirely. The test asserting "the reconciler never undoes a reset" passed
+because the session was **never queried at all**.
+
+Then a change was proposed that keeps the session alive. Under it the row is
+back in the queue, the reconciler reads a still-`Approved` session, and writes
+the contributor back to verified — silently reversing an admin's decision.
+
+The test still passes.
+
+Not because the guard survived. Because the assertion — final status is
+`expired` — is also true when the reconcile is skipped, when the fixture never
+loaded, and when the code path is dead. It was written against a world where
+one thing made it true, and it now reports on a different world without
+saying so.
+
+### Why no signal catches this
+
+Every instrument a suite has points the wrong way:
+
+- **The test passes.** No failure, no flake, nothing to investigate.
+- **Coverage goes up, not down.** The new conditional is executed by this very
+  test. A line-coverage report shows the guard covered.
+- **The diff looks complete.** Implementation changed, test still green — which
+  is exactly what a correct refactor looks like.
+- **Mutation testing may not catch it either**, if the mutant is killed by a
+  different test that happens to overlap.
+
+A test that fails when it should pass is loud. A test that passes when it
+should fail is silent. A test that passes *for a reason that no longer exists*
+is worse than either: it is a green tick actively certifying a property nobody
+is checking.
+
+### The check: assert the reason, then assert the inverse
+
+Two things, and the second is the one that is usually missing.
+
+**1. When the implementation changes, the test must be rewritten, not re-run.**
+If it goes green without being touched, that is not reassurance — it is the
+symptom. Ask what makes the assertion true *now*, and if the answer is
+different from what made it true before, the test has stopped testing what its
+name says.
+
+Where the mechanism is cheap to observe, assert it directly rather than only
+its consequence:
+
+```go
+if f.calls[session] != 0 {
+    t.Errorf("the reset session was queried %d times; it must leave the queue entirely", ...)
+}
+```
+
+That line fails the moment the impossibility becomes a conditional, because it
+asserts *why* rather than *what*.
+
+**2. Add the inverse case.** A guard that simply never fires is
+indistinguishable from a guard that fires correctly, unless something proves it
+can be *not* triggered. For "a reset newer than the decision wins", the missing
+test is: reset, then a **newer** decision, and assert the reconciler **does**
+take it.
+
+Without the inverse, `return false` passes the whole suite.
+
+### The general form
+
+**A structural impossibility being converted into a conditional is not a
+refactor, and it does not look like one in a diff.** When the reason a bad
+outcome cannot happen moves from the shape of the data into a line of code that
+has to be right, every test covering it needs re-deriving, because they were
+all passing on the strength of the old reason.
+
+Say that sentence out loud in the review. It is the only thing that reliably
+stops the change being read as a tidy-up.
