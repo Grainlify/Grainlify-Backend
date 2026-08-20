@@ -2463,3 +2463,73 @@ all passing on the strength of the old reason.
 
 Say that sentence out loud in the review. It is the only thing that reliably
 stops the change being read as a tidy-up.
+
+## A structural check that enumerates its own inputs
+
+`TestKYCVerifiedAt_EveryWriterGuardsTheTransition` reads the handler sources and
+asserts that every write of `kyc_verified_at` is guarded by the transition
+check. Its own comment states the promise:
+
+> It fails if a third writer appears, or if either existing one reverts — the
+> case the behavioural tests above cannot see.
+
+It could not fail if a third writer appeared. The list was written by hand:
+
+```go
+files := []string{"kyc.go", "didit_webhook.go"}
+```
+
+A third writer arrived in `kyc_status_reconciler.go`, carrying its own copy of
+the `CASE` block. The test never read that file, because a file nobody adds to
+the slice is a file it cannot see. The count stayed at **2**, matched
+`wantWriters`, and read as correct for as long as it existed.
+
+The check was not weakened. It was **never covering what it claimed to cover**,
+and its own success was the evidence offered for that claim.
+
+### Why the count made it worse
+
+The `wantWriters` constant is the good idea in that test — the thing that turns
+"all the ones I looked at are guarded" into "and there are exactly this many."
+It is the same countable invariant that appears elsewhere in this file, and it
+is why the drift is supposed to be impossible.
+
+But a count over a hand-written list counts *the list*, not the codebase. Both
+halves — the guard and the count — were computed from the same incomplete input,
+so they agreed with each other perfectly and with reality not at all. **Two
+checks derived from one wrong premise do not corroborate; they repeat.**
+
+### The check
+
+**Glob, do not enumerate.**
+
+```go
+entries, _ := filepath.Glob("*.go")            // every file, not a list of files
+for _, name := range entries {
+    if strings.HasSuffix(name, "_test.go") { continue }
+    ...
+}
+if len(files) < 10 {
+    t.Fatalf("globbed only %d source files; the scan is not running where it thinks it is", len(files))
+}
+```
+
+The floor assertion matters as much as the glob. A glob that silently returns
+nothing — wrong working directory, wrong pattern — produces zero findings, which
+is indistinguishable from a clean codebase. Assert the *input* is plausible
+before trusting the *output*, because a scan of nothing passes every check you
+can write about its results.
+
+### The general form
+
+**Any check whose inputs are listed by hand is a check on that list.** It will
+find what somebody remembered to give it and report the result as if it had
+looked everywhere. The failure is silent, it survives review — the list looks
+deliberate — and it gets *more* convincing over time as the list ages into
+something nobody questions.
+
+Third instance of this shape recorded here: the mutation harness that mutated
+one file from a fixed set, this guard, and the deferred-tool sweep that scanned
+a directory it had been handed rather than the tree. Where a check can derive
+its own inputs, it must; where it genuinely cannot, the list needs an assertion
+about its own size, so that shrinking it is a failure rather than a quieter run.
