@@ -2147,3 +2147,170 @@ not covering it, whatever its name says. Two cheap ways to answer:
 When the right layer is unavailable — no browser in CI, no real database in a
 unit suite — say so in the test rather than substituting an assertion from the
 wrong layer and letting its green stand in for coverage it does not provide.
+
+## Is the fix as general as the mistake?
+
+`?tab=` was read once, in a `useState` initialiser, and never again. An in-app
+link changed the URL and the page reverted, so every notification link followed
+from inside the dashboard went nowhere. That was found, understood and fixed.
+
+`project`, `issue`, `view` and `from` sat in the same file, read the same way,
+in initialisers a few lines apart, and were left exactly as they were.
+
+Three of eight notification types still landed on the wrong screen for another
+day. The repair was reported as complete because the reported symptom stopped.
+
+### Why the siblings are invisible
+
+The bug arrives named after one member. "See all notifications doesn't work" is
+about `tab`, so `tab` is what gets examined, fixed, and tested. Nothing in that
+loop ever asks what else is built this way — the report scoped the search, and
+the fix satisfied the report.
+
+It is worse than an ordinary miss, because fixing one member **removes the
+evidence**. The next person sees a file where `tab` demonstrably syncs from the
+URL and concludes that URL syncing works here. The remaining four look like
+they must be fine, since the mechanism plainly exists.
+
+### The check
+
+**Ask whether the fix is as general as the mistake.** Not "is the bug fixed" —
+"is the *class* fixed". Concretely, when a defect is understood well enough to
+repair:
+
+1. Name the mechanism, not the symptom. Not "the tab didn't update" but "state
+   initialised from the URL is never re-read after mount".
+2. Grep for the mechanism. `useState(() => ...location.search...)` finds all
+   ten in one search.
+3. Fix or explicitly exempt every one, in the same change.
+
+Step 3 is the one that gets skipped, and "explicitly exempt" is a real option —
+some siblings genuinely differ. What is not an option is not looking.
+
+### The same shape, three times in one day
+
+- A rule written for one caller while its siblings kept the old behaviour.
+- A guard proven for one parameter and assumed for the rest.
+- This.
+
+Each was found by exhaustion rather than by reasoning: following all eight
+notification links rather than inspecting the one that was reported. **Five of
+the eight worked and all five carried only `tab` and `subtab`** — the
+diagnosis, in one line, available only because all eight were followed.
+
+## A default parameter that swallows its own sentinel
+
+```ts
+export function claimReload(storage: Storage = safeSession()): boolean {
+  if (!storage) return false;   // unreachable
+  ...
+}
+```
+
+The guard's most important behaviour is what it does when it **cannot** record
+its flag: it must refuse, because without a durable flag there is no way to
+prevent a reload loop. There is a line for exactly that, and a test for it.
+
+The test could not reach the line. `claimReload(undefined)` does not pass
+`undefined` — a default parameter value is substituted whenever the argument is
+`undefined`, so the call resolves to the real `sessionStorage` and returns
+`true`. The case the function was written to handle **was not expressible by
+its caller.**
+
+### Why review does not catch it
+
+Because the default is obviously the right default. Every part reads correctly:
+the fallback is sensible, the guard clause is present, the intent is legible.
+The defect is not in any line but in the *arity* — in what the type permits a
+caller to say. `Storage` cannot express "deliberately none", and the default
+quietly converts the only spelling a caller would reach for into its opposite.
+
+It is the value-shaped traps in reverse. Those are about a value arriving in a
+shape nothing checked. This is about a value that **cannot arrive at all**, and
+so a branch that can never be exercised, in the branch that matters most.
+
+### The check
+
+**For every optional parameter, ask what "deliberately none" looks like, and
+whether the type can say it.**
+
+If the answer is "you'd pass `undefined`", the default has swallowed it. Split
+the two meanings so absence and emptiness are different values:
+
+```ts
+export function claimReload(storage?: Storage | null): boolean {
+  const store = storage === undefined ? safeSession() : (storage ?? undefined);
+  if (!store) return false;   // now reachable, and tested
+  ...
+}
+```
+
+`null` says none. Omitting the argument still gets the real one.
+
+The tell, and it is worth trusting: **a test you cannot write for a branch you
+can see** is not a gap in the test, it is a report about the signature.
+
+## Fail toward acting; refuse only on evidence
+
+A guard that suppresses a recovery must do so on evidence of a bad state, never
+on the absence of evidence of a good one.
+
+The stale-chunk reload is skipped when `navigator.onLine` is `false` — a
+browser that knows it has no network will not fetch on reload either, so
+reloading could only replace an explanation with a blank page. But the check
+defaults to *online* whenever it cannot be read:
+
+```ts
+return typeof navigator === 'undefined' || navigator.onLine !== false;
+```
+
+Not `navigator?.onLine === true`. The difference is the whole point. Requiring
+proof of connectivity would disable recovery in every environment that does not
+implement `navigator.onLine`, to prevent a reload in a state we never
+established. The condition names the bad state and treats everything else as
+permission to proceed.
+
+That asymmetry is the difference between a guard and an obstacle, and it
+generalises past this one flag: a precondition phrased as "proceed only if I
+can confirm things are fine" fails closed on every unknown, and unknowns are
+the common case. Phrase it as "stop if I can see something wrong."
+
+It also composes with the rule already recorded here — that a guard must not be
+able to cause a larger failure than the one it prevents. A guard which fails
+closed on unknowns is exactly how that happens.
+
+## A mutation that lands on the wrong line reports the wrong result
+
+Mutation testing the URL reader, two of five mutations survived, which should
+mean two properties had no test behind them. One did. The other was a lie.
+
+```
+const issueId = params.get("issue");     // appears TWICE in the file
+```
+
+Once in the `useState` initialiser, once in the reader under test. The harness
+did `replace(old, new, 1)` and hit the initialiser — code the filtered test
+never exercises. Nothing broke, so the run reported **"test still passed"**,
+which reads as "this property is untested" and invites writing a test that
+already exists.
+
+Both failure directions are available here and they mislead differently. An
+unapplied mutation reports a good test as useless. A mutation applied in the
+wrong place reports a good test as useless *and* points at innocent code.
+
+### The check
+
+Assert the anchor is **unique** before mutating, and abort when it is not:
+
+```
+n = source.count(anchor)
+if n != 1: abort(f"anchor occurs {n} times - refusing to guess which")
+```
+
+Refusing is right, rather than picking the first or mutating all. A harness
+that guesses produces results indistinguishable from real ones.
+
+This belongs with the existing rule that a mutation must be confirmed **applied
+and compiled** before its result is trusted. Applied, compiled, and *in the
+right place* — three conditions, and the third is the one a diff-free check
+cannot see, because the file did change.
