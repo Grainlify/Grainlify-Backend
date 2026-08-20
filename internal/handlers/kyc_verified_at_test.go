@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -147,7 +148,30 @@ func TestKYCVerifiedAt_ReVerifyingAfterAResetDoesRestamp(t *testing.T) {
 // Precedent: TestUndeliveredIndexMatchesTheGoPredicate reads its migration
 // from disk for exactly this reason.
 func TestKYCVerifiedAt_EveryWriterGuardsTheTransition(t *testing.T) {
-	files := []string{"kyc.go", "didit_webhook.go"}
+	// Every non-test file in the package, not a hand-written list.
+	//
+	// The list used to name kyc.go and didit_webhook.go. That made the "a
+	// third writer appears" promise above untrue: kyc_status_reconciler.go
+	// arrived carrying its own copy of this CASE and was never read by this
+	// test, because a file nobody adds to the slice is a file this cannot see.
+	// The count stayed at 2 and looked correct throughout.
+	//
+	// A structural check that enumerates its own inputs by hand can only find
+	// what somebody remembered to give it - which is the failure mode this
+	// file exists to prevent, applied to itself.
+	entries, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var files []string
+	for _, name := range entries {
+		if !strings.HasSuffix(name, "_test.go") {
+			files = append(files, name)
+		}
+	}
+	if len(files) < 10 {
+		t.Fatalf("globbed only %d source files; the scan is not running where it thinks it is", len(files))
+	}
 
 	found := 0
 	for _, name := range files {
@@ -174,6 +198,10 @@ func TestKYCVerifiedAt_EveryWriterGuardsTheTransition(t *testing.T) {
 	// If this number changes, a writer was added or removed and somebody needs
 	// to decide which. A guard that silently covers fewer call sites than it
 	// used to is the failure mode this file exists to prevent.
+	//
+	// Two, and they are now kyc.go and kyc_status_change.go. The webhook and
+	// the reconciler no longer carry their own: both call applyKYCStatus, so
+	// the rule has one definition rather than three that happen to agree.
 	const wantWriters = 2
 	if found != wantWriters {
 		t.Errorf("found %d kyc_verified_at writers, want %d - a new one needs the same guard, "+

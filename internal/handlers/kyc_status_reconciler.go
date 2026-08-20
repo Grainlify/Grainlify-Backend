@@ -226,47 +226,41 @@ func (r *KYCStatusReconciler) reconcileOne(ctx context.Context, c reconcileCandi
 		return
 	}
 
-	// A verified contributor losing that status is the event this whole
-	// reconciler exists for, and it is the one that costs money: verification
-	// is what admits somebody to a founding wave. Logged at error level and
-	// alerted, because "we discovered this ourselves, hours late" is a
-	// materially different thing from a routine status change.
-	reversal := c.stored == "verified" && live != "verified"
-
 	decisionJSON, _ := json.Marshal(map[string]interface{}{
 		"decision": decision.Decision,
 		"data":     decision.Data,
 	})
 
-	// kyc_verified_at is stamped only on the TRANSITION into verified, exactly
-	// as the webhook does it - the unqualified kyc_status inside the SET is the
-	// row's pre-update value. Duplicated deliberately rather than shared: the
-	// webhook's comment explains what re-dating this column cost, and a
-	// reconciler that observes somebody still verified must not re-date them
-	// either.
-	if _, err := r.db.Pool.Exec(ctx, `
-UPDATE users
-SET kyc_status = $1,
-    kyc_data = $2,
-    kyc_verified_at = CASE
-      WHEN $1 = 'verified' AND kyc_status IS DISTINCT FROM 'verified' THEN now()
-      ELSE kyc_verified_at
-    END,
-    updated_at = now()
-WHERE id = $3
-`, live, decisionJSON, c.userID); err != nil {
+	// One shared statement for both paths - see applyKYCStatus. It returns
+	// the previous value from inside the write, so `changed` is a fact rather
+	// than an inference from c.stored, which was read when this session was
+	// queued and can be up to a batch out of date by now.
+	previous, changed, err := applyKYCStatus(ctx, r.db, c.userID, live, decisionJSON)
+	if err != nil {
 		slog.Error("kyc reconciler: status update failed",
 			"user_id", c.userID, "session_id", c.sessionID, "error", err)
 		return
 	}
+	if !changed {
+		// The webhook got here first between our queue read and this write.
+		// Not an error, and specifically not a notification: it already fired
+		// for this transition on the other path.
+		return
+	}
+	// A verified contributor losing that status is the event this whole
+	// reconciler exists for, and the one that costs money: verification is
+	// what admits somebody to a founding wave. Computed from the value the
+	// write actually replaced rather than from the queue snapshot, which is
+	// older and can disagree.
+	reversal := previous == "verified" && live != "verified"
 
 	if reversal {
 		slog.Error("kyc reconciler: VERIFIED STATUS REVERSED, discovered by reconciliation not by webhook",
-			"user_id", c.userID, "session_id", c.sessionID, "was", c.stored, "now", live)
-		alertAdminOfKYCReversal(ctx, r.db, r.sink, c.userID, c.sessionID, c.stored, live)
+			"user_id", c.userID, "session_id", c.sessionID, "was", previous, "now", live)
+		alertAdminOfKYCReversal(ctx, r.db, r.sink, c.userID, c.sessionID, previous, live)
 	} else {
 		slog.Info("kyc reconciler: status corrected",
-			"user_id", c.userID, "session_id", c.sessionID, "was", c.stored, "now", live)
+			"user_id", c.userID, "session_id", c.sessionID, "was", previous, "now", live)
 	}
 
 	// The same follow-ups the webhook performs, because a decision this
@@ -275,7 +269,11 @@ WHERE id = $3
 	// half-synced: verified with us, but never admitted to a wave and with the
 	// referrer never credited - a state no other path can produce and none
 	// would repair.
-	if live == "verified" && c.stored != "verified" {
+	// The contributor is told, in both directions. Somebody who was verified
+	// and no longer is must not find out by noticing.
+	notifyKYCStatusChange(ctx, r.notify, c.userID, previous, live)
+
+	if live == "verified" && previous != "verified" {
 		maybeCompleteReferral(ctx, r.db, r.notify, c.userID)
 	}
 	if live == "in_review" {
