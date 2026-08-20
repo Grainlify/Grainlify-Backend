@@ -119,8 +119,35 @@ func TestSyncVerdicts_Section24Conditions(t *testing.T) {
 	hackathonID, projectID, _ := fxLiveHackathon(t, pool)
 
 	// Pin the window so the merge-time cases are deterministic.
+	//
+	// ends_at is three days back, not two, and the third day is the whole
+	// point. With a 48h grace, `ends_at = now() - 2 days` put the deadline at
+	// EXACTLY the Postgres now() of this statement - and the "merged well past
+	// the grace period" case below is then seeded with Go's time.Now(), a few
+	// hundred milliseconds later on a DIFFERENT CLOCK.
+	//
+	// The assertion's entire margin was therefore "how long the seeding took,
+	// minus however far the Postgres container's clock runs ahead of the
+	// host's". Measured at 20-90ms on Docker Desktop, which is enough to lose:
+	// the test failed 4 runs in 5 locally while passing on CI, where host and
+	// container share a kernel clock. A test that fails on developer machines
+	// and passes in CI is worse than one that fails everywhere, because the
+	// green tick is the least informative result available.
+	//
+	// Three days moves the deadline to now() - 1 day, so the post-grace PR
+	// clears it by roughly 24 hours instead of by scheduler noise. The other
+	// three cases are unaffected: the in-grace PR at now-36h is still inside
+	// the new deadline and still after starts_at, and the pre-start and
+	// self-authored cases do not depend on ends_at at all.
+	//
+	// The deeper fix is for this fixture to take every timestamp from ONE
+	// clock - read now() from Postgres once and derive the seeds from it, or
+	// write merged_at_github in SQL. Worth doing if this grows more
+	// time-sensitive cases; not done here because a one-line change with 24
+	// hours of margin is verifiable in a way a refactor of four fixtures is
+	// not.
 	if _, err := pool.Exec(ctx, `
-UPDATE hackathons SET starts_at = now() - interval '10 days', ends_at = now() - interval '2 days',
+UPDATE hackathons SET starts_at = now() - interval '10 days', ends_at = now() - interval '3 days',
   merge_grace_period_hours = 48 WHERE id = $1`, hackathonID); err != nil {
 		t.Fatalf("set window: %v", err)
 	}
