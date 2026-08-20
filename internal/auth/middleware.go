@@ -57,24 +57,3 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 		return c.Next()
 	}
 }
-
-func RequireRole(roles ...string) fiber.Handler {
-	allowed := map[string]struct{}{}
-	for _, r := range roles {
-		allowed[r] = struct{}{}
-	}
-	return func(c *fiber.Ctx) error {
-		role, _ := c.Locals(LocalRole).(string)
-		if role == "" {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "missing_role",
-			})
-		}
-		if _, ok := allowed[role]; !ok {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "insufficient_role",
-			})
-		}
-		return c.Next()
-	}
-}

@@ -98,8 +98,12 @@ func (h *HackathonClarityHandler) ForMaintainer() fiber.Handler {
 			`SELECT owner_user_id FROM projects WHERE id = $1`, projectID).Scan(&owner); err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "project_not_found"})
 		}
-		role, _ := c.Locals(auth.LocalRole).(string)
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 

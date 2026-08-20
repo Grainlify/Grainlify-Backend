@@ -43,14 +43,35 @@ func projectsFxNextGHUserID() int64 {
 // projectsFxUser inserts a minimal row into users and returns its id.
 func projectsFxUser(t *testing.T, pool db.DBPool) uuid.UUID {
 	t.Helper()
+	return projectsFxUserWithRole(t, pool, "contributor")
+}
+
+// projectsFxAdmin inserts a user whose role is 'admin' IN THE DATABASE.
+//
+// Owner-or-admin routes read the role with a live SELECT (see
+// handlers.ownerOrLiveAdmin), so a token claiming "admin" over a user stored
+// as 'contributor' is a non-owner and is refused. Tests that want an admin
+// have to seed one.
+//
+// The distinction is not pedantic - it is the entire change these fixtures
+// were caught by. Two admin cases in this package were passing only because
+// the guard read the claim; against the database they were contributors all
+// along.
+func projectsFxAdmin(t *testing.T, pool db.DBPool) uuid.UUID {
+	t.Helper()
+	return projectsFxUserWithRole(t, pool, "admin")
+}
+
+func projectsFxUserWithRole(t *testing.T, pool db.DBPool, role string) uuid.UUID {
+	t.Helper()
 	var id uuid.UUID
 	err := pool.QueryRow(context.Background(), `
 INSERT INTO users (role, display_name, github_user_id)
-VALUES ('contributor', $1, $2)
+VALUES ($1, $2, $3)
 RETURNING id
-`, "test-user-"+uuid.New().String(), projectsFxNextGHUserID()).Scan(&id)
+`, role, "test-user-"+uuid.New().String(), projectsFxNextGHUserID()).Scan(&id)
 	if err != nil {
-		t.Fatalf("projectsFxUser: insert user: %v", err)
+		t.Fatalf("projectsFxUserWithRole(%s): insert user: %v", role, err)
 	}
 	return id
 }

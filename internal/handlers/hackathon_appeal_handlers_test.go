@@ -14,13 +14,14 @@ import (
 )
 
 func appealSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 	h := handlers.NewHackathonAppealsHandler(d)
 	app.Get("/grainhack/my-verdicts", auth.RequireAuth(hackathonSuiteJWTSecret), h.MyVerdicts())
 	app.Post("/grainhack/verdicts/:id/appeal", auth.RequireAuth(hackathonSuiteJWTSecret), h.Appeal())
 	adminGroup := app.Group("/admin", auth.RequireAuth(hackathonSuiteJWTSecret))
-	adminGroup.Get("/hackathons/:id/appeals", auth.RequireRole("admin"), h.AdminList())
-	adminGroup.Post("/hackathon-appeals/:id/decide", auth.RequireRole("admin"), h.AdminDecide())
+	adminGroup.Get("/hackathons/:id/appeals", requireAdmin, h.AdminList())
+	adminGroup.Post("/hackathon-appeals/:id/decide", requireAdmin, h.AdminDecide())
 	return app
 }
 

@@ -130,9 +130,10 @@ func adminSuiteDo(t *testing.T, app *fiber.App, method, path, token string, body
 func newAdminRoutesTestApp(cfg config.Config, d *db.DB) *fiber.App {
 	app := fiber.New()
 	h := handlers.NewAdminHandler(cfg, d)
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
-	adminGroup.Get("/users", auth.RequireRole("admin"), h.ListUsers())
-	adminGroup.Put("/users/:id/role", auth.RequireRole("admin"), h.SetUserRole())
+	adminGroup.Get("/users", requireAdmin, h.ListUsers())
+	adminGroup.Put("/users/:id/role", requireAdmin, h.SetUserRole())
 	return app
 }
 

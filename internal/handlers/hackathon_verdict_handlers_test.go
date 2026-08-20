@@ -14,12 +14,13 @@ import (
 )
 
 func verdictSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 	adminGroup := app.Group("/admin", auth.RequireAuth(hackathonSuiteJWTSecret))
 	h := handlers.NewAdminHackathonVerdictsHandler(d)
-	adminGroup.Get("/hackathons/:id/verdicts", auth.RequireRole("admin"), h.List())
-	adminGroup.Get("/hackathon-verdicts/:id", auth.RequireRole("admin"), h.Get())
-	adminGroup.Post("/hackathon-verdicts/:id/override", auth.RequireRole("admin"), h.Override())
+	adminGroup.Get("/hackathons/:id/verdicts", requireAdmin, h.List())
+	adminGroup.Get("/hackathon-verdicts/:id", requireAdmin, h.Get())
+	adminGroup.Post("/hackathon-verdicts/:id/override", requireAdmin, h.Override())
 	return app
 }
 

@@ -388,11 +388,38 @@ func TestProjectsHandler_Verify(t *testing.T) {
 
 	t.Run("admin (non-owner) request is also accepted - contrast with UpdateMetadata's lack of admin bypass", func(t *testing.T) {
 		id := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: owner})
-		admin := projectsFxUser(t, d.Pool)
+		// projectsFxAdmin, not projectsFxUser: the admin has to exist in the
+		// database, because that is where Verify() now reads the role from.
+		admin := projectsFxAdmin(t, d.Pool)
 		adminToken := projectsFxJWT(t, cfg.JWTSecret, admin, "admin")
 		status, body := projectsFxDoJSON(t, app, "POST", "/projects/"+id.String()+"/verify", adminToken, nil)
 		if status != fiber.StatusAccepted {
 			t.Fatalf("status = %d, want 202, body=%s", status, body)
+		}
+	})
+
+	// The negative control for the subtest directly above, and the reason that
+	// subtest is not sufficient on its own.
+	//
+	// Seeding the admin makes the positive case pass again, but a passing
+	// positive case looks identical whether the guard reads the database or
+	// the token - in both worlds a user who is an admin everywhere is allowed.
+	// Only a case where the two disagree can tell them apart.
+	//
+	// So: a validly signed token claiming "admin", over a user the database
+	// records as a contributor. Before this change that combination performed
+	// the write on a project the caller did not own. It must now be refused,
+	// and refused as a non-owner - Verify() consults ownership first and the
+	// role second, so this is a plain 403 rather than RequireLiveRole's
+	// role_changed.
+	t.Run("a non-owner claiming admin in the token but not in the database is forbidden", func(t *testing.T) {
+		id := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: owner})
+		impostor := projectsFxUser(t, d.Pool) // stored role: contributor
+		claimsAdmin := projectsFxJWT(t, cfg.JWTSecret, impostor, "admin")
+		status, body := projectsFxDoJSON(t, app, "POST", "/projects/"+id.String()+"/verify", claimsAdmin, nil)
+		if status != fiber.StatusForbidden {
+			t.Fatalf("status = %d, want 403 - the role claim in a token is a copy of a "+
+				"fact taken at login, not authorisation; body=%s", status, body)
 		}
 	})
 }
