@@ -32,6 +32,39 @@ const payoutWalletType = auth.WalletType("aptos_ed25519")
 // It names the purpose, the chain and the address in plain words, because this
 // string is shown to a person inside their wallet and "sign this random hex" is
 // how people are phished.
+//
+// # The nonce appears TWICE in what gets signed, and that is fine
+//
+// Observed against a real Petra, not inferred. The wallet signs:
+//
+//	APTOS
+//	message: Grainlify payout address verification
+//	Chain: aptos-testnet
+//	Address: 0x1b41…22c9
+//	Nonce: 8f2c…            <- ours, the line below
+//	nonce: 8f2c…            <- AIP-62's, appended by the envelope
+//
+// **Do not tidy this up**, and be precise about why, because the obvious reason
+// is wrong. Deleting our `Nonce:` line would NOT break verification: this same
+// function produces both the challenge we hand out and the string we rebuild at
+// verification time, the client never supplies a message, so both sides would
+// change together and signatures would still verify.
+//
+// The actual hazards are two, and neither is cryptographic:
+//
+//  1. **In-flight challenges break across the deploy.** Any nonce issued by the
+//     old binary and submitted to the new one is checked against a message that
+//     has changed, and fails as `signature_invalid` - for a person who did
+//     nothing wrong, with an error naming the one thing that was fine. It lasts
+//     the nonce TTL, which is long enough to look like an outage.
+//  2. **The person loses the only per-attempt detail they can see.** The AIP-62
+//     `nonce:` line is envelope plumbing; our `Nonce:` line is inside the text
+//     the wallet renders as the message. Remove it and every prompt looks
+//     identical, which is exactly the condition under which people stop reading
+//     them.
+//
+// The binding itself comes from the envelope either way. This line is for the
+// human and for deploy safety, and it costs one line to keep.
 func challengeMessage(chainID, address, nonce string) string {
 	return fmt.Sprintf(
 		"Grainlify payout address verification\nChain: %s\nAddress: %s\nNonce: %s",
