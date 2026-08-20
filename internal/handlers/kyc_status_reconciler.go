@@ -124,6 +124,21 @@ func (r *KYCStatusReconciler) Run(ctx context.Context) {
 		return
 	}
 
+	// Once at startup, before the ticker - the same thing KYCReviewSweeper
+	// does, for a reason that applies here with more force.
+	//
+	// A decision that changed while the process was down is exactly what this
+	// exists to catch, and waiting a full interval to begin looking is the
+	// wrong way round. On a platform that restarts the process on every
+	// deploy, it is also worse than it sounds: each deploy pushes the first
+	// pass another interval away, so a day of frequent deploys can leave the
+	// reconciler having never completed one.
+	//
+	// This was missed when the file was written as a sibling of the sweeper -
+	// the sibling documents the startup pass in a comment, and the comment was
+	// read as description rather than as a requirement.
+	r.reconcileOnce(ctx)
+
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
 	for {
