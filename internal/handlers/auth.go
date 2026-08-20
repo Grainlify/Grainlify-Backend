@@ -142,21 +142,35 @@ func (h *AuthHandler) Me() fiber.Handler {
 		}
 
 		userIDStr, _ := c.Locals(auth.LocalUserID).(string)
-		role, _ := c.Locals(auth.LocalRole).(string)
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
 
-		// Get user profile fields from database
+		// Role comes from this query, not from the token's claim.
+		//
+		// This is the value the frontend stores as userRole and gates its whole
+		// UI on, and the claim it used to return is issued once and lives an
+		// hour - so a demoted admin kept seeing admin navigation until their
+		// token expired. The routes behind it refused correctly, which made the
+		// failure look like the site was broken rather than like their access
+		// had been removed.
+		//
+		// Genuinely one query instead of two: this row was already being read
+		// for the profile fields, so `role` joins onto it at no cost.
+		var role string
 		var firstName, lastName, location, website, bio, avatarURL, telegram, linkedin, whatsapp, twitter, discord *string
 		err = h.db.Pool.QueryRow(c.Context(), `
-SELECT first_name, last_name, location, website, bio, avatar_url, telegram, linkedin, whatsapp, twitter, discord
+SELECT role, first_name, last_name, location, website, bio, avatar_url, telegram, linkedin, whatsapp, twitter, discord
 FROM users
 WHERE id = $1
-`, userID).Scan(&firstName, &lastName, &location, &website, &bio, &avatarURL, &telegram, &linkedin, &whatsapp, &twitter, &discord)
+`, userID).Scan(&role, &firstName, &lastName, &location, &website, &bio, &avatarURL, &telegram, &linkedin, &whatsapp, &twitter, &discord)
 		if err != nil {
-			slog.Warn("failed to fetch user profile fields", "error", err, "user_id", userID)
+			// The role is authorisation-shaped even when it is only driving
+			// navigation, so a failed read must not fall back to the claim or
+			// to a default. Refusing is the only answer that cannot be wrong.
+			slog.Error("failed to fetch user profile", "error", err, "user_id", userID)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "profile_lookup_failed"})
 		}
 
 		response := fiber.Map{

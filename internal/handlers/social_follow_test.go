@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func socialFollowSuiteToken(t *testing.T, userID uuid.UUID, role string) string 
 }
 
 func socialFollowSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	// Clear the queue first.
 	//
 	// dbtest.DB is shared and nothing truncates this table, so submissions
@@ -50,13 +52,13 @@ func socialFollowSuiteApp(d *db.DB) *fiber.App {
 	app.Get("/social-follow/me", auth.RequireAuth(socialFollowSuiteJWTSecret), h.Me())
 
 	admin := app.Group("/admin", auth.RequireAuth(socialFollowSuiteJWTSecret))
-	admin.Get("/social-follow/submissions", auth.RequireRole("admin"), h.ListSubmissions())
-	admin.Get("/social-follow/reason-codes", auth.RequireRole("admin"), h.ReasonCodes())
-	admin.Get("/social-follow/submissions/:id/proofs", auth.RequireRole("admin"), h.Proofs())
-	admin.Post("/social-follow/submissions/bulk-approve", auth.RequireRole("admin"), h.BulkApprove())
-	admin.Post("/social-follow/submissions/:id/approve", auth.RequireRole("admin"), h.Approve())
-	admin.Post("/social-follow/submissions/:id/reject", auth.RequireRole("admin"), h.Reject())
-	admin.Post("/social-follow/submissions/:id/revoke", auth.RequireRole("admin"), h.Revoke())
+	admin.Get("/social-follow/submissions", requireAdmin, h.ListSubmissions())
+	admin.Get("/social-follow/reason-codes", requireAdmin, h.ReasonCodes())
+	admin.Get("/social-follow/submissions/:id/proofs", requireAdmin, h.Proofs())
+	admin.Post("/social-follow/submissions/bulk-approve", requireAdmin, h.BulkApprove())
+	admin.Post("/social-follow/submissions/:id/approve", requireAdmin, h.Approve())
+	admin.Post("/social-follow/submissions/:id/reject", requireAdmin, h.Reject())
+	admin.Post("/social-follow/submissions/:id/revoke", requireAdmin, h.Revoke())
 	return app
 }
 
@@ -280,7 +282,7 @@ func TestSocialFollow_AdminListCarriesNoScreenshots(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
 	token := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-list-c"), "contributor")
-	adminToken := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-list-admin"), "admin")
+	adminToken := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-list-admin"), "admin")
 
 	id := submitBoth(t, app, token)
 
@@ -331,13 +333,85 @@ func TestSocialFollow_AdminEndpointsRequireAdminRole(t *testing.T) {
 	}
 }
 
+// TestSocialFollow_AnAdminClaimWithoutTheStoredRoleIsRefused is the negative
+// control for the whole live-role change, and it is deliberately the awkward
+// case rather than the obvious one.
+//
+// TestSocialFollow_AdminEndpointsRequireAdminRole above already covers a
+// contributor who claims to be a contributor. That test passed before this
+// change and passes after it, because a token that claims nothing is refused
+// by either design. It cannot tell the two designs apart.
+//
+// This one can. The token claims "admin" and is validly signed; the database
+// says 'contributor'. Under the old claim-reading check that was an admin.
+// Under RequireLiveRole it is a refusal, and specifically a role_changed
+// refusal - the claim is not resolved in either direction, it is rejected for
+// disagreeing.
+//
+// Without this test, seeding the four fixtures restores green while encoding
+// nothing about what changed, and the next person writing an admin fixture
+// reaches for the claim again - because with every fixture seeded, the claim
+// looks like it still works.
+func TestSocialFollow_AnAdminClaimWithoutTheStoredRoleIsRefused(t *testing.T) {
+	d := testDB(t)
+	app := socialFollowSuiteApp(d)
+
+	// Stored as a contributor. The token below says otherwise.
+	impostor := seedSocialFollowUser(t, d, "sf-claims-admin")
+	claimsAdmin := socialFollowSuiteToken(t, impostor, "admin")
+
+	resp, body := notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions?status=pending", claimsAdmin, nil)
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("status = %d, want %d - a signed token claiming admin must not "+
+			"authorise anything the database does not back", resp.StatusCode, fiber.StatusForbidden)
+	}
+	if !strings.Contains(string(body), "role_changed") {
+		t.Errorf("error = %s, want role_changed: the refusal should name the "+
+			"claim/database disagreement, not read as a generic denial", body)
+	}
+
+	// And the same user, once the database agrees, is let through - so the
+	// test above is pinning the disagreement rather than a broken route.
+	if _, err := d.Pool.Exec(context.Background(),
+		`UPDATE users SET role = 'admin' WHERE id = $1`, impostor); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	resp, body = notifSuiteDo(t, app, "GET", "/admin/social-follow/submissions?status=pending", claimsAdmin, nil)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("after the database was made to agree: status = %d, want 200, body = %s", resp.StatusCode, body)
+	}
+}
+
 // seedSocialFollowUser creates a user WITH a github_accounts row, because the
 // review list resolves logins through that join - both the submitter's and,
 // now, the deciding admin's. Seeding only the users row would make the login
 // assertions pass vacuously against an empty string.
 func seedSocialFollowUser(t *testing.T, d *db.DB, login string) uuid.UUID {
 	t.Helper()
-	userID := adminSuiteInsertUser(t, d, "contributor")
+	return seedSocialFollowUserWithRole(t, d, login, "contributor")
+}
+
+// seedSocialFollowAdmin seeds a reviewer whose role is 'admin' IN THE DATABASE.
+//
+// The /admin routes in this suite are mounted behind auth.RequireLiveRole,
+// which reads users.role per request. Minting a token that claims "admin" for
+// a user stored as 'contributor' does not produce an admin - it produces a
+// refusal, which is the whole point of the live check. An admin fixture has to
+// write the role, not merely claim it.
+//
+// This existed as a bug before it existed as a helper: both call sites below
+// used seedSocialFollowUser and a claiming token, which passed only for as
+// long as the mount trusted the claim. See
+// TestSocialFollow_AnAdminClaimWithoutTheStoredRoleIsRefused, which fails if
+// anybody makes the claim sufficient again.
+func seedSocialFollowAdmin(t *testing.T, d *db.DB, login string) uuid.UUID {
+	t.Helper()
+	return seedSocialFollowUserWithRole(t, d, login, "admin")
+}
+
+func seedSocialFollowUserWithRole(t *testing.T, d *db.DB, login, role string) uuid.UUID {
+	t.Helper()
+	userID := adminSuiteInsertUser(t, d, role)
 	ghID := time.Now().UnixNano() + int64(uuid.New().ID())
 	if _, err := d.Pool.Exec(context.Background(), `
 INSERT INTO github_accounts (user_id, github_user_id, login, access_token, token_type, scope)
@@ -402,7 +476,7 @@ func listRows(t *testing.T, m map[string]any) []any {
 func TestSocialFollow_ListIsPagedAndReportsWhatIsNotOnThePage(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-admin"), "admin")
 
 	// Ask for a deliberately small page rather than relying on the default.
 	// This test used to hardcode 10, which broke the moment the page size
@@ -436,6 +510,17 @@ func TestSocialFollow_ListIsPagedAndReportsWhatIsNotOnThePage(t *testing.T) {
 		t.Error("offset returned nothing; the second page is unreachable")
 	}
 
+	// Non-empty before indexing, and fatal rather than an error.
+	//
+	// The t.Errorf on the page length above records the wrong count and keeps
+	// going, so an empty first page used to reach rows[0] and panic. A panic
+	// is not a louder failure than an assertion - it is a quieter one: it
+	// takes the whole test binary down, so every test after this point in the
+	// package does not run, and `go test` reports that as SKIP 0 rather than
+	// as 45 tests missing. Assert what indexing depends on.
+	if len(rows) == 0 {
+		t.Fatal("first page returned no rows; there is nothing to compare page two against")
+	}
 	// Distinct rows, not the same page twice - an off-by-one in the offset
 	// would silently show page one forever.
 	firstID := rows[0].(map[string]any)["id"]
@@ -450,7 +535,7 @@ func TestSocialFollow_ListIsPagedAndReportsWhatIsNotOnThePage(t *testing.T) {
 func TestSocialFollow_PageSizeIsClampedNotObeyed(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-clamp-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-clamp-admin"), "admin")
 
 	for i := 0; i < 3; i++ {
 		u := seedSocialFollowUser(t, d, "sf-clamp")
@@ -489,7 +574,7 @@ func TestSocialFollow_ListShowsWhoDecided(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
 
-	adminID := seedSocialFollowUser(t, d, "sf-decider")
+	adminID := seedSocialFollowAdmin(t, d, "sf-decider")
 	admin := socialFollowSuiteToken(t, adminID, "admin")
 	contributor := seedSocialFollowUser(t, d, "sf-decided-on")
 	id := submitBoth(t, app, socialFollowSuiteToken(t, contributor, "contributor"))
@@ -539,7 +624,7 @@ func countIn(m map[string]any, key string) int {
 func TestSocialFollow_BulkApproveReportsEachRowsOutcome(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	adminID := seedSocialFollowUser(t, d, "sf-bulk-admin")
+	adminID := seedSocialFollowAdmin(t, d, "sf-bulk-admin")
 	admin := socialFollowSuiteToken(t, adminID, "admin")
 
 	// One that will approve cleanly.
@@ -616,7 +701,7 @@ func TestSocialFollow_BulkApproveReportsEachRowsOutcome(t *testing.T) {
 func TestSocialFollow_BulkApproveRefusesMoreThanAPage(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-cap"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-bulk-cap"), "admin")
 
 	// One more than a full page, whatever a full page currently is.
 	pageLimit, _ := adminList(t, app, admin, "?status=pending&limit=100000")["limit"].(float64)
@@ -636,7 +721,7 @@ func TestSocialFollow_BulkApproveRefusesMoreThanAPage(t *testing.T) {
 func TestSocialFollow_BulkApproveRejectsAnEmptySelection(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-empty"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-bulk-empty"), "admin")
 
 	status, out := bulkApprove(t, app, admin)
 	if status != fiber.StatusBadRequest {
@@ -652,7 +737,7 @@ func TestSocialFollow_BulkApproveRejectsAnEmptySelection(t *testing.T) {
 func TestSocialFollow_BulkApproveDedupesIDs(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-dupe"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-bulk-dupe"), "admin")
 	id := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-bulk-dupe-c"), "contributor"))
 
 	status, out := bulkApprove(t, app, admin, id, id, id)
@@ -672,7 +757,7 @@ func TestSocialFollow_BulkApproveDedupesIDs(t *testing.T) {
 func TestSocialFollow_ApproveAndRejectRefuseStaleRows(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-guard-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-guard-admin"), "admin")
 	contributor := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-guard-c"), "contributor")
 	id := submitBoth(t, app, contributor)
 
@@ -703,7 +788,7 @@ func TestSocialFollow_ApproveAndRejectRefuseStaleRows(t *testing.T) {
 func TestSocialFollow_RejectionStoresCodeAndNoteAndShowsBothToTheContributor(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-code-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-code-admin"), "admin")
 	contributorID := seedSocialFollowUser(t, d, "sf-code-c")
 	contributor := socialFollowSuiteToken(t, contributorID, "contributor")
 	id := submitBoth(t, app, contributor)
@@ -731,7 +816,7 @@ func TestSocialFollow_RejectionStoresCodeAndNoteAndShowsBothToTheContributor(t *
 func TestSocialFollow_OtherRequiresANoteAndBadCodesAreRefused(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-other-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-other-admin"), "admin")
 	id := submitBoth(t, app, socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-other-c"), "contributor"))
 
 	// "Other" with no note tells the contributor their proof was rejected for
@@ -764,7 +849,7 @@ func TestSocialFollow_OtherRequiresANoteAndBadCodesAreRefused(t *testing.T) {
 func TestSocialFollow_ProofsReturnsBothScreenshotsTogether(t *testing.T) {
 	d := testDB(t)
 	app := socialFollowSuiteApp(d)
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-proofs-admin"), "admin")
 	contributor := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-c"), "contributor")
 	id := submitBoth(t, app, contributor)
 
@@ -789,7 +874,7 @@ func TestSocialFollow_ProofsRequiresAdminAndAValidID(t *testing.T) {
 	app := socialFollowSuiteApp(d)
 	contributorID := seedSocialFollowUser(t, d, "sf-proofs-guard")
 	contributor := socialFollowSuiteToken(t, contributorID, "contributor")
-	admin := socialFollowSuiteToken(t, seedSocialFollowUser(t, d, "sf-proofs-guard-admin"), "admin")
+	admin := socialFollowSuiteToken(t, seedSocialFollowAdmin(t, d, "sf-proofs-guard-admin"), "admin")
 	id := submitBoth(t, app, contributor)
 
 	// These are photographs of somebody's social accounts. An unguessable UUID

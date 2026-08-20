@@ -2314,3 +2314,74 @@ This belongs with the existing rule that a mutation must be confirmed **applied
 and compiled** before its result is trusted. Applied, compiled, and *in the
 right place* — three conditions, and the third is the one a diff-free check
 cannot see, because the file did change.
+
+## A panic reports zero skips on its way out
+
+A test run reported **RUN 634 · PASS 628 · FAIL 6 · SKIP 0**. The six failures
+were understood and expected. `SKIP 0` was read as "and nothing was quietly
+declined" — which is exactly what it usually means.
+
+Forty-five of the package's 389 tests had not run.
+
+One of the six failures was not an assertion failure. An admin route returned
+403, the list came back empty, and the test indexed the first row of it:
+
+```
+rows := listRows(t, first)
+if len(rows) != pageSize {
+    t.Errorf(...)          // records the wrong length and CONTINUES
+}
+...
+firstID := rows[0].(map[string]any)["id"]   // panic: index out of range
+```
+
+A panic kills the test binary. Every test after that point in the package never
+ran, and `go test` does not count them — not as failures, not as skips, not at
+all. They are absent from the denominator, so the totals stay internally
+consistent and nothing looks wrong.
+
+### Why this is worse than a skip
+
+A skipped test reports itself. `dbtest.DB` skipping on an unset `TEST_DB_URL`
+is a weak signal, but it is a signal: the count goes up and someone can notice
+it. A panic produces the opposite — `SKIP 0` is not a missing signal, it is a
+**false reassurance**, and it is loudest precisely when the most tests are
+missing.
+
+Worse, the loss is silent about *what* was lost. Among the 45 were the only two
+tests covering a guard the change under review had just rewritten. The run
+looked like evidence for that change and contained none.
+
+### The check
+
+Two things, neither of which is "read the output more carefully":
+
+**Assert before you index.** Any `x[0]` on something derived from a response
+body needs a length assertion above it, and the assertion must be `t.Fatalf`,
+not `t.Errorf` — `t.Errorf` records and continues, straight into the panic.
+Sweeping the four database-backed packages for this found one unguarded site
+and thirteen already correct, so the convention exists; it was one omission,
+and one is enough.
+
+**Reconcile the count, do not read it.** The honest check is arithmetic:
+
+```
+declared=$(grep -rhoE '^func Test[A-Za-z0-9_]+' *_test.go | sort -u | wc -l)
+ran=$(grep -cE '^=== RUN   Test[A-Za-z0-9_]+$' run.txt)
+```
+
+If those disagree, the run is not a result. This is the same shape as the
+countable invariant elsewhere in this file: the totals a tool reports about
+itself cannot detect the case where the tool stopped early, because the tool
+computed them from what it got to.
+
+### The general form
+
+**A count of what was declined is only trustworthy from a process that lived
+long enough to decline it.** Zero skips, zero errors, zero warnings — each is
+evidence of absence only if the reporter reached the end. Prefer a check that
+compares against something known *outside* the run: how many tests exist in the
+source, how many rows should be in the table, how many files should have been
+written. A run that dies mid-way will report a clean sweep of the part it
+reached, and there is nothing in its own output that distinguishes that from a
+clean sweep of everything.

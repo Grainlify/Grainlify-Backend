@@ -100,15 +100,22 @@ func (h *HackathonIssuesHandler) canManageProject(c *fiber.Ctx, projectID uuid.U
 	if err != nil {
 		return false, nil
 	}
-	role, _ := c.Locals(auth.LocalRole).(string)
-	if role == "admin" {
-		return true, nil
-	}
+	// Ownership is looked up FIRST and always.
+	//
+	// This used to read `if role == "admin" { return true }` above the lookup
+	// and return without ever consulting the project. Replacing the claim with
+	// a live read there would have produced a correct value answering the wrong
+	// question - any admin, on any project, ownership never checked. The bug
+	// was not the source of the role, it was that ownership was skipped, so
+	// this is a restoration rather than a substitution.
+	//
+	// Admin is an override on top of ownership, and it is read from the
+	// database rather than taken from the token's claim.
 	var ownerID uuid.UUID
 	if err := h.db.Pool.QueryRow(c.Context(), `SELECT owner_user_id FROM projects WHERE id = $1`, projectID).Scan(&ownerID); err != nil {
 		return false, err
 	}
-	return ownerID == userID, nil
+	return ownerOrLiveAdmin(c.Context(), h.db, ownerID, userID)
 }
 
 // ListForProject handles GET /projects/:id/hackathon-issues - every

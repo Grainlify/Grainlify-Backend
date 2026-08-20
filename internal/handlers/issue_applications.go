@@ -311,7 +311,6 @@ func (h *IssueApplicationsHandler) PostBotComment() fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		role, _ := c.Locals(auth.LocalRole).(string)
 
 		var req botCommentRequest
 		if err := c.BodyParser(&req); err != nil {
@@ -338,7 +337,12 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 		if installationID == "" {
@@ -544,7 +548,6 @@ func (h *IssueApplicationsHandler) Assign() fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		role, _ := c.Locals(auth.LocalRole).(string)
 
 		var req assignRequest
 		if err := c.BodyParser(&req); err != nil {
@@ -568,7 +571,12 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 		if installationID == "" {
@@ -684,7 +692,6 @@ func (h *IssueApplicationsHandler) Unassign() fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		role, _ := c.Locals(auth.LocalRole).(string)
 
 		var owner uuid.UUID
 		var fullName, installationID string
@@ -701,7 +708,12 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL AND gi.number
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 		if installationID == "" {
@@ -804,7 +816,6 @@ func (h *IssueApplicationsHandler) Reject() fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
-		role, _ := c.Locals(auth.LocalRole).(string)
 
 		var req rejectRequest
 		if err := c.BodyParser(&req); err != nil {
@@ -828,7 +839,12 @@ WHERE id = $1 AND status = 'verified' AND deleted_at IS NULL
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 		if installationID == "" {

@@ -18,6 +18,7 @@ import (
 // assignmentSuiteApp wires the §4 assignment routes the same way
 // internal/api/api.go does.
 func assignmentSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 
 	issueApps := handlers.NewHackathonIssueApplicationsHandler(config.Config{TokenEncKeyB64: asmtFxEncKey()}, d)
@@ -29,9 +30,9 @@ func assignmentSuiteApp(d *db.DB) *fiber.App {
 
 	adminGroup := app.Group("/admin", auth.RequireAuth(hackathonSuiteJWTSecret))
 	draws := handlers.NewAdminHackathonDrawsHandler(d)
-	adminGroup.Post("/hackathon-issues/:id/simulate-draw", auth.RequireRole("admin"), draws.Simulate())
-	adminGroup.Get("/hackathons/:id/draws", auth.RequireRole("admin"), draws.ListDraws())
-	adminGroup.Get("/hackathons/:id/assignments", auth.RequireRole("admin"), draws.ListAssignments())
+	adminGroup.Post("/hackathon-issues/:id/simulate-draw", requireAdmin, draws.Simulate())
+	adminGroup.Get("/hackathons/:id/draws", requireAdmin, draws.ListDraws())
+	adminGroup.Get("/hackathons/:id/assignments", requireAdmin, draws.ListAssignments())
 	return app
 }
 
