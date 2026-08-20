@@ -61,6 +61,16 @@ func main() {
 	// fails its healthcheck, proven by deploying a deliberately broken build and
 	// watching production carry on. A refused boot is therefore a blocked bad
 	// config, not an outage.
+	// Checked alongside the empty-value gate, because it is the same failure
+	// in a different shape: a live feature silently dead from one environment
+	// variable. Here the variable is SET, which is why the empty-value gate
+	// cannot catch it.
+	if nowhere, msg := cfg.BackgroundWorkHasNowhereToRun(); nowhere {
+		slog.Error("background work has nowhere to run", "nats_url_set", true)
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(1)
+	}
+
 	if missing := cfg.MissingRequired(); len(missing) > 0 {
 		if cfg.GatesBoot() {
 			slog.Error("configuration gate failed", "step", "3.5", "action", "required_config_missing",
