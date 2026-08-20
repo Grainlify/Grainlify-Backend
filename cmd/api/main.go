@@ -14,10 +14,12 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/bus/natsbus"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/email"
 	"github.com/jagadeesh/grainlify/backend/internal/expiry"
 	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
 	"github.com/jagadeesh/grainlify/backend/internal/migrate"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 	"github.com/jagadeesh/grainlify/backend/internal/syncjobs"
 )
 
@@ -223,6 +225,35 @@ func main() {
 		go func() {
 			slog.Info("kyc review sweeper started")
 			kycSweeper.Run(context.Background())
+		}()
+
+		// The other half of the same problem. The sweep above covers a
+		// verification nobody was TOLD about; this covers one whose decision
+		// CHANGED after we were told, which the sweep cannot see because it
+		// only looks at sessions still in review.
+		//
+		// It writes where the sweep does not, and re-reads sessions that are
+		// already verified, because a reviewer reversing an approval in
+		// Didit's console is the case that costs money and the one a dropped
+		// webhook hides completely.
+		//
+		// It builds its own notifications service rather than taking one:
+		// the router owns the shared instance (internal/api/api.go), and
+		// reaching for it from here would mean exporting it purely so a
+		// background goroutine could borrow it. Constructed the same way,
+		// including the nil-interface care the mailer needs - a nil
+		// *MailerCloudMailer boxed into email.Mailer is a non-nil interface
+		// wrapping a nil pointer, and Service tests "mailer != nil" to decide
+		// whether to send.
+		var reconcilerMailer email.Mailer
+		if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
+			reconcilerMailer = m
+		}
+		kycReconciler := handlers.NewKYCStatusReconciler(cfg, database,
+			notifications.New(database, reconcilerMailer, cfg.FrontendBaseURL))
+		go func() {
+			slog.Info("kyc status reconciler started")
+			kycReconciler.Run(context.Background())
 		}()
 
 		// GitHub App cleanup is now handled via webhooks (installation.deleted events)

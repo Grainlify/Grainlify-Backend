@@ -258,3 +258,66 @@ func buildKYCReviewMessage(login, sessionID, source string, d kycReviewDetail) s
 	}
 	return b.String()
 }
+
+// alertAdminOfKYCReversal tells an admin that somebody who was verified no
+// longer is, and that we found out by asking rather than by being told.
+//
+// # No claim table, unlike its neighbour
+//
+// alertAdminOfKYCReview dedupes through kyc_review_alerts because it fires on
+// a STATE ("this session is in review"), which stays true and would otherwise
+// re-alert on every sweep. This fires on a TRANSITION, and the reconciler
+// writes the new status immediately afterwards, so the condition that produced
+// it is gone before the next tick. The state itself is the dedupe. Adding a
+// claim keyed on session_id would be worse than redundant: it would collide
+// with the review alerts already keyed there and silence one of the two.
+//
+// # What it deliberately does not say
+//
+// No warnings, no blocking check, no decision reason. The review alert carries
+// those because they decide an action - which reason code to send. This one
+// decides nothing: the action is "go and look", and the detail lives in the
+// provider console where an admin reads it under their own login rather than
+// in a Telegram message that outlives the decision.
+//
+// Category "kyc" routes to the admin DM and never to the public group.
+func alertAdminOfKYCReversal(
+	ctx context.Context, d *db.DB, sink SupportSink, userID uuid.UUID, sessionID, was, now string,
+) {
+	if d == nil || d.Pool == nil || sessionID == "" {
+		return
+	}
+	if sink == nil || !sink.Configured() {
+		slog.Warn("kyc reversal alert: no sink configured, nobody was told a verification was reversed",
+			"session_id", sessionID, "user_id", userID, "was", was, "now", now)
+		return
+	}
+
+	var login string
+	_ = d.Pool.QueryRow(ctx, `
+SELECT COALESCE(ga.login, '')
+FROM users u LEFT JOIN github_accounts ga ON ga.user_id = u.id
+WHERE u.id = $1
+`, userID).Scan(&login)
+	if login == "" {
+		login = userID.String()
+	}
+
+	var b strings.Builder
+	b.WriteString("⚠️ Verification reversed\n\n")
+	b.WriteString("Contributor: " + login + "\n")
+	b.WriteString("Was: " + was + "\n")
+	b.WriteString("Now: " + now + "\n")
+	b.WriteString("Session: " + sessionID + "\n\n")
+	b.WriteString("Found by reconciliation, which means the webhook for this change never arrived.\n")
+	b.WriteString("Open the session in the Didit console for the reason.")
+
+	if _, err := sink.Deliver(ctx, SupportRequest{
+		ID:       uuid.New(),
+		Category: "kyc",
+		Message:  b.String(),
+	}); err != nil {
+		slog.Error("kyc reversal alert: DELIVERY FAILED - a verification was reversed and nobody was told",
+			"session_id", sessionID, "user_id", userID, "login", login, "was", was, "now", now, "error", err)
+	}
+}
