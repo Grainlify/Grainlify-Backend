@@ -153,7 +153,7 @@ RETURNING applicant_user_id
 			h.notify.Notify(c.Context(), applicantID, notifications.TypeGrainHackApplicationAccepted,
 				"GrainHack application accepted",
 				"Your project's GrainHack application was accepted. You can now label issues to enter them into the event.",
-				"",
+				notifications.NoLink,
 			)
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
@@ -219,7 +219,7 @@ RETURNING applicant_user_id
 			} else {
 				title = "GrainHack application needs more info"
 			}
-			h.notify.Notify(c.Context(), applicantID, notifications.TypeGrainHackApplicationReviewed, title, body, "")
+			h.notify.Notify(c.Context(), applicantID, notifications.TypeGrainHackApplicationReviewed, title, body, notifications.NoLink)
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}

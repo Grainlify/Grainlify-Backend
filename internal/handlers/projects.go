@@ -480,8 +480,6 @@ func (h *ProjectsHandler) Verify() fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_user"})
 		}
 
-		role, _ := c.Locals(auth.LocalRole).(string)
-
 		projectID, err := uuid.Parse(c.Params("id"))
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_project_id"})
@@ -502,7 +500,12 @@ WHERE id = $1
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
 
-		if ownerUserID != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, ownerUserID, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 

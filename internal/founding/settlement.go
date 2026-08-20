@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/settlement"
 )
 
 // ErrNoShares means nobody earned anything, so there is nothing to divide.
@@ -22,20 +23,6 @@ var ErrNoShares = errors.New("no shares were earned, so there is nothing to sett
 // compute to zero and the resulting root would commit 38 people to claiming
 // nothing, permanently.
 var ErrEmptyPool = errors.New("the founding pool is zero or negative")
-
-// ErrAllocationMismatch means the computed lines do not sum to the pool. It is
-// unreachable by construction and checked anyway: this is the one invariant
-// whose violation cannot be detected after a root is published.
-var ErrAllocationMismatch = errors.New("allocated amounts do not sum to the pool")
-
-// AssetDecimals is USDC's precision. Minor units throughout: 1 USDC is
-// 1_000_000 minor units.
-//
-// §9 of the on-chain spec requires all decimal arithmetic to happen off-chain
-// with only integers published, and a Merkle leaf commits to an exact integer.
-// So the boundary between "decimal" and "integer" is here, in this file, and
-// nowhere further downstream.
-const AssetDecimals = 6
 
 // Eligible reports whether a user may receive a share, and why not if they
 // may not.
@@ -72,69 +59,22 @@ func Eligible(ctx context.Context, pool db.DBPool, userID uuid.UUID, cfg map[str
 	return false, reason + " at settlement", nil
 }
 
-// Line is one member's computed settlement.
+// Line and Result live in internal/settlement now.
 //
-// Shares are exact rationals and the payout is an exact integer. Nothing here
-// is a float: a float64 cannot represent most USDC cents, so a rounded set of
-// float lines is not guaranteed to sum to the pool - and the contract refuses
-// a root larger than the escrow, so drift upward will not publish while drift
-// downward strands dust in escrow permanently.
-type Line struct {
-	UserID uuid.UUID
-	// RawShares as recorded in the ledger, exact.
-	RawShares *big.Rat
-	// Multiplier captured at wave assignment, exact.
-	Multiplier *big.Rat
-	// EffectiveShares is RawShares x Multiplier, exact. Zero for anyone
-	// ineligible.
-	EffectiveShares *big.Rat
-	// AmountMinor is what this member may claim, in exact minor units. This
-	// is the number that goes into a Merkle leaf; nothing else here does.
-	AmountMinor *big.Int
-	// IneligibleReason records why somebody got nothing, which matters as
-	// much as why somebody got something.
-	IneligibleReason string
-}
+// Type ALIASES, not new definitions: founding.Result and settlement.Result are
+// the same type, so anything already written against founding.Result - including
+// the other session's payout.FromFounding - keeps compiling with no edit. That
+// is the whole reason this is an alias, and it is why the adapter collapse can
+// be a separate, clean change on main rather than a cross-session edit now.
+type (
+	Line   = settlement.Line
+	Result = settlement.Result
+)
 
-// Result is a whole computed settlement, before any money moves.
-type Result struct {
-	// SettlementID is set only by Persist. A dry run leaves it zero, which is
-	// how a caller can tell a read-only result from a recorded one.
-	SettlementID  uuid.UUID
-	PoolMinor     *big.Int
-	AssetDecimals int32
-	// TotalEffective is the divisor: the sum of eligible effective shares.
-	TotalEffective *big.Rat
-	Lines          []Line
-}
+// AssetDecimals and ErrAllocationMismatch are re-exported for the same reason.
+const AssetDecimals = settlement.AssetDecimals
 
-// PayableLines returns only the lines with a strictly positive amount.
-//
-// This is what a Merkle tree is built from, and the filter is not cosmetic.
-// A zero-amount leaf is permanently unclaimable - every contract rejects
-// amount <= 0 - so it is dead weight in the tree, and worse, it permanently
-// commits "this identity was in this event and received nothing" to a root
-// that cannot be edited.
-func (r *Result) PayableLines() []Line {
-	out := make([]Line, 0, len(r.Lines))
-	for _, l := range r.Lines {
-		if l.AmountMinor != nil && l.AmountMinor.Sign() > 0 {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-// TotalAllocatedMinor sums every line's amount.
-func (r *Result) TotalAllocatedMinor() *big.Int {
-	total := new(big.Int)
-	for _, l := range r.Lines {
-		if l.AmountMinor != nil {
-			total.Add(total, l.AmountMinor)
-		}
-	}
-	return total
-}
+var ErrAllocationMismatch = settlement.ErrAllocationMismatch
 
 // DryRun works out every member's payout and returns it, **writing nothing.**
 //
@@ -174,13 +114,13 @@ func DryRun(ctx context.Context, pool db.DBPool, cfg map[string]string) (*Result
 
 	total := new(big.Rat)
 	for i := range lines {
-		total.Add(total, lines[i].EffectiveShares)
+		total.Add(total, lines[i].EffectiveWeight)
 	}
 	if total.Sign() <= 0 {
 		return nil, ErrNoShares
 	}
 
-	if err := apportion(lines, poolMinor, total); err != nil {
+	if err := settlement.Apportion(lines, poolMinor, total); err != nil {
 		return nil, err
 	}
 
@@ -225,7 +165,7 @@ ORDER BY m.user_id
 	var lines []Line
 	for rows.Next() {
 		var (
-			id            uuid.UUID
+			id              uuid.UUID
 			multStr, shrStr string
 		)
 		if err := rows.Scan(&id, &multStr, &shrStr); err != nil {
@@ -241,9 +181,9 @@ ORDER BY m.user_id
 		}
 		lines = append(lines, Line{
 			UserID:          id,
-			RawShares:       shr,
+			RawWeight:       shr,
 			Multiplier:      mult,
-			EffectiveShares: new(big.Rat),
+			EffectiveWeight: new(big.Rat),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -259,89 +199,13 @@ ORDER BY m.user_id
 			lines[i].IneligibleReason = reason
 			continue // EffectiveShares stays zero
 		}
-		lines[i].EffectiveShares.Mul(lines[i].RawShares, lines[i].Multiplier)
+		lines[i].EffectiveWeight.Mul(lines[i].RawWeight, lines[i].Multiplier)
 	}
 
 	sort.Slice(lines, func(a, b int) bool {
 		return lines[a].UserID.String() < lines[b].UserID.String()
 	})
 	return lines, nil
-}
-
-// apportion divides poolMinor across the lines in exact integer minor units,
-// by the largest-remainder method.
-//
-// Each line's exact entitlement is pool x effective / total, a rational that
-// is almost never a whole number of minor units. Every line takes the floor,
-// which leaves a shortfall of strictly fewer minor units than there are
-// eligible lines. Those leftover units are handed out one each, and **who
-// receives them is a rule, not an accident**:
-//
-//	1. Largest fractional remainder first.
-//	2. Ties broken by lowest user id.
-//
-// Rule 2 is arbitrary and deliberately so: what matters is that it is total,
-// stable, and recomputable from stored rows months later. Exact ties are
-// possible whenever two members hold identical shares in the same wave, which
-// with a small pool is common rather than exotic - so leaving the tie to map
-// iteration order would make the settlement irreproducible, and a settlement
-// nobody can recompute cannot answer a dispute.
-//
-// The stake is one minor unit, 0.000001 USDC. No reading of fairness is worth
-// more than determinism at that size, which is why the simplest total rule
-// wins over a cleverer one.
-func apportion(lines []Line, poolMinor *big.Int, total *big.Rat) error {
-	poolRat := new(big.Rat).SetInt(poolMinor)
-
-	type share struct {
-		idx  int
-		frac *big.Rat
-	}
-	var contenders []share
-	allocated := new(big.Int)
-
-	for i := range lines {
-		lines[i].AmountMinor = new(big.Int)
-		if lines[i].EffectiveShares.Sign() <= 0 {
-			continue
-		}
-
-		exact := new(big.Rat).Mul(poolRat, lines[i].EffectiveShares)
-		exact.Quo(exact, total)
-
-		// Every value here is non-negative, so truncation is floor.
-		floor := new(big.Int).Quo(exact.Num(), exact.Denom())
-		lines[i].AmountMinor.Set(floor)
-		allocated.Add(allocated, floor)
-
-		frac := new(big.Rat).Sub(exact, new(big.Rat).SetInt(floor))
-		contenders = append(contenders, share{idx: i, frac: frac})
-	}
-
-	leftover := new(big.Int).Sub(poolMinor, allocated)
-	if leftover.Sign() < 0 {
-		return fmt.Errorf("%w: floors alone exceeded the pool by %s", ErrAllocationMismatch, new(big.Int).Neg(leftover))
-	}
-	if leftover.Sign() == 0 {
-		return nil
-	}
-	if !leftover.IsInt64() || leftover.Int64() > int64(len(contenders)) {
-		return fmt.Errorf("%w: %s units left over across %d eligible lines",
-			ErrAllocationMismatch, leftover, len(contenders))
-	}
-
-	sort.Slice(contenders, func(a, b int) bool {
-		if c := contenders[a].frac.Cmp(contenders[b].frac); c != 0 {
-			return c > 0 // larger remainder first
-		}
-		return lines[contenders[a].idx].UserID.String() < lines[contenders[b].idx].UserID.String()
-	})
-
-	one := big.NewInt(1)
-	for i := int64(0); i < leftover.Int64(); i++ {
-		lines[contenders[i].idx].AmountMinor.Add(lines[contenders[i].idx].AmountMinor, one)
-	}
-	return nil
 }
 
 // poolMinorFromConfig reads the configured pool and converts it to exact minor
@@ -368,73 +232,4 @@ func poolMinorFromConfig(cfg map[string]string) (*big.Int, error) {
 		return nil, fmt.Errorf("founding: pool %q has more precision than %d decimals can express", raw, AssetDecimals)
 	}
 	return new(big.Int).Set(scaled.Num()), nil
-}
-
-// Persist records an approved settlement. **Call this only after a human has
-// read the DryRun output.**
-//
-// Separate from DryRun so that computing a settlement and committing to one
-// are distinct acts. It re-checks the invariant before writing anything: a
-// Result can be constructed or mutated by a caller, and the sum-to-pool
-// property is the one thing that must hold at the moment of recording, not
-// merely at the moment of computation.
-func Persist(ctx context.Context, pool db.DBPool, hackathonID *uuid.UUID, res *Result) error {
-	if res == nil {
-		return errors.New("founding.Persist: nil result")
-	}
-	if got := res.TotalAllocatedMinor(); got.Cmp(res.PoolMinor) != 0 {
-		return fmt.Errorf("%w: allocated %s of %s minor units",
-			ErrAllocationMismatch, got, res.PoolMinor)
-	}
-
-	shareValue := new(big.Rat).Quo(new(big.Rat).SetInt(res.PoolMinor), res.TotalEffective)
-
-	if err := pool.QueryRow(ctx, `
-INSERT INTO founding_settlements
-  (hackathon_id, pool_usdc, pool_minor, asset_decimals, total_shares, share_value_usdc)
-VALUES ($1, $2::numeric, $3, $4, $5::numeric, $6::numeric)
-RETURNING id
-`,
-		hackathonID,
-		ratToDecimalString(new(big.Rat).SetFrac(res.PoolMinor, big.NewInt(1_000_000)), 6),
-		res.PoolMinor.String(),
-		res.AssetDecimals,
-		ratToDecimalString(res.TotalEffective, 4),
-		ratToDecimalString(new(big.Rat).Quo(shareValue, big.NewRat(1_000_000, 1)), 8),
-	).Scan(&res.SettlementID); err != nil {
-		return fmt.Errorf("founding.Persist: insert settlement: %w", err)
-	}
-
-	for _, l := range res.Lines {
-		if _, err := pool.Exec(ctx, `
-INSERT INTO founding_settlement_lines
-  (settlement_id, user_id, raw_shares, multiplier, effective_shares, usdc_amount, amount_minor, ineligible_reason)
-VALUES ($1, $2, $3::numeric, $4::numeric, $5::numeric, $6::numeric, $7, NULLIF($8, ''))
-`,
-			res.SettlementID, l.UserID,
-			ratToDecimalString(l.RawShares, 4),
-			ratToDecimalString(l.Multiplier, 3),
-			ratToDecimalString(l.EffectiveShares, 7),
-			ratToDecimalString(new(big.Rat).SetFrac(l.AmountMinor, big.NewInt(1_000_000)), 6),
-			l.AmountMinor.String(),
-			l.IneligibleReason,
-		); err != nil {
-			return fmt.Errorf("founding.Persist: insert line: %w", err)
-		}
-	}
-	return nil
-}
-
-// ratToDecimalString renders an exact rational at a fixed number of decimal
-// places, for a NUMERIC column.
-//
-// big.Rat.FloatString rounds to nearest at the requested precision, which is
-// correct here because every value handed to it either fits exactly (shares,
-// multipliers, amounts) or is a derived reporting figure (share value) that no
-// arithmetic reads back.
-func ratToDecimalString(v *big.Rat, places int) string {
-	if v == nil {
-		return "0"
-	}
-	return v.FloatString(places)
 }

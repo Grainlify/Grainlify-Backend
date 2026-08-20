@@ -223,7 +223,11 @@ func (h *ProjectDataHandler) authorizeProject(c *fiber.Ctx) (uuid.UUID, bool, er
 		return uuid.Nil, false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 	}
 
-	role, _ := c.Locals(auth.LocalRole).(string)
-	ownerOK := owner == userID || role == "admin"
+	// Live role, not the token's claim - this boolean is handed to every
+	// caller as their authorisation answer.
+	ownerOK, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+	if err != nil {
+		return uuid.Nil, false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+	}
 	return projectID, ownerOK, nil
 }

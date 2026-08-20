@@ -114,6 +114,59 @@ func TestAuthHandler_Me(t *testing.T) {
 	})
 }
 
+// TestAuthHandler_Me_ReportsTheStoredRoleNotTheClaim pins the user-visible half
+// of this change.
+//
+// /me was returning c.Locals(auth.LocalRole) - the JWT claim, issued once and
+// good for an hour. The frontend stores that value as userRole and gates its
+// whole navigation on it, so a demoted admin kept being shown the admin UI
+// until their token expired, while every route behind it correctly refused.
+// That reads as the site being broken rather than as access having been
+// removed, which is why it was never reported as an authorisation problem.
+//
+// The role now comes from the users row /me was already reading for the
+// profile fields, so this costs nothing.
+func TestAuthHandler_Me_ReportsTheStoredRoleNotTheClaim(t *testing.T) {
+	d := testDB(t)
+	cfg := config.Config{JWTSecret: authHandlerTestJWTSecret}
+	h := handlers.NewAuthHandler(cfg, d)
+
+	app := fiber.New()
+	app.Get("/me", auth.RequireAuth(cfg.JWTSecret), h.Me())
+
+	res := authHandlerCreateUser(t, d)
+	if res.User.Role == "admin" {
+		t.Fatalf("fixture precondition: a freshly created user should not be an admin, got %q", res.User.Role)
+	}
+
+	// A validly signed token claiming a role the database does not agree with.
+	// This is what a demoted admin is holding, and what /me used to echo back.
+	token, err := auth.IssueJWT(cfg.JWTSecret, res.User.ID, "admin", "", "", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["role"] != res.User.Role {
+		t.Errorf("role = %v, want %q (the stored role) - /me is echoing the token claim, "+
+			"which is how a demoted admin keeps being shown admin navigation", body["role"], res.User.Role)
+	}
+}
+
 func TestAuthHandler_ResyncGitHubProfile(t *testing.T) {
 	d := testDB(t)
 	cfg := config.Config{JWTSecret: authHandlerTestJWTSecret}

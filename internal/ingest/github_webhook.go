@@ -109,7 +109,7 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 					i.Notify.Notify(ctx, authorUserID, notifications.TypePRMerged,
 						fmt.Sprintf("Your PR #%d was merged", pr.Number),
 						fmt.Sprintf("Your pull request \"%s\" (#%d) in %s was merged.", pr.Title, pr.Number, repoFullName),
-						fmt.Sprintf("/dashboard?tab=browse&project=%s", *projectID),
+						notifications.ProjectLink(*projectID),
 					)
 				}
 			}

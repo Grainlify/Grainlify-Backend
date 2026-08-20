@@ -119,7 +119,7 @@ SELECT link_path FROM notifications WHERE user_id = $1 AND type = 'kyc_reset'
 `, subject).Scan(&link); err != nil {
 		t.Fatalf("no notification: %v", err)
 	}
-	if want := notifications.SettingsLink(notifications.SubtabBilling); link != want {
+	if want := notifications.SettingsLink(notifications.SubtabBilling).String(); link != want {
 		t.Errorf("link_path = %q, want %q", link, want)
 	}
 	if strings.Contains(link, "payout") {

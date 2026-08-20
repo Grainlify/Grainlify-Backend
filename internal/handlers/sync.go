@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -45,8 +46,12 @@ func (h *SyncHandler) EnqueueFullSync() fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
 
-		role, _ := c.Locals(auth.LocalRole).(string)
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 
@@ -85,8 +90,12 @@ func (h *SyncHandler) JobsForProject() fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_lookup_failed"})
 		}
 
-		role, _ := c.Locals(auth.LocalRole).(string)
-		if owner != userID && role != "admin" {
+		allowed, err := ownerOrLiveAdmin(c.Context(), h.db, owner, userID)
+		if err != nil {
+			slog.Error("owner-or-admin check", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authz_check_failed"})
+		}
+		if !allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 

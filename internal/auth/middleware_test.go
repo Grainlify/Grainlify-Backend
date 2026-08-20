@@ -29,7 +29,7 @@ func mwSignClaims(t *testing.T, secret string, claims Claims) string {
 }
 
 // mwEchoLocalsHandler is a downstream handler used to observe what
-// RequireAuth / RequireRole stored in c.Locals.
+// RequireAuth stored in c.Locals.
 func mwEchoLocalsHandler(c *fiber.Ctx) error {
 	uid, _ := c.Locals(LocalUserID).(string)
 	role, _ := c.Locals(LocalRole).(string)
@@ -196,107 +196,4 @@ func TestRequireAuth_ValidJWT_LowercaseBearerScheme(t *testing.T) {
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
 	}
-}
-
-func TestRequireRole(t *testing.T) {
-	// seedRole mounts a fake upstream handler that seeds c.Locals(LocalRole)
-	// the way RequireAuth would, without needing a real JWT -- RequireRole
-	// only ever reads from Locals.
-	seedRole := func(role string) fiber.Handler {
-		return func(c *fiber.Ctx) error {
-			if role != "" {
-				c.Locals(LocalRole, role)
-			}
-			return c.Next()
-		}
-	}
-
-	t.Run("role mismatch returns 403", func(t *testing.T) {
-		app := fiber.New()
-		app.Get("/admin", seedRole("contributor"), RequireRole("admin"), mwEchoLocalsHandler)
-
-		resp, err := app.Test(httptest.NewRequest("GET", "/admin", nil))
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusForbidden {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusForbidden)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body["error"] != "insufficient_role" {
-			t.Errorf("error = %v, want insufficient_role", body["error"])
-		}
-	})
-
-	t.Run("missing role returns 403", func(t *testing.T) {
-		app := fiber.New()
-		app.Get("/admin", seedRole(""), RequireRole("admin"), mwEchoLocalsHandler)
-
-		resp, err := app.Test(httptest.NewRequest("GET", "/admin", nil))
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusForbidden {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusForbidden)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body["error"] != "missing_role" {
-			t.Errorf("error = %v, want missing_role", body["error"])
-		}
-	})
-
-	t.Run("role match reaches next handler", func(t *testing.T) {
-		app := fiber.New()
-		app.Get("/admin", seedRole("admin"), RequireRole("admin"), mwEchoLocalsHandler)
-
-		resp, err := app.Test(httptest.NewRequest("GET", "/admin", nil))
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusOK {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
-		}
-	})
-
-	t.Run("multiple allowed roles, one matches", func(t *testing.T) {
-		app := fiber.New()
-		app.Get("/staff", seedRole("maintainer"), RequireRole("admin", "maintainer"), mwEchoLocalsHandler)
-
-		resp, err := app.Test(httptest.NewRequest("GET", "/staff", nil))
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusOK {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
-		}
-	})
-
-	t.Run("multiple allowed roles, none match", func(t *testing.T) {
-		app := fiber.New()
-		app.Get("/staff", seedRole("contributor"), RequireRole("admin", "maintainer"), mwEchoLocalsHandler)
-
-		resp, err := app.Test(httptest.NewRequest("GET", "/staff", nil))
-		if err != nil {
-			t.Fatalf("app.Test: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != fiber.StatusForbidden {
-			t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusForbidden)
-		}
-	})
 }

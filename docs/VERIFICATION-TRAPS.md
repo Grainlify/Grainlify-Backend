@@ -1065,6 +1065,30 @@ Documentation cannot be tested, so the answer is not "test the docs" - it is to
   transition** - and if a transition must be described, say what ends it, so a
   reader can check whether it already has.
 
+### A verified fact has a scope, and the scope is the tree you checked it against
+
+"Safe on both sides" was reported about a table rename: a check across every file
+of another session's branch found the old table names referenced **zero** times,
+so the rename could not break them. That was true, and it was true of commit
+`1818238`.
+
+Six commits later the same branch had `internal/payout/tables.go`, whose entire
+contents are a constant holding the old table name, and a new function querying
+the old table directly. The finding was now false. Neither session had edited
+anything the other could see; the branch simply moved.
+
+The repair is not more care at the moment of checking — the check was correct.
+It is to **record what a fact was verified against**, so a later reader can tell
+whether it still applies:
+
+> Checked against `origin/session/aca22d76` at `1818238`. Re-check if that
+> branch has moved.
+
+A finding without a scope reads as permanent, and gets quoted back weeks later
+as though it were. One with a scope carries its own expiry, which is the same
+repair as writing the invariant rather than the transition, applied to a
+verification result instead of prose.
+
 ## Two implementations of one rule, and the vector pinned the wrong one
 
 Same family as 1-6: a check that measured a proxy. What makes this one worth its
@@ -1430,6 +1454,21 @@ cp ./*.go "$BAK/"                           # names WHAT
 const dir = "../../../Aptos-Contracts"      // names WHERE
 findUpwards("Aptos-Contracts/sources/escrow.move")  // names WHAT
 ```
+
+For an in-place edit there is no glob to reach for, and the same repair takes the
+form of an assertion on the text itself:
+
+```python
+del lines[26:40]                  # names WHERE - silently removes whatever is there now
+assert src.count(block) == 1      # names WHAT - refuses if the file moved under you
+src = src.replace(block, "", 1)
+```
+
+Both halves matter. A line range applied after an earlier edit shifted the file
+removes something real and says nothing; the count turns that from silently-wrong
+into a loud refusal. Hit while splitting a package: the assertion failed by one
+line, so nothing was deleted and a build error survived to be noticed. That was
+luck, and the assertion is what converted luck into a guarantee.
 
 The drift-check fix and the harness fix are the *same repair applied to two
 tools*, made hours apart, and neither of us connected them at the time. That is
@@ -1912,3 +1951,515 @@ The habit pairs with the previous entry. One prevents the silent destruction;
 the other notices when prevention failed. Neither is sufficient alone — the
 count only worked here because the expected value had been stated as "ten
 added" before the number was read.
+## A result that passes through a transformation reports on the transformation
+
+Three times in one session, the same line:
+
+```sh
+go build ./... 2>&1 | head -10 && echo "ALL PACKAGES BUILD"
+```
+
+It printed `ALL PACKAGES BUILD` while the build was failing. `$?` and `&&` see
+the **last** command in a pipeline, which is `head`, and `head` succeeds at
+printing whatever it was given — including a compiler error. The same line
+reported a passing test suite over a failure, and an `exit: 0` beside an
+experiment that had exited 1.
+
+Every instance was self-inflicted tooling, not a defect in the thing under test,
+which is exactly what makes it dangerous: the subject was innocent each time, so
+there was nothing to investigate and no anomaly to chase. The check simply
+agreed.
+
+### The mechanism, because a rule you must remember is not a rule
+
+The instinct is "remember not to pipe". That fails at precisely the moment it
+matters, when you are three commands into a diagnosis and reaching for `head` to
+keep the output short. Set the shell so the mistake cannot be made:
+
+```sh
+set -o pipefail      # a pipeline's status is the first non-zero, not the last
+```
+
+With `pipefail`, `go build … | head` returns the build's failure. Where that is
+not available, capture before transforming:
+
+```sh
+go build ./... > /tmp/out.txt 2>&1; echo "exit: $?"   # status first, then read
+```
+
+`$?` must be read immediately, before any other command runs — including the
+`echo` that displays it.
+
+### The general form
+
+**Anything that transforms a result also replaces its status.** A pipeline is
+the obvious case; it is not the only one:
+
+- a test harness that prints `SKIP` and exits 0, so the suite reports a clean
+  sheet over tests that never ran
+- a retry wrapper whose status is the last attempt's, hiding that the first
+  three failed
+- a formatter or reporter between a checker and the terminal, reporting on
+  itself
+- `|| true`, appended to silence noise, which converts every future failure of
+  that line into a pass
+
+The tell is a success message produced by something other than the thing being
+checked. If the words "it passed" were printed by a wrapper rather than by the
+tool, they describe the wrapper.
+
+## When a check fails, the check is a suspect too
+
+A failing check is evidence that the check and its subject disagree. Which of
+them is wrong is a second question, and it is skipped almost every time, because
+a red result arrives already labelled: the tool is the instrument and the code
+is the thing being measured.
+
+Four times in one session the instrument was wrong.
+
+**A shell that rewrote the input.** Reproducing a CI step locally reported that
+the deployed bundle was missing its API host. It was not. `zsh`'s builtin `echo`
+interprets backslash escapes, minified JavaScript is full of them, and
+`echo "$bundle" | grep` mangled the content before `grep` saw it. The same line
+passes in `bash`, which is what CI runs. **The finding was the harness.**
+
+**A flag that did not exist.** Testing a new argument check, `--confirm-host=…`
+was rejected and read as the check having broken the production safety flag. The
+real flag is `--yes-run-against-remote-host`. The rejection was correct
+behaviour on an argument that genuinely is unrecognised.
+
+**An assertion that fails on correct output.** A test asserted that rendered
+markup contained no `src=`, to prove raw HTML was inert. Escaped text still
+contains those characters — `&lt;script src="…"` — so the assertion failed
+precisely because the code was doing the right thing. A sibling test searched
+the source for `rehype-raw` and matched the comment *explaining why rehype-raw
+is absent*.
+
+**A truncated download.** A bundle saved with `curl -s > file` arrived at 117KB
+of 575KB. The occurrence count for the API host went from 3 to 0 between two
+runs, which looked exactly like production having changed under the
+investigation. Nothing had changed; the file was short.
+
+### Why it costs more than other traps
+
+A wrong check that **passes** is caught eventually — by a mutation test, by the
+bug it failed to stop. A wrong check that **fails** sends you into the subject,
+which is innocent, so every hypothesis you form there is false and every
+experiment confirms nothing. You cannot find a defect that is not present, and
+the search does not terminate on its own. This is also the shape of *an
+intermittent failure invites you to blame the environment*, seen from the other
+side: there the environment was accused and the fixtures were guilty; here the
+code is accused and the tool is. And *a tool that corrupted the source it was
+checking* is one mechanism of this entry rather than a separate fault: there the
+harness damaged its subject, so the damage presented as a bug in the code. Kept
+separate because that one has a specific fix — back up by glob — while this is
+the stance that finds it.
+
+### The guard
+
+**Before believing a red result about the subject, establish that the tool is
+asking the question you think it is.** Three cheap moves, in order of how often
+they settle it:
+
+1. **Run the check against something known-good and known-bad.** A check that
+   cannot pass is broken; a check that cannot fail measures nothing. Both are
+   one command.
+2. **Read what the check actually received**, not what you passed it. Print the
+   length, the first bytes, the resolved argument. The four cases above were all
+   visible at this step: a mangled string, an unknown flag, escaped text, a
+   short file.
+3. **Reproduce in the environment the check really runs in.** A local shell is
+   not CI, and a headless browser with no extensions is not the reporter's
+   browser.
+
+The habit to build is narrow: **say "the check and the code disagree" rather
+than "the code is broken"**, and hold both as suspects until one is excluded.
+The sentence is the whole guard — it keeps a second hypothesis alive at the only
+moment it is cheap to test.
+
+## An assertion made in a layer that cannot model the defect
+
+A notification body was clipped with `line-clamp-2`, so contributors could not
+read the sentence telling them what to fix. The obvious test is:
+
+```tsx
+expect(await screen.findByText(LONG_BODY)).toBeInTheDocument()
+```
+
+**That passes with the bug present.** `line-clamp` is CSS. jsdom implements the
+DOM but not layout — no boxes, no line breaking, no overflow — so the full
+string is in the document either way. The assertion is true, the component is
+broken, and nothing in the test output hints at the gap.
+
+This is why it shipped. A test existed nearby, the text was clearly present, and
+the check that would have caught it is not one anybody reaches for.
+
+### Proven, not argued
+
+The claim was not left as reasoning. A text-only test was written against the
+clamped component and **passed**; the clamp was then removed and it passed
+identically. A test with the same result in both states is measuring something
+other than the thing under test.
+
+The assertion that does work is structural, on the classes that do the clipping:
+
+```tsx
+expect(body.className).not.toMatch(/line-clamp|truncate|text-ellipsis/)
+```
+
+More brittle than a text assertion, and the only kind available in this layer.
+Mutation-confirmed: restoring `line-clamp-2` fails it.
+
+### The general form
+
+**Ask which layer the defect lives in, and whether the assertion can see that
+layer at all.** Test and defect must inhabit the same layer; when they do not,
+the test is not weak, it is blind — it will pass at full confidence forever.
+
+It generalises well past CSS:
+
+| Defect lives in | Blind to it |
+|---|---|
+| Layout, paint, stacking | jsdom — no layout engine |
+| A missing database index | a unit test — correctness is unchanged, only speed |
+| A wrong endpoint or verb | a mocked client — the mock answers whatever it is asked |
+| Schema drift | an in-memory fake — it has no schema |
+| A wrong `Content-Type` | an assertion on the parsed body |
+| Migration ordering | a test against an already-migrated database |
+| A CDN rewrite | a request that never leaves the process |
+
+Each of those is a real assertion, correctly written, that cannot fail for the
+reason you care about. The mock case is the most common and the most seductive:
+a mocked client makes the endpoint unfalsifiable, because the mock will answer a
+wrong URL exactly as readily as a right one.
+
+### The check
+
+Before trusting a green test as evidence about a specific defect, ask: **if the
+defect were present, would this assertion change?** If it would not, the test is
+not covering it, whatever its name says. Two cheap ways to answer:
+
+1. **Introduce the defect and watch the test fail.** A mutation is the only
+   direct evidence that an assertion can see what it claims to.
+2. **Name the layer out loud.** "This runs in jsdom, which has no layout" ends
+   the question in one sentence, and it is the sentence nobody says.
+
+When the right layer is unavailable — no browser in CI, no real database in a
+unit suite — say so in the test rather than substituting an assertion from the
+wrong layer and letting its green stand in for coverage it does not provide.
+
+## Is the fix as general as the mistake?
+
+`?tab=` was read once, in a `useState` initialiser, and never again. An in-app
+link changed the URL and the page reverted, so every notification link followed
+from inside the dashboard went nowhere. That was found, understood and fixed.
+
+`project`, `issue`, `view` and `from` sat in the same file, read the same way,
+in initialisers a few lines apart, and were left exactly as they were.
+
+Three of eight notification types still landed on the wrong screen for another
+day. The repair was reported as complete because the reported symptom stopped.
+
+### Why the siblings are invisible
+
+The bug arrives named after one member. "See all notifications doesn't work" is
+about `tab`, so `tab` is what gets examined, fixed, and tested. Nothing in that
+loop ever asks what else is built this way — the report scoped the search, and
+the fix satisfied the report.
+
+It is worse than an ordinary miss, because fixing one member **removes the
+evidence**. The next person sees a file where `tab` demonstrably syncs from the
+URL and concludes that URL syncing works here. The remaining four look like
+they must be fine, since the mechanism plainly exists.
+
+### The check
+
+**Ask whether the fix is as general as the mistake.** Not "is the bug fixed" —
+"is the *class* fixed". Concretely, when a defect is understood well enough to
+repair:
+
+1. Name the mechanism, not the symptom. Not "the tab didn't update" but "state
+   initialised from the URL is never re-read after mount".
+2. Grep for the mechanism. `useState(() => ...location.search...)` finds all
+   ten in one search.
+3. Fix or explicitly exempt every one, in the same change.
+
+Step 3 is the one that gets skipped, and "explicitly exempt" is a real option —
+some siblings genuinely differ. What is not an option is not looking.
+
+### The same shape, three times in one day
+
+- A rule written for one caller while its siblings kept the old behaviour.
+- A guard proven for one parameter and assumed for the rest.
+- This.
+
+Each was found by exhaustion rather than by reasoning: following all eight
+notification links rather than inspecting the one that was reported. **Five of
+the eight worked and all five carried only `tab` and `subtab`** — the
+diagnosis, in one line, available only because all eight were followed.
+
+## A default parameter that swallows its own sentinel
+
+```ts
+export function claimReload(storage: Storage = safeSession()): boolean {
+  if (!storage) return false;   // unreachable
+  ...
+}
+```
+
+The guard's most important behaviour is what it does when it **cannot** record
+its flag: it must refuse, because without a durable flag there is no way to
+prevent a reload loop. There is a line for exactly that, and a test for it.
+
+The test could not reach the line. `claimReload(undefined)` does not pass
+`undefined` — a default parameter value is substituted whenever the argument is
+`undefined`, so the call resolves to the real `sessionStorage` and returns
+`true`. The case the function was written to handle **was not expressible by
+its caller.**
+
+### Why review does not catch it
+
+Because the default is obviously the right default. Every part reads correctly:
+the fallback is sensible, the guard clause is present, the intent is legible.
+The defect is not in any line but in the *arity* — in what the type permits a
+caller to say. `Storage` cannot express "deliberately none", and the default
+quietly converts the only spelling a caller would reach for into its opposite.
+
+It is the value-shaped traps in reverse. Those are about a value arriving in a
+shape nothing checked. This is about a value that **cannot arrive at all**, and
+so a branch that can never be exercised, in the branch that matters most.
+
+### The check
+
+**For every optional parameter, ask what "deliberately none" looks like, and
+whether the type can say it.**
+
+If the answer is "you'd pass `undefined`", the default has swallowed it. Split
+the two meanings so absence and emptiness are different values:
+
+```ts
+export function claimReload(storage?: Storage | null): boolean {
+  const store = storage === undefined ? safeSession() : (storage ?? undefined);
+  if (!store) return false;   // now reachable, and tested
+  ...
+}
+```
+
+`null` says none. Omitting the argument still gets the real one.
+
+The tell, and it is worth trusting: **a test you cannot write for a branch you
+can see** is not a gap in the test, it is a report about the signature.
+
+## Fail toward acting; refuse only on evidence
+
+A guard that suppresses a recovery must do so on evidence of a bad state, never
+on the absence of evidence of a good one.
+
+The stale-chunk reload is skipped when `navigator.onLine` is `false` — a
+browser that knows it has no network will not fetch on reload either, so
+reloading could only replace an explanation with a blank page. But the check
+defaults to *online* whenever it cannot be read:
+
+```ts
+return typeof navigator === 'undefined' || navigator.onLine !== false;
+```
+
+Not `navigator?.onLine === true`. The difference is the whole point. Requiring
+proof of connectivity would disable recovery in every environment that does not
+implement `navigator.onLine`, to prevent a reload in a state we never
+established. The condition names the bad state and treats everything else as
+permission to proceed.
+
+That asymmetry is the difference between a guard and an obstacle, and it
+generalises past this one flag: a precondition phrased as "proceed only if I
+can confirm things are fine" fails closed on every unknown, and unknowns are
+the common case. Phrase it as "stop if I can see something wrong."
+
+It also composes with the rule already recorded here — that a guard must not be
+able to cause a larger failure than the one it prevents. A guard which fails
+closed on unknowns is exactly how that happens.
+
+## A mutation that lands on the wrong line reports the wrong result
+
+Mutation testing the URL reader, two of five mutations survived, which should
+mean two properties had no test behind them. One did. The other was a lie.
+
+```
+const issueId = params.get("issue");     // appears TWICE in the file
+```
+
+Once in the `useState` initialiser, once in the reader under test. The harness
+did `replace(old, new, 1)` and hit the initialiser — code the filtered test
+never exercises. Nothing broke, so the run reported **"test still passed"**,
+which reads as "this property is untested" and invites writing a test that
+already exists.
+
+Both failure directions are available here and they mislead differently. An
+unapplied mutation reports a good test as useless. A mutation applied in the
+wrong place reports a good test as useless *and* points at innocent code.
+
+### The check
+
+Assert the anchor is **unique** before mutating, and abort when it is not:
+
+```
+n = source.count(anchor)
+if n != 1: abort(f"anchor occurs {n} times - refusing to guess which")
+```
+
+Refusing is right, rather than picking the first or mutating all. A harness
+that guesses produces results indistinguishable from real ones.
+
+This belongs with the existing rule that a mutation must be confirmed **applied
+and compiled** before its result is trusted. Applied, compiled, and *in the
+right place* — three conditions, and the third is the one a diff-free check
+cannot see, because the file did change.
+
+## A panic reports zero skips on its way out
+
+A test run reported **RUN 634 · PASS 628 · FAIL 6 · SKIP 0**. The six failures
+were understood and expected. `SKIP 0` was read as "and nothing was quietly
+declined" — which is exactly what it usually means.
+
+Forty-five of the package's 389 tests had not run.
+
+One of the six failures was not an assertion failure. An admin route returned
+403, the list came back empty, and the test indexed the first row of it:
+
+```
+rows := listRows(t, first)
+if len(rows) != pageSize {
+    t.Errorf(...)          // records the wrong length and CONTINUES
+}
+...
+firstID := rows[0].(map[string]any)["id"]   // panic: index out of range
+```
+
+A panic kills the test binary. Every test after that point in the package never
+ran, and `go test` does not count them — not as failures, not as skips, not at
+all. They are absent from the denominator, so the totals stay internally
+consistent and nothing looks wrong.
+
+### Why this is worse than a skip
+
+A skipped test reports itself. `dbtest.DB` skipping on an unset `TEST_DB_URL`
+is a weak signal, but it is a signal: the count goes up and someone can notice
+it. A panic produces the opposite — `SKIP 0` is not a missing signal, it is a
+**false reassurance**, and it is loudest precisely when the most tests are
+missing.
+
+Worse, the loss is silent about *what* was lost. Among the 45 were the only two
+tests covering a guard the change under review had just rewritten. The run
+looked like evidence for that change and contained none.
+
+### The check
+
+Two things, neither of which is "read the output more carefully":
+
+**Assert before you index.** Any `x[0]` on something derived from a response
+body needs a length assertion above it, and the assertion must be `t.Fatalf`,
+not `t.Errorf` — `t.Errorf` records and continues, straight into the panic.
+Sweeping the four database-backed packages for this found one unguarded site
+and thirteen already correct, so the convention exists; it was one omission,
+and one is enough.
+
+**Reconcile the count, do not read it.** The honest check is arithmetic:
+
+```
+declared=$(grep -rhoE '^func Test[A-Za-z0-9_]+' *_test.go | sort -u | wc -l)
+ran=$(grep -cE '^=== RUN   Test[A-Za-z0-9_]+$' run.txt)
+```
+
+If those disagree, the run is not a result. This is the same shape as the
+countable invariant elsewhere in this file: the totals a tool reports about
+itself cannot detect the case where the tool stopped early, because the tool
+computed them from what it got to.
+
+### The general form
+
+**A count of what was declined is only trustworthy from a process that lived
+long enough to decline it.** Zero skips, zero errors, zero warnings — each is
+evidence of absence only if the reporter reached the end. Prefer a check that
+compares against something known *outside* the run: how many tests exist in the
+source, how many rows should be in the table, how many files should have been
+written. A run that dies mid-way will report a clean sweep of the part it
+reached, and there is nothing in its own output that distinguishes that from a
+clean sweep of everything.
+
+## A test that keeps passing for a different reason
+
+A guard was safe because the bad state was unreachable. `KYCAdminHandler`'s
+reset nulls `kyc_session_id`, and the reconciler queues on
+`WHERE kyc_session_id IS NOT NULL`, so a reset contributor left the queue
+entirely. The test asserting "the reconciler never undoes a reset" passed
+because the session was **never queried at all**.
+
+Then a change was proposed that keeps the session alive. Under it the row is
+back in the queue, the reconciler reads a still-`Approved` session, and writes
+the contributor back to verified — silently reversing an admin's decision.
+
+The test still passes.
+
+Not because the guard survived. Because the assertion — final status is
+`expired` — is also true when the reconcile is skipped, when the fixture never
+loaded, and when the code path is dead. It was written against a world where
+one thing made it true, and it now reports on a different world without
+saying so.
+
+### Why no signal catches this
+
+Every instrument a suite has points the wrong way:
+
+- **The test passes.** No failure, no flake, nothing to investigate.
+- **Coverage goes up, not down.** The new conditional is executed by this very
+  test. A line-coverage report shows the guard covered.
+- **The diff looks complete.** Implementation changed, test still green — which
+  is exactly what a correct refactor looks like.
+- **Mutation testing may not catch it either**, if the mutant is killed by a
+  different test that happens to overlap.
+
+A test that fails when it should pass is loud. A test that passes when it
+should fail is silent. A test that passes *for a reason that no longer exists*
+is worse than either: it is a green tick actively certifying a property nobody
+is checking.
+
+### The check: assert the reason, then assert the inverse
+
+Two things, and the second is the one that is usually missing.
+
+**1. When the implementation changes, the test must be rewritten, not re-run.**
+If it goes green without being touched, that is not reassurance — it is the
+symptom. Ask what makes the assertion true *now*, and if the answer is
+different from what made it true before, the test has stopped testing what its
+name says.
+
+Where the mechanism is cheap to observe, assert it directly rather than only
+its consequence:
+
+```go
+if f.calls[session] != 0 {
+    t.Errorf("the reset session was queried %d times; it must leave the queue entirely", ...)
+}
+```
+
+That line fails the moment the impossibility becomes a conditional, because it
+asserts *why* rather than *what*.
+
+**2. Add the inverse case.** A guard that simply never fires is
+indistinguishable from a guard that fires correctly, unless something proves it
+can be *not* triggered. For "a reset newer than the decision wins", the missing
+test is: reset, then a **newer** decision, and assert the reconciler **does**
+take it.
+
+Without the inverse, `return false` passes the whole suite.
+
+### The general form
+
+**A structural impossibility being converted into a conditional is not a
+refactor, and it does not look like one in a diff.** When the reason a bad
+outcome cannot happen moves from the shape of the data into a line of code that
+has to be right, every test covering it needs re-deriving, because they were
+all passing on the strength of the old reason.
+
+Say that sentence out loud in the review. It is the only thing that reliably
+stops the change being read as a tidy-up.

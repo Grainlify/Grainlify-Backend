@@ -478,8 +478,14 @@ func TestIssueApplicationsHandler_Assign(t *testing.T) {
 	maintainerToken := projectsFxJWT(t, cfg.JWTSecret, maintainer, "contributor")
 	other := projectsFxUser(t, d.Pool)
 	otherToken := projectsFxJWT(t, cfg.JWTSecret, other, "contributor")
-	admin := projectsFxUser(t, d.Pool)
+	// projectsFxAdmin, not projectsFxUser: Assign() reads the role from the
+	// users table, so an admin fixture has to be an admin there.
+	admin := projectsFxAdmin(t, d.Pool)
 	adminToken := projectsFxJWT(t, cfg.JWTSecret, admin, "admin")
+	// Stored as a contributor, claims admin in the token - the negative
+	// control below.
+	impostor := projectsFxUser(t, d.Pool)
+	impostorToken := projectsFxJWT(t, cfg.JWTSecret, impostor, "admin")
 
 	// Assign(), unlike Apply()/Withdraw()/Unassign(), never joins github_issues
 	// at all - it only looks up the project row - so no issue rows need to
@@ -523,7 +529,8 @@ func TestIssueApplicationsHandler_Assign(t *testing.T) {
 
 	t.Run("admin (non-owner) passes the ownership check", func(t *testing.T) {
 		// Contrast with UpdateMetadata (projects_test.go), which has no admin
-		// bypass at all. Assign() does allow role=="admin", same as Verify().
+		// bypass at all. Assign() does allow an admin, same as Verify() - but
+		// an admin according to the users table, not according to the token.
 		status, body := projectsFxDoJSON(t, app, "POST", fmt.Sprintf("/projects/%s/issues/1/assign", project), adminToken, map[string]any{"assignee": "bob"})
 		// The project has no github_app_installation_id, so even an authorized
 		// admin stops here rather than reaching the (untestable) network call.
@@ -531,6 +538,24 @@ func TestIssueApplicationsHandler_Assign(t *testing.T) {
 			t.Errorf("status = %d, want 400, body=%s", status, body)
 		}
 		assertErrorCode(t, body, "project_has_no_github_app_installation")
+	})
+
+	// The negative control. The subtest above and this one differ in exactly
+	// one thing: whether users.role says 'admin'. The tokens are identical in
+	// shape and both claim admin.
+	//
+	// The 400 above is what "authorised" looks like here - the request got
+	// past the guard and died on a missing installation. A 403 is what
+	// "refused" looks like. Asserting the error code rather than just the
+	// status matters: both outcomes are 4xx, and a test that only counted
+	// "not 200" would pass in both worlds.
+	t.Run("a non-owner claiming admin in the token but not in the database is forbidden", func(t *testing.T) {
+		status, body := projectsFxDoJSON(t, app, "POST", fmt.Sprintf("/projects/%s/issues/1/assign", project), impostorToken, map[string]any{"assignee": "bob"})
+		if status != fiber.StatusForbidden {
+			t.Fatalf("status = %d, want 403 - a stale or forged admin claim must not "+
+				"assign an issue on a project the caller does not own; body=%s", status, body)
+		}
+		assertErrorCode(t, body, "forbidden")
 	})
 
 	t.Run("project with no github app installation returns 400", func(t *testing.T) {

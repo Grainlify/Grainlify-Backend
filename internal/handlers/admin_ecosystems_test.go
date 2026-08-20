@@ -13,17 +13,24 @@ import (
 
 // ecosystemsAdminSuiteApp mounts /admin/ecosystems... exactly as
 // internal/api/api.go wires EcosystemsAdminHandler: RequireAuth +
-// RequireRole admin on every route. Reuses adminSuiteJWTSecret /
-// adminSuiteInsertUser / adminSuiteToken / adminSuiteDo from admin_test.go.
+// requireAdmin (auth.RequireLiveRole) on every route. Reuses
+// adminSuiteJWTSecret / adminSuiteInsertUser / adminSuiteToken / adminSuiteDo
+// from admin_test.go.
+//
+// This used to mount auth.RequireRole, which authorises on the JWT claim -
+// production stopped doing that when RequireLiveRole landed, and the comment
+// above still described the old wiring. A test app that differs from the real
+// one is testing something nobody ships.
 func ecosystemsAdminSuiteApp(d *db.DB) *fiber.App {
 	app := fiber.New()
 	h := handlers.NewEcosystemsAdminHandler(d)
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	adminGroup := app.Group("/admin", auth.RequireAuth(adminSuiteJWTSecret))
-	adminGroup.Get("/ecosystems", auth.RequireRole("admin"), h.List())
-	adminGroup.Get("/ecosystems/:id", auth.RequireRole("admin"), h.GetByID())
-	adminGroup.Post("/ecosystems", auth.RequireRole("admin"), h.Create())
-	adminGroup.Put("/ecosystems/:id", auth.RequireRole("admin"), h.Update())
-	adminGroup.Delete("/ecosystems/:id", auth.RequireRole("admin"), h.Delete())
+	adminGroup.Get("/ecosystems", requireAdmin, h.List())
+	adminGroup.Get("/ecosystems/:id", requireAdmin, h.GetByID())
+	adminGroup.Post("/ecosystems", requireAdmin, h.Create())
+	adminGroup.Put("/ecosystems/:id", requireAdmin, h.Update())
+	adminGroup.Delete("/ecosystems/:id", requireAdmin, h.Delete())
 	return app
 }
 

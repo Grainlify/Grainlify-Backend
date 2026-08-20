@@ -94,8 +94,8 @@ func TestNotificationsHandler_ListAndUnreadCount(t *testing.T) {
 	token := notifSuiteToken(t, userID)
 
 	svc := notifications.New(d, nil, "")
-	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Title A", "Body A", "/a")
-	svc.Notify(context.Background(), userID, notifications.TypePRMerged, "Title B", "Body B", "/b")
+	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Title A", "Body A", notifications.MyApplicationsLink())
+	svc.Notify(context.Background(), userID, notifications.TypePRMerged, "Title B", "Body B", notifications.ProjectLink("b"))
 
 	resp, body := notifSuiteDo(t, app, "GET", "/notifications/unread-count", token, nil)
 	if resp.StatusCode != fiber.StatusOK {
@@ -141,8 +141,8 @@ func TestNotificationsHandler_MarkReadAndMarkAllRead(t *testing.T) {
 	otherUserID := notifSuiteInsertUser(t, d)
 
 	svc := notifications.New(d, nil, "")
-	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Mine", "Mine", "/mine")
-	svc.Notify(context.Background(), otherUserID, notifications.TypeIssueAssigned, "Not mine", "Not mine", "/notmine")
+	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Mine", "Mine", notifications.SettingsLink(notifications.SubtabRewards))
+	svc.Notify(context.Background(), otherUserID, notifications.TypeIssueAssigned, "Not mine", "Not mine", notifications.SettingsLink(notifications.SubtabReferrals))
 
 	var mineID uuid.UUID
 	if err := d.Pool.QueryRow(context.Background(), `SELECT id FROM notifications WHERE user_id = $1`, userID).Scan(&mineID); err != nil {
@@ -179,7 +179,7 @@ func TestNotificationsHandler_MarkReadAndMarkAllRead(t *testing.T) {
 	})
 
 	t.Run("mark-all-read only touches the caller's rows", func(t *testing.T) {
-		svc.Notify(context.Background(), userID, notifications.TypePRMerged, "Another", "Another", "/another")
+		svc.Notify(context.Background(), userID, notifications.TypePRMerged, "Another", "Another", notifications.ProjectLink("another"))
 		resp, body := notifSuiteDo(t, app, "POST", "/notifications/read-all", token, nil)
 		if resp.StatusCode != fiber.StatusOK {
 			t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
@@ -258,7 +258,7 @@ SELECT in_app, email FROM notification_preferences WHERE user_id = $1 AND type =
 	// attempted (verified indirectly - no mailer is configured, so a panic
 	// or error here would indicate the preference wasn't read correctly).
 	svc := notifications.New(d, nil, "")
-	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "T", "B", "/x")
+	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "T", "B", notifications.ProjectLink("x"))
 
 	t.Run("rejects an unknown notification type", func(t *testing.T) {
 		badBody, _ := json.Marshal(map[string]any{
@@ -282,7 +282,7 @@ INSERT INTO notification_preferences (user_id, type, in_app, email) VALUES ($1, 
 	}
 
 	svc := notifications.New(d, nil, "")
-	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Should not appear", "Should not appear", "/x")
+	svc.Notify(context.Background(), userID, notifications.TypeIssueAssigned, "Should not appear", "Should not appear", notifications.ProjectLink("x"))
 
 	var count int
 	_ = d.Pool.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE user_id = $1`, userID).Scan(&count)

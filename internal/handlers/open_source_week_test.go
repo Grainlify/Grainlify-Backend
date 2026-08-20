@@ -25,16 +25,17 @@ func openSourceWeekPublicSuiteApp(d *db.DB) *fiber.App {
 
 // openSourceWeekAdminSuiteApp mounts /admin/open-source-week/events...
 // exactly as internal/api/api.go wires OpenSourceWeekAdminHandler:
-// RequireAuth + RequireRole admin on every route. Reuses
+// RequireAuth + requireAdmin (live-role) on every route. Reuses
 // adminSuiteJWTSecret / adminSuiteInsertUser / adminSuiteToken /
 // adminSuiteDo from admin_test.go.
 func openSourceWeekAdminSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 	h := handlers.NewOpenSourceWeekAdminHandler(d)
 	adminGroup := app.Group("/admin", auth.RequireAuth(adminSuiteJWTSecret))
-	adminGroup.Get("/open-source-week/events", auth.RequireRole("admin"), h.List())
-	adminGroup.Post("/open-source-week/events", auth.RequireRole("admin"), h.Create())
-	adminGroup.Delete("/open-source-week/events/:id", auth.RequireRole("admin"), h.Delete())
+	adminGroup.Get("/open-source-week/events", requireAdmin, h.List())
+	adminGroup.Post("/open-source-week/events", requireAdmin, h.Create())
+	adminGroup.Delete("/open-source-week/events/:id", requireAdmin, h.Delete())
 	return app
 }
 

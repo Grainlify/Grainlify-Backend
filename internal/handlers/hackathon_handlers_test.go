@@ -20,6 +20,7 @@ const hackathonSuiteJWTSecret = "hackathon-suite-test-secret"
 // hackathonSuiteApp wires every new GrainHack route the same way
 // internal/api/api.go does, against this suite's own JWT secret.
 func hackathonSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 
 	hackathonPublic := handlers.NewHackathonPublicHandler(d)
@@ -38,25 +39,25 @@ func hackathonSuiteApp(d *db.DB) *fiber.App {
 	adminGroup := app.Group("/admin", auth.RequireAuth(hackathonSuiteJWTSecret))
 
 	adminHackathons := handlers.NewAdminHackathonsHandler(d)
-	adminGroup.Post("/hackathons", auth.RequireRole("admin"), adminHackathons.Create())
-	adminGroup.Get("/hackathons", auth.RequireRole("admin"), adminHackathons.List())
-	adminGroup.Get("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.GetByID())
-	adminGroup.Put("/hackathons/:id", auth.RequireRole("admin"), adminHackathons.Update())
-	adminGroup.Post("/hackathons/:id/transition", auth.RequireRole("admin"), adminHackathons.Transition())
+	adminGroup.Post("/hackathons", requireAdmin, adminHackathons.Create())
+	adminGroup.Get("/hackathons", requireAdmin, adminHackathons.List())
+	adminGroup.Get("/hackathons/:id", requireAdmin, adminHackathons.GetByID())
+	adminGroup.Put("/hackathons/:id", requireAdmin, adminHackathons.Update())
+	adminGroup.Post("/hackathons/:id/transition", requireAdmin, adminHackathons.Transition())
 
 	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(config.Config{}, d, nil)
-	adminGroup.Get("/hackathons/:id/applications", auth.RequireRole("admin"), adminHackathonApps.ListAdmin())
-	adminGroup.Post("/hackathons/applications/:appId/accept", auth.RequireRole("admin"), adminHackathonApps.Accept())
-	adminGroup.Post("/hackathons/applications/:appId/reject", auth.RequireRole("admin"), adminHackathonApps.Reject())
-	adminGroup.Post("/hackathons/applications/:appId/request-more-info", auth.RequireRole("admin"), adminHackathonApps.RequestMoreInfo())
+	adminGroup.Get("/hackathons/:id/applications", requireAdmin, adminHackathonApps.ListAdmin())
+	adminGroup.Post("/hackathons/applications/:appId/accept", requireAdmin, adminHackathonApps.Accept())
+	adminGroup.Post("/hackathons/applications/:appId/reject", requireAdmin, adminHackathonApps.Reject())
+	adminGroup.Post("/hackathons/applications/:appId/request-more-info", requireAdmin, adminHackathonApps.RequestMoreInfo())
 
-	adminGroup.Get("/hackathons/:id/issues", auth.RequireRole("admin"), hackathonIssues.ListForHackathon())
+	adminGroup.Get("/hackathons/:id/issues", requireAdmin, hackathonIssues.ListForHackathon())
 
 	adminHackathonConfig := handlers.NewAdminHackathonConfigHandler(d)
-	adminGroup.Get("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.List())
-	adminGroup.Put("/hackathon-config", auth.RequireRole("admin"), adminHackathonConfig.Update())
-	adminGroup.Post("/hackathon-config/reset", auth.RequireRole("admin"), adminHackathonConfig.Reset())
-	adminGroup.Get("/hackathon-config/audit", auth.RequireRole("admin"), adminHackathonConfig.Audit())
+	adminGroup.Get("/hackathon-config", requireAdmin, adminHackathonConfig.List())
+	adminGroup.Put("/hackathon-config", requireAdmin, adminHackathonConfig.Update())
+	adminGroup.Post("/hackathon-config/reset", requireAdmin, adminHackathonConfig.Reset())
+	adminGroup.Get("/hackathon-config/audit", requireAdmin, adminHackathonConfig.Audit())
 
 	return app
 }
@@ -261,6 +262,112 @@ INSERT INTO hackathon_issues (hackathon_id, project_id, issue_number, org_login,
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, body = %s (project owner, a non-admin, should be able to edit)", resp.StatusCode, body)
 	}
+}
+
+// TestHackathonIssues_UpdateFields_AdminIsAnOverrideOnOwnership covers the one
+// guard in this change that is a RESTORATION rather than a substitution, and
+// which until now had no admin test of any kind.
+//
+// What canManageProject used to be:
+//
+//	role, _ := c.Locals(auth.LocalRole).(string)
+//	if role == "admin" {
+//	    return true          // <- returns. The project row is never read.
+//	}
+//	var ownerID uuid.UUID
+//	... SELECT owner_user_id ...
+//
+// The defect there is not only that `role` came from the token. It is that the
+// admin branch answered a different question: not "may this person act on this
+// project" but "is this person an admin". Swapping the claim for a live read
+// would have produced a correct value and still skipped ownership entirely.
+//
+// So the fix reads ownership first and always, and treats admin as an override
+// on top of it. In a diff that is nearly indistinguishable from the seven
+// substitutions elsewhere in the change; these tests are where the difference
+// is written down.
+func TestHackathonIssues_UpdateFields_AdminIsAnOverrideOnOwnership(t *testing.T) {
+	d := testDB(t)
+	app := hackathonSuiteApp(d)
+
+	ownerID := adminSuiteInsertUser(t, d, "contributor")
+	projectID := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: ownerID})
+	hackathonID := hackathonSuiteInsertHackathon(t, d, "issue_prep")
+	hackathonSuiteInsertApplication(t, d, hackathonID, projectID, ownerID)
+	if _, err := d.Pool.Exec(context.Background(), `UPDATE hackathon_project_applications SET status = 'accepted' WHERE hackathon_id = $1 AND project_id = $2`, hackathonID, projectID); err != nil {
+		t.Fatalf("accept application: %v", err)
+	}
+	if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO hackathon_issues (hackathon_id, project_id, issue_number, org_login, status) VALUES ($1, $2, 7, 'org', 'pending')
+`, hackathonID, projectID); err != nil {
+		t.Fatalf("insert hackathon_issues: %v", err)
+	}
+	path := "/projects/" + projectID.String() + "/hackathon-issues/7"
+
+	t.Run("an admin in the database may edit a project they do not own", func(t *testing.T) {
+		admin := adminSuiteInsertUser(t, d, "admin")
+		tok := hackathonSuiteToken(t, admin, "admin")
+		resp, body := notifSuiteDo(t, app, "PUT", path, tok, []byte(`{"acceptance_criteria":"reviewed by staff"}`))
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("status = %d, body = %s - the admin override is intended behaviour and must survive the fix", resp.StatusCode, body)
+		}
+	})
+
+	// The negative control, and the case that separates this from the code it
+	// replaced. Same route, same non-owner, same validly signed token claiming
+	// "admin". The only difference from the subtest above is what users.role
+	// says. The old guard returned true here.
+	t.Run("a token claiming admin over a database contributor is refused", func(t *testing.T) {
+		impostor := adminSuiteInsertUser(t, d, "contributor")
+		tok := hackathonSuiteToken(t, impostor, "admin")
+		resp, body := notifSuiteDo(t, app, "PUT", path, tok, []byte(`{"acceptance_criteria":"should not land"}`))
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Fatalf("status = %d, want 403, body = %s", resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "not_authorized") {
+			t.Errorf("error = %s, want not_authorized", body)
+		}
+		// And it did not land. Asserting the status alone would not catch a
+		// guard that refused the response while the write went through.
+		var got *string
+		if err := d.Pool.QueryRow(context.Background(),
+			`SELECT acceptance_criteria FROM hackathon_issues WHERE project_id = $1 AND issue_number = 7`,
+			projectID).Scan(&got); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if got != nil && *got == "should not land" {
+			t.Error("the refused request wrote anyway")
+		}
+	})
+
+	// Ownership is consulted even for an admin - the specific thing the old
+	// code skipped by returning early.
+	//
+	// This is the only seam where a REAL admin behaves differently before and
+	// after: for a project that exists, an admin was allowed either way, so no
+	// test can tell the two apart. For a project that does not exist, the old
+	// code returned true without looking and fell through to the handler body
+	// (a 404 from the issue lookup); the new code reads the project row first,
+	// finds nothing, and refuses at the guard.
+	//
+	// The assertion is that it refuses, and the code it refuses with says the
+	// authorisation check itself could not be completed. A 404 would arguably
+	// be friendlier to an admin who mistyped a project id - flagged rather
+	// than changed here, because this test is about the ordering, not the
+	// status code, and changing the status is a separate decision.
+	t.Run("an admin acting on a project that does not exist is refused, not waved through", func(t *testing.T) {
+		admin := adminSuiteInsertUser(t, d, "admin")
+		tok := hackathonSuiteToken(t, admin, "admin")
+		missing := "/projects/" + uuid.NewString() + "/hackathon-issues/7"
+		resp, body := notifSuiteDo(t, app, "PUT", missing, tok, []byte(`{"acceptance_criteria":"x"}`))
+		if resp.StatusCode == fiber.StatusOK {
+			t.Fatalf("status = 200 on a project that does not exist; ownership was not consulted")
+		}
+		if !strings.Contains(string(body), "authorization_check_failed") {
+			t.Errorf("error = %s, want authorization_check_failed - the guard should be "+
+				"what stops this, which is how we know the project row is read before the role", body)
+		}
+	})
 }
 
 // --- Config settings: admin-only, and audit-trailed ---

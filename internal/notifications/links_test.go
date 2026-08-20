@@ -20,11 +20,11 @@ import (
 // wrong.
 func TestEveryLinkBuilderTargetsTheDashboardRoute(t *testing.T) {
 	links := map[string]string{
-		"SettingsLink":              SettingsLink(SubtabBilling),
-		"ProjectLink":               ProjectLink("11111111-1111-1111-1111-111111111111"),
-		"IssueLink":                 IssueLink("22222222-2222-2222-2222-222222222222", 99),
-		"MaintainerApplicationLink": MaintainerApplicationLink("33333333-3333-3333-3333-333333333333", 42),
-		"MyApplicationsLink":        MyApplicationsLink(),
+		"SettingsLink":              SettingsLink(SubtabBilling).String(),
+		"ProjectLink":               ProjectLink("11111111-1111-1111-1111-111111111111").String(),
+		"IssueLink":                 IssueLink("22222222-2222-2222-2222-222222222222", 99).String(),
+		"MaintainerApplicationLink": MaintainerApplicationLink("33333333-3333-3333-3333-333333333333", 42).String(),
+		"MyApplicationsLink":        MyApplicationsLink().String(),
 	}
 	for name, got := range links {
 		if !strings.HasPrefix(got, DashboardPath+"?") {
@@ -39,7 +39,7 @@ func TestEveryLinkBuilderTargetsTheDashboardRoute(t *testing.T) {
 // The maintainer link is the one that has already been wrong in production,
 // and the properties that made it wrong are worth naming individually.
 func TestMaintainerApplicationLink_CarriesTheViewAndTheMaintainerTab(t *testing.T) {
-	got := MaintainerApplicationLink("abc", 7)
+	got := MaintainerApplicationLink("abc", 7).String()
 	for _, want := range []string{"tab=maintainers", "view=maintainer", "project=abc", "issue=7"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("MaintainerApplicationLink missing %q: %s", want, got)
@@ -55,19 +55,20 @@ func TestMaintainerApplicationLink_CarriesTheViewAndTheMaintainerTab(t *testing.
 // AbsoluteLink exists so an absolute URL is the same path with a host in
 // front, never a second hand-written copy.
 func TestAbsoluteLink_IsTheSamePathWithAHost(t *testing.T) {
-	path := IssueLink("p1", 5)
+	link := IssueLink("p1", 5)
+	path := link.String()
 
-	if got, want := AbsoluteLink("https://grainlify.com", path), "https://grainlify.com"+path; got != want {
+	if got, want := AbsoluteLink("https://grainlify.com", link), "https://grainlify.com"+path; got != want {
 		t.Errorf("AbsoluteLink = %q, want %q", got, want)
 	}
 	// Trailing slashes and whitespace must not produce a double slash.
-	if got := AbsoluteLink("  https://grainlify.com/  ", path); strings.Contains(got, ".com//") {
+	if got := AbsoluteLink("  https://grainlify.com/  ", link); strings.Contains(got, ".com//") {
 		t.Errorf("AbsoluteLink produced a double slash: %q", got)
 	}
 	// No base, or a non-URL base, degrades to the relative path rather than
 	// emitting something broken like "example.com/dashboard?...".
 	for _, base := range []string{"", "   ", "not-a-url", "grainlify.com"} {
-		if got := AbsoluteLink(base, path); got != path {
+		if got := AbsoluteLink(base, link); got != path {
 			t.Errorf("AbsoluteLink(%q) = %q, want the bare path %q", base, got, path)
 		}
 	}
@@ -75,7 +76,7 @@ func TestAbsoluteLink_IsTheSamePathWithAHost(t *testing.T) {
 
 // A contributor's own application belongs on their board, not on the issue.
 func TestMyApplicationsLink_PointsAtTheContributionsBoard(t *testing.T) {
-	got := MyApplicationsLink()
+	got := MyApplicationsLink().String()
 	if !strings.Contains(got, "tab=contributors") {
 		t.Errorf("MyApplicationsLink = %q, want the contributors tab", got)
 	}

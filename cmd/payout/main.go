@@ -49,6 +49,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/dbguard"
 	"github.com/jagadeesh/grainlify/backend/internal/founding"
 	"github.com/jagadeesh/grainlify/backend/internal/payout"
+	"github.com/jagadeesh/grainlify/backend/internal/settlement"
 )
 
 const usage = `payout — the founding-pool payout sequence
@@ -194,7 +195,7 @@ func cmdPersist(ctx context.Context, d *db.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := founding.Persist(ctx, d.Pool, nil, res); err != nil {
+	if err := settlement.Persist(ctx, d.Pool, res); err != nil {
 		return err
 	}
 	fmt.Printf("SETTLEMENT PERSISTED\n  settlement_id  %s\n", res.SettlementID)

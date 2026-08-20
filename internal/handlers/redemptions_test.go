@@ -20,15 +20,16 @@ import (
 const redemptionsSuiteJWTSecret = "redemptions-suite-test-secret"
 
 func redemptionsSuiteApp(d *db.DB) *fiber.App {
+	requireAdmin := auth.RequireLiveRole(handlers.NewRoleLookup(d), "admin")
 	app := fiber.New()
 	h := handlers.NewRedemptionsHandler(d, nil)
 	app.Post("/redemptions", auth.RequireAuth(redemptionsSuiteJWTSecret), h.Create())
 	app.Get("/redemptions/me", auth.RequireAuth(redemptionsSuiteJWTSecret), h.Mine())
 
 	admin := app.Group("/admin", auth.RequireAuth(redemptionsSuiteJWTSecret))
-	admin.Get("/redemptions", auth.RequireRole("admin"), h.ListAdmin())
-	admin.Post("/redemptions/:id/mark-paid", auth.RequireRole("admin"), h.MarkPaid())
-	admin.Post("/redemptions/:id/reject", auth.RequireRole("admin"), h.Reject())
+	admin.Get("/redemptions", requireAdmin, h.ListAdmin())
+	admin.Post("/redemptions/:id/mark-paid", requireAdmin, h.MarkPaid())
+	admin.Post("/redemptions/:id/reject", requireAdmin, h.Reject())
 	return app
 }
 
