@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // The sponsor key, and the only place it exists in this process.
@@ -76,3 +78,16 @@ func (s *Signer) PublicKeyHex() string {
 // It takes bytes and returns bytes: the key does not leave this type, and no
 // caller can obtain it.
 func (s *Signer) Sign(message []byte) []byte { return ed25519.Sign(s.priv, message) }
+
+// AptosAddress is the sponsor's on-chain address, derived from the key.
+//
+// Derived rather than configured: an address set separately can drift from the
+// key it is supposed to name, and the resulting signature is attributed to an
+// account that did not sign.
+func (s *Signer) AptosAddress() string {
+	pub := s.priv.Public().(ed25519.PublicKey)
+	h := sha3.New256()
+	h.Write(pub)
+	h.Write([]byte{0x00}) // single-Ed25519 scheme
+	return "0x" + hex.EncodeToString(h.Sum(nil))
+}

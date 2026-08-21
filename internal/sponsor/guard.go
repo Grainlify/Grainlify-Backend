@@ -16,6 +16,7 @@ var (
 	ErrAlreadyClaimed = errors.New("already_claimed")
 	ErrRateLimited    = errors.New("rate_limited")
 	ErrLowBalance     = errors.New("sponsor_balance_too_low")
+	ErrSubmitFailed   = errors.New("submission_failed")
 )
 
 // GasOctasPerClaim is the measured cost of one sponsored claim.
