@@ -197,6 +197,58 @@ func Build(ctx context.Context, pool db.DBPool, saltKeyB64 string, s Settlement,
 		}
 	}
 
+	// The ledger, written in the SAME transaction as the root and the leaves.
+	//
+	// Either the root, the leaves and the record of who was owed and got
+	// nothing all land, or none of them do. Written here rather than anywhere
+	// later because this is the moment the answer is true: afterwards it can
+	// only be reconstructed by re-running resolve against address and account
+	// data that has since moved, and somebody registering an address the day
+	// after publication would silently change who "was excluded".
+	//
+	// Two records, deliberately, because they are different kinds of thing:
+	//
+	//   settlement_lines.excluded_reason - history. What tree N said. Never
+	//     touched again, because tree N is immutable and editing its account
+	//     later is editing the account of an event that already happened.
+	//
+	//   settlement_holds - live state. The object that moves: it is created
+	//     here and released by a later settlement that pays it.
+	for _, m := range fresh.Members {
+		if !m.Outcome.Owed() {
+			continue
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE `+settlementLinesTable+`
+			SET excluded_reason = $1
+			WHERE settlement_id = $2 AND user_id = $3`,
+			string(m.Outcome), s.SettlementID, m.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("payout.Build: record exclusion for %s: %w", m.UserID, err)
+		}
+		// An UPDATE matching nothing is the silent failure this whole record
+		// exists to prevent, arriving one layer earlier: the publication would
+		// succeed, the hold would be written, and the historical line would
+		// say this person was never excluded from anything. Refuse instead -
+		// the transaction rolls back and the root is not published.
+		if tag.RowsAffected() != 1 {
+			return nil, fmt.Errorf(
+				"payout.Build: exclusion for %s matched %d settlement lines, want exactly 1; "+
+					"the entitlement has no line to record against and publishing would lose the record",
+				m.UserID, tag.RowsAffected())
+		}
+		// ON CONFLICT DO NOTHING rather than an upsert: a retried publication
+		// of this tree must not create a second hold, and must not overwrite
+		// the amount frozen by the first attempt either.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO settlement_holds (user_id, origin_settlement_id, amount_minor, reason)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (user_id, origin_settlement_id) DO NOTHING`,
+			m.UserID, s.SettlementID, m.AmountMinor.Int64(), string(m.Outcome)); err != nil {
+			return nil, fmt.Errorf("payout.Build: record hold for %s: %w", m.UserID, err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("payout.Build: commit: %w", err)
 	}

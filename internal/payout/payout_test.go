@@ -884,3 +884,165 @@ func TestLiveReader_RefusesWithoutAnEndpoint(t *testing.T) {
 		t.Fatal("a deadline was returned with no node configured")
 	}
 }
+
+// linesFor writes the settlement_lines rows a real settlement would already
+// have, which the fixture above does not.
+//
+// Build records the exclusion against the LINE, and LoadSettlement reads
+// entitlements FROM lines in production - so a test whose settlement has no
+// lines is testing a shape the system cannot produce. Writing them here is what
+// makes the assertions below mean anything.
+func linesFor(t *testing.T, d *db.DB, s Settlement) {
+	t.Helper()
+	ctx := context.Background()
+	for _, e := range s.Entitlements {
+		if _, err := d.Pool.Exec(ctx, `
+			INSERT INTO settlement_lines
+			  (settlement_id, user_id, raw_weight, multiplier, effective_weight,
+			   usdc_amount, amount_minor, ineligible_reason)
+			VALUES ($1,$2,1,1,1,0,$3,NULLIF($4,''))`,
+			s.SettlementID, e.UserID, e.AmountMinor.Int64(), e.IneligibleReason); err != nil {
+			t.Fatalf("settlement line for %s: %v", e.UserID, err)
+		}
+	}
+	t.Cleanup(func() {
+		d.Pool.Exec(ctx, `DELETE FROM settlement_holds WHERE origin_settlement_id=$1`, s.SettlementID)
+		d.Pool.Exec(ctx, `DELETE FROM settlement_lines WHERE settlement_id=$1`, s.SettlementID)
+	})
+}
+
+// The ledger. Somebody who earned an amount and had no address must be written
+// down at publication, because that is the only moment the answer is true:
+// afterwards it can only be recomputed against data that has since moved.
+func TestBuild_RecordsWhoWasOwedAndGotNothing(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", amount: 1_000_000}, // no address: owed, unpayable
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	linesFor(t, d, s)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// History: what tree N said, on the line, never touched again.
+	var reason string
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT COALESCE(excluded_reason,'') FROM settlement_lines WHERE settlement_id=$1 AND user_id=$2`,
+		s.SettlementID, people[1].id).Scan(&reason); err != nil {
+		t.Fatalf("read line: %v", err)
+	}
+	if reason != "no_address" {
+		t.Errorf("excluded_reason = %q, want no_address - /me/payout-readiness filters on this "+
+			"being non-null, so an unwritten value makes excluded_from_published unreachable", reason)
+	}
+
+	// Live state: the object that moves.
+	var amt int64
+	var heldReason string
+	var released *string
+	if err := d.Pool.QueryRow(ctx, `
+		SELECT amount_minor, reason, released_in_settlement_id::text
+		FROM settlement_holds WHERE user_id=$1 AND origin_settlement_id=$2`,
+		people[1].id, s.SettlementID).Scan(&amt, &heldReason, &released); err != nil {
+		t.Fatalf("read hold: %v", err)
+	}
+	if amt != 1_000_000 {
+		t.Errorf("held amount = %d, want 1000000 frozen at creation", amt)
+	}
+	if heldReason != "no_address" {
+		t.Errorf("hold reason = %q", heldReason)
+	}
+	if released != nil {
+		t.Errorf("hold created already released: %v", *released)
+	}
+
+	// The person who WAS paid gets no hold. A hold for somebody holding a leaf
+	// would be paying them twice.
+	var n int
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM settlement_holds WHERE user_id=$1`, people[0].id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("payable member has %d holds, want 0", n)
+	}
+}
+
+// A publication that fails after the root and is retried must not create a
+// second hold, or the person is paid twice when both are released.
+func TestBuild_ARetriedPublicationDoesNotDoubleTheHold(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", amount: 1_000_000},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	linesFor(t, d, s)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, ack); err != nil {
+		t.Fatalf("first Build: %v", err)
+	}
+	// Second attempt fails on the root's own uniqueness, which is the point:
+	// whatever it does, it must not leave two holds behind.
+	_, _ = Build(ctx, d.Pool, saltKey(t), s, ack)
+
+	var n int
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM settlement_holds WHERE user_id=$1 AND origin_settlement_id=$2`,
+		people[1].id, s.SettlementID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("holds after a retry = %d, want exactly 1", n)
+	}
+}
+
+// The silent no-op, refused. An entitlement with no settlement line has nowhere
+// to record its exclusion, and publishing anyway would produce a root whose
+// history says this person was never left out of anything.
+func TestBuild_RefusesWhenAnExclusionHasNoLineToRecordAgainst(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", amount: 1_000_000},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	// Deliberately NO linesFor: the lines are missing.
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
+	if err == nil {
+		t.Fatal("Build succeeded with no line to record the exclusion against; the record would be lost")
+	}
+	if !strings.Contains(err.Error(), "matched 0 settlement lines") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+
+	// And nothing was published.
+	var n int
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM payout_event_roots WHERE settlement_id=$1`, s.SettlementID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("root written despite the refusal: %d rows", n)
+	}
+}
