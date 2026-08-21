@@ -222,9 +222,9 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 
 	var verifiedAt time.Time
 	if err := tx.QueryRow(c.Context(), `
-		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,$2,$3,$4) RETURNING verified_at`,
-		uid, body.ChainID, addr, body.Nonce).Scan(&verifiedAt); err != nil {
+		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce, public_key)
+		VALUES ($1,$2,$3,$4,$5) RETURNING verified_at`,
+		uid, body.ChainID, addr, body.Nonce, body.PublicKey).Scan(&verifiedAt); err != nil {
 		// Two requests can pass the check above concurrently; only one can pass
 		// the index. The loser must still get the sentence rather than a 500,
 		// because from their side nothing distinguishes the two.

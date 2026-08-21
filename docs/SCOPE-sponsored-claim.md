@@ -32,10 +32,36 @@ that drains the account, and every attempt passes shape checking.
 Four defences. **None is droppable**, and they fail in different directions on
 purpose.
 
-### 0. Simulate before submitting — *not in the brief, and I think it outranks (1)*
+### 0. Simulate **before signing** — verified against testnet, not assumed
 
 Aptos exposes `POST /v1/transactions/simulate`. A simulated transaction executes
 against real state and **costs nothing**.
+
+**It runs before the contributor signs.** Measured on the real testnet node
+against a purpose-built escrow:
+
+| what was simulated | result |
+|---|---|
+| a valid claim, **zero signature** | `success=true`, `gas_used=4431`, *Executed successfully* |
+| the same claim, wrong amount | `success=false`, `gas_used=49`, Move abort |
+
+The node checks that the public key matches the account's **authentication key**;
+it does not verify the signature. So what is needed is the contributor's *public
+key*, not a signature — and a first attempt with a zero public key confirms the
+distinction by returning `INVALID_AUTH_KEY`.
+
+That changes what this defence is. It is not a post-hoc refusal after somebody
+signs; it is a **pre-signature check**: the person never sees a wallet prompt for
+an action we already know aborts, and "you have already claimed this" can be said
+before asking them to approve anything.
+
+The public key is stored at registration (migration 088) — we already received
+and verified it, and simply never kept it.
+
+**Fail open.** A simulation we cannot run is not evidence of a bad claim.
+`ErrSimulationUnavailable` is a distinct error from an abort, and a test asserts
+neither satisfies the other, because our own outage refusing somebody their money
+in the contract's voice is the worse failure.
 
 This subsumes the already-claimed case and every other abort: a bad proof, a
 wrong amount, a swept escrow, a deadline passed, an identity hash that does not
@@ -99,7 +125,17 @@ The margin covers gas-price movement (100 octas/unit was observed, not
 guaranteed), the first-claim-per-recipient case being the expensive one, and
 retries.
 
-**Alarm at 1.70 APT.** The basis is *"enough to pay for every remaining unclaimed
+**Two thresholds, not one.**
+
+A **hard floor at 1.70 APT** where the service *stops sponsoring and says so*,
+beneath a **dynamic alarm** above it. The floor exists because an alarm needs a
+recipient, and no channel currently reaches anyone off-site — an alarm nobody
+reads is the deadline problem again: a signal that fires correctly and changes
+nothing. A floor depends on nobody reading anything. It bounds the drain and
+surfaces as a clear message to a contributor, who then tells us. **Failing
+visibly beats alerting into a void.**
+
+**Alarm at 1.70 APT or above.** The basis is *"enough to pay for every remaining unclaimed
 leaf, three times over"* — so the alarm fires while everyone still owed can still
 be paid, rather than when the account is empty and they cannot.
 
@@ -152,12 +188,33 @@ pass on the self-paid path.
   multisig; this is testnet.
 - **The claim UI.** The frontend's half.
 
-## Open question
+## Self-paid: offered, but never as a fallback
 
-**Should a contributor be allowed to claim self-paid if sponsorship refuses?**
-The contract permits it — the fallback is the absence of a restriction — and
-somebody holding APT might prefer it to waiting. My inclination is **no, not
-initially**: it doubles the paths a claim can take, and the population this is
-built for cannot use it anyway. Worth deciding explicitly rather than by
-omission, because "we didn't block it" and "we support it" are different
-promises.
+**Decided.** Self-paid is not a feature to build — it is what happens when the
+client submits through the wallet without routing via the sponsor endpoint. So
+the real question is whether the claim UI ever offers that route, and the answer
+is yes, under three conditions:
+
+1. **Only after the sponsored path has failed.** Never attempted first.
+2. **Chosen explicitly by the person.** Never pre-selected, never automatic,
+   never silent.
+3. **With the cost named**, and the first-claim-is-dearer point stated — the
+   first claim per recipient creates their token store and is the expensive one.
+
+The case that decides it: somebody three days from a deadline, with APT in their
+wallet, and our sponsor account empty. **Refusing them their own money to protect
+a policy is the wrong answer.**
+
+This does not weaken the default path. `LoadSigner` still refuses to boot on an
+absent key rather than silently falling back to unsponsored claims — that is a
+server-side default becoming wrong in production, which is a different thing from
+a person making an informed choice at the moment they are blocked.
+
+## Still to build
+
+The four defences, the key handling and the pre-signature simulation are done.
+**The submission half is not**: signing as fee payer requires BCS encoding of
+`RawTransactionWithData::MultiAgentWithFeePayer` and its signing message, which
+means taking on `github.com/aptos-labs/aptos-go-sdk` (v1.13.0 available, to be
+pinned exactly — a range dependency is what broke the wallet tooling once
+already). The endpoint cannot exist until that lands.
