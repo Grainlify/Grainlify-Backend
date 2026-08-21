@@ -2649,3 +2649,52 @@ button asserted against a control the code could not reach, the writer-guard
 counted a hand-written list rather than the tree, and this. The common root is
 that a check derives its own subject from something the author supplied instead
 of from the system, so it measures the author's belief rather than the code.
+
+## A comment is a weak guard even against its own author
+
+Migration 086 made one live payout address belong to one account, and its own
+comment says what that does to fixtures:
+
+> Fixtures used to hand the same constant to several people, which migration 086
+> now forbids: one live address belongs to one account. That is the index doing
+> its job, and the fixture was relying on something the system no longer permits.
+
+A fixture in a second package went on using two fixed address constants. The
+tests passed against a fresh database and collided permanently on any database
+where a run had failed before its cleanup registered — the exact hazard, in the
+exact form, written down by somebody who had just fixed it elsewhere.
+
+The warning existed. It was in the repository. It had been read — the fix it
+describes was applied in one package the same day. And the second package was
+not checked, because a comment records a hazard where the hazard *was*, not
+where the reader is.
+
+### The stronger claim
+
+The usual lesson is "comments do not enforce anything", which invites the reply
+that a careful reader will still act on them. This is worse than that:
+
+**The person who documents a hazard is not reliably guarded by their own
+documentation.** Writing it down feels like discharging it. The note is
+addressed to a future stranger, and the author is not who they are picturing
+when they write it.
+
+So a comment is a good explanation and a poor control, *including* for the
+person who wrote it, minutes later, in a file they did not think of as related.
+
+### The check
+
+Where a hazard is enumerable, ask the system rather than the reader:
+
+```sql
+-- every column a repeated fixture value could collide on
+SELECT a.attname FROM pg_index i ... WHERE i.indisunique
+```
+
+Then sweep the tree against that set. Thirty-eight columns and one glob answers
+"does this hazard exist anywhere else" in a way that no number of careful
+readers does — and it answers it for packages nobody thought to look at, which
+is where the second instance was.
+
+Keep the comment. It explains *why* the check exists, which the check cannot say
+for itself. Just do not let writing it feel like having handled it.
