@@ -1,0 +1,52 @@
+-- Where to reach somebody about a payout, if they choose to tell us.
+--
+-- # Why this is not users.email
+--
+-- A distinct name is the guard. `users.email` is the general-purpose address a
+-- reader reaches for when they want "the user's email", and it is non-null for
+-- zero accounts precisely because persisting one was never decided. Anything
+-- that wants to email somebody has to type a name that says what it is for,
+-- which is what stops this becoming a marketing list by accident rather than by
+-- a comment asking it not to.
+--
+-- Read only through payoutContactFor() in internal/handlers/payout_contact.go,
+-- asserted by TestPayoutContactColumnHasOneReader in that package.
+--
+-- # Where it is asked for, and why there
+--
+-- The payout-address screen, after an address is registered. That is the one
+-- moment somebody is doing something consequential with money and understands
+-- why we might need to reach them. Not signup, not general settings: an address
+-- collected in either of those places is collected from somebody who was not
+-- thinking about payouts.
+--
+-- Optional. Declining changes nothing - every in-app state is identical, and
+-- TestDeclining* asserts that rather than the reader trusting this sentence.
+--
+-- # Removal
+--
+-- The self-serve control on the payout screen is the removal mechanism, and it
+-- is the whole of it.
+--
+-- THERE IS NO ACCOUNT-DELETION PATH TO ATTACH TO. Not for this column and not
+-- for any other: the API has no DELETE routes at all, and a comment in
+-- payout/types.go describing an account-deletion tombstone describes machinery
+-- that does not exist (#532, #533). Do not go looking for it - two people
+-- already have.
+--
+-- So this is the only column here a person can remove themselves, immediately,
+-- without asking anybody. That is a stronger position than the KYC blob, the
+-- OAuth token or the contact handles, none of which a person can remove at all
+-- - which is why collecting it does not worsen the position, and why it was not
+-- blocked behind #532.
+--
+-- # Delivery records, when they arrive
+--
+-- A send path acquires a delivery record for retries and debugging, and that
+-- record is the natural place to put the address. It must not be.
+--
+-- DELIVERY RECORDS KEY ON user_id AND NEVER STORE THE ADDRESS. Otherwise
+-- clearing this column stops being removal: the address survives in a table
+-- nobody thinks of as holding personal data, and the self-serve control above
+-- becomes a lie the first time somebody debugs a bounce.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS payout_contact_email TEXT;
