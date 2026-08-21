@@ -1,6 +1,13 @@
 # Scope: payout HTTP endpoints
 
-Investigation only. No code written.
+**Status: built and live.** Written as an investigation before any code existed;
+all six routes are now deployed and behind `RequireAuth`.
+
+**Audited against the handlers** — every documented request field, response
+field and error code checked against `payout_address.go` and
+`payout_claims.go`. `TestPayoutScopeDocMatchesTheHandlers` keeps it that way:
+this drift was found by an integrator rather than by anyone reading the
+document.
 
 **Routes**
 
@@ -83,10 +90,29 @@ string and a row containing another.
   "address": "0x1b41…22c9",
   "public_key": "0x…",
   "signature": "0x…",
-  "nonce": "8f2c…",
-  "scheme": "ed25519"
+  "nonce": "8f2c…"
 }
 ```
+
+**There is no `scheme` field.** This block used to carry `"scheme": "ed25519"`,
+and the server has never bound it — `payout_address.go` binds `chain_id`,
+`address`, `public_key`, `signature` and `nonce`, and nothing else. Scheme is
+*derived* from the key: verification tries Ed25519 and SingleKey and accepts
+whichever reproduces the claimed address.
+
+A silently ignored field is worse than a missing one, and it is worth being
+exact about why. An integrator who sends it believes they selected something.
+They did not, and nothing tells them so. If they ever send a value other than
+`ed25519` the server does not reject the request — it ignores the field and
+derives from shape anyway, so the outcome is either right by accident or an
+`unsupported_scheme` error that reads as *"you asked for a scheme we do not
+support"* when what it means is *"your key is not a 32-byte Ed25519 key"*. The
+error names the wrong cause, and the integrator debugs the parameter they chose
+rather than the key they hold.
+
+Found by an integrator building against this document, not by anyone reading it —
+which is why `TestPayoutScopeDocMatchesTheHandlers` now fails if a field is
+documented that no handler mentions.
 → `201`
 ```json
 {
