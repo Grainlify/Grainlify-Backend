@@ -1869,6 +1869,82 @@ And the general form, of which this is one instance: **name errors after causes,
 not after detectors.** "Timeout", "unreachable", "parse failed", "non-200" all
 describe the observer. "The escrow does not exist" describes the world.
 
+## A milestone that read as a deployment
+
+> **A milestone proves a thing CAN happen. Only a deploy proves it DOES.**
+> Anything demonstrated by a local script needs that written beside it, or it
+> reads as shipped.
+
+The best result in the payout workstream was a sponsored claim on testnet: an
+account with `sequence_number: 0` — its first transaction ever — received USDC
+and paid **zero** gas, with a `fee_payer_signature` from our sponsor. Recorded,
+linked, verified against the chain.
+
+The fee payer was a laptop. `tools/wallet-check/serve.js`, listening on
+`localhost:8899`, reading a testnet key out of a gitignored config. **No
+production code pays anybody's gas**, and a contributor clicking Claim goes
+nowhere near that script.
+
+Nobody noticed for weeks.
+
+### The part worth studying: every sentence written about it was true
+
+Two things were documented carefully, and both are correct:
+
+> sponsorship is entirely an AIP-39 **transaction-layer** concern — the contract
+> cannot tell who paid
+
+> the self-paid fallback is **the absence of a restriction**, not code, so it
+> cannot be deleted
+
+What was never written anywhere is that **nothing in production implements the
+transaction layer.**
+
+So there is no false sentence to find. Each statement explains why the *contract*
+is silent about gas, and neither says who is not silent about it — and a reader
+assembling them concludes *sponsorship is handled*, which is the conclusion the
+author also held. **A gap between two true statements is invisible in a way a
+wrong statement is not**: review catches wrong sentences, and there was nothing
+to catch.
+
+The milestone then did the rest. A demonstration that something *can* happen is
+read as evidence that it *does*, because the demonstration is concrete — a real
+hash, a real balance change — and the absence is abstract.
+
+### Why testnet made it worse
+
+APT is free from a faucet. So the self-paid path **works** in every rehearsal: a
+tester tops up, claims, and it succeeds. The rehearsal passes while exercising a
+path no real deployment uses, and the faucet is precisely the thing that will not
+be there. A green testnet run was evidence about the faucet.
+
+This generalises past gas: **any resource that is free in the test environment and
+scarce in production turns a rehearsal into a test of the environment.**
+
+### The checks
+
+**Write the deployment status next to the demonstration, in the same block.** Not
+in a status doc, not in an issue — beside the transaction hash, where the
+impressive thing is:
+
+> Sponsored claim: `0xe33e…` — **fee payer was `tools/wallet-check/serve.js`,
+> a local script. No production sponsor exists.**
+
+**For any capability, ask which deployed artifact provides it.** Name the file
+that ships. If the answer is a script, a test, or a tool directory, the
+capability is demonstrated and not shipped, and those are different words on
+purpose.
+
+**When two true statements sit next to each other, ask what a reader will
+conclude from both.** The conclusion is not in either sentence and nothing
+reviews it. Here: "the contract can't tell who pays" plus "self-paid needs no
+code" reads as "gas is handled", which neither says.
+
+**And grep for the mechanism, not the vocabulary.** Searching `sponsor` finds
+event sponsors funding prize pools in the backend and `fund`'s signer in the Move
+module — both real, neither relevant. The question is not "does the word appear"
+but "which deployed code signs as fee payer", and the honest answer was: none.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
