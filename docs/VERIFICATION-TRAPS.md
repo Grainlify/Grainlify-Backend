@@ -2823,3 +2823,67 @@ wrong.**
 Statements about intent, rationale and consequence need no identifier; they are
 not claims about code. It is specifically the sentence of the form *"X happens
 over there"* that has to say where.
+
+## A demonstrated capability read as a shipped one
+
+A sponsored claim landed on Aptos testnet on 18 August: a real transaction, a
+real `fee_payer_signature`, `sequence_number: 0`, the claimant's first-ever
+transaction, full amount received, nothing paid. It was the headline result of
+the milestone.
+
+Nothing in production implements it. There is no fee-payer service, no sponsor
+account handling, and no endpoint that co-signs a claim. A contributor clicking
+Claim pays their own gas.
+
+Two people built on the belief that sponsorship was live. One wrote specimen
+claim-screen copy promising "we cover the network cost". The other justified a
+fail-open Claim button partly on the grounds that gas was sponsored.
+
+### Nothing anywhere was false
+
+This is what separates it from every other entry in this file. There is no
+incorrect statement to find:
+
+- The milestone document describes the sponsored claim **accurately**. It
+  happened, and the transaction hash resolves.
+- Sponsorship is a **transaction-layer** concern, and it was described as one.
+  The on-chain module neither knows nor cares who pays the fee, so nothing in
+  the contract's documentation is wrong either.
+- The self-paid path is the **absence of a restriction**, not a decision. Nobody
+  wrote "contributors pay their own gas", because nobody chose it — it is simply
+  what happens when no fee payer is attached.
+
+So every document stayed true, and a false conclusion was available to every
+reader. The gap was not in what was written but in what nobody thought to write:
+**that the transaction layer had no production implementation.** Absence has no
+natural home in a document about a presence.
+
+### Why "it works" is the most dangerous phrase in a milestone
+
+A demonstration answers *can this happen*. A deploy answers *does this happen*.
+The two are reported in the same words, celebrated in the same message, and the
+first is very often produced by tooling that will not exist on the real path — a
+script, a local signer, a hand-built transaction, a key on somebody's laptop.
+
+**A milestone proves a thing CAN happen. Only a deploy proves it DOES.**
+
+### The check
+
+When a capability is demonstrated, record the demonstration and the deployment
+state **in the same sentence**, because they will otherwise be read as one fact:
+
+```
+Sponsored claim: WORKING on testnet (0xe33e61b8…), via a local signer.
+NOT DEPLOYED - no production fee payer exists. See #536.
+```
+
+And for anything a demonstration relies on, ask what carried it: if the answer is
+a script, a laptop key, or a hand-assembled call, that thing is the gap, and it
+is invisible from the result.
+
+The general habit: **for any capability you believe the system has, name the
+code path that provides it in production.** If you cannot, you have read a
+demonstration as a deployment — which is the same failure as the
+machinery-comment entry, arriving from the opposite direction. There, prose
+described machinery that did not exist. Here, machinery existed and its
+production absence was described by nobody.
