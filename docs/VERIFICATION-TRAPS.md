@@ -2950,3 +2950,54 @@ claimant pays" but "the claimant pays until #536 ships".
 
 The version without the condition is not more concise. It is the same sentence
 with the expiry deleted, and the deletion is invisible.
+
+## A forbidden-phrase list matches the sentence denying the thing
+
+A test asserted that no claim-deadline message states a date on which something
+happens, because nothing does — the sweep needs an admin signer, not a clock. It
+banned a list of phrases, one of which was `"automatically on"`.
+
+It failed on the copy that was already right:
+
+> After the window closes we may return unclaimed payouts to Grainlify. **Nothing
+> happens automatically on that date**, and if you are late you can ask us to
+> extend it.
+
+The sentence denies the event. The substring cannot see that.
+
+### Why this is worth a line
+
+**Negation is invisible to a substring**, so a forbidden-phrase list flags the
+text most carefully written to avoid the thing it is banning. The better the copy,
+the more likely it names the hazard in order to deny it — so the check is
+biased against exactly the sentences you want.
+
+The failure mode is not the false positive. It is what the false positive
+provokes: the quickest fix is to reword the *copy* until the test passes, which
+means a test with a bad rule silently edits the product. Here that would have
+removed the sentence telling people the date is not a guillotine.
+
+### The general form
+
+**A phrase is only bannable if it asserts the thing regardless of what precedes
+it.**
+
+```go
+// bad  - "Nothing happens automatically on that date" trips this
+"automatically on"
+
+// good - assertions whatever comes before them
+"will be returned on"
+"is returned on"
+"funds are returned on"
+```
+
+Same shape as the enumerated-inputs entry, pointed at language rather than
+files: the check tests the strings someone thought of, not the property. Where
+the property matters more than the phrasing — and in copy it usually does — the
+honest options are to assert the *presence* of the true sentence rather than the
+absence of false ones, or to accept that the list is a smoke alarm and read the
+copy.
+
+When such a test fails, the first question is whether the copy is wrong or the
+rule is. It was the rule both times it happened here.
