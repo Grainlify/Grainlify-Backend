@@ -55,6 +55,22 @@ const (
 	// been reopened.
 	TypeKYCReset Type = "kyc_reset"
 
+	// TypeKYCStatusChanged carries every identity-verification decision that
+	// arrives from the provider - approved, refused, sent to review, expired.
+	//
+	// One type for every direction, following TypeSocialFollowCompleted and
+	// for the same reason it gives: a status that changes silently and
+	// surfaces only later is how a defensible decision comes to look
+	// arbitrary. Verification is stronger still, because it gates entry to a
+	// founding wave, so somebody losing it and not being told finds out by
+	// noticing.
+	//
+	// Fires on a TRANSITION, never on a write. Both paths that write a status
+	// re-observe it constantly - the reconciler walks 25 sessions every five
+	// minutes - so notifying per write would be a notification storm arriving
+	// on the page built for these messages.
+	TypeKYCStatusChanged Type = "kyc_status_changed"
+
 	// TypeFoundingPosition tells somebody where they stand in the Founding
 	// Contributor Pool: that they hold a position, that it is permanent, and
 	// what it still needs.
@@ -108,6 +124,7 @@ var AllTypes = []Type{
 	TypeReferralCompleted,
 	TypeSocialFollowCompleted,
 	TypeKYCReset,
+	TypeKYCStatusChanged,
 	TypeFoundingPosition,
 	TypeRedemptionPaid,
 	TypeRedemptionRejected,

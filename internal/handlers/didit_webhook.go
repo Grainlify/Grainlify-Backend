@@ -182,42 +182,25 @@ WHERE kyc_session_id = $1
 		// Store decision data as JSONB (includes both Decision and Data)
 		decisionJSON, _ := json.Marshal(decisionData)
 
-		// Capture the pre-update status so a duplicate "verified" delivery
-		// (Didit may redeliver webhooks) doesn't re-trigger referral
-		// completion - only a genuine not-verified -> verified transition
-		// should.
-		var previousStatus string
-		_ = h.db.Pool.QueryRow(c.Context(), `SELECT COALESCE(kyc_status, '') FROM users WHERE id = $1`, userID).Scan(&previousStatus)
-
-		// Update user KYC status.
+		// One shared statement for both sync paths - see applyKYCStatus.
 		//
-		// kyc_verified_at is stamped only on the TRANSITION into verified, not
-		// on every observation of it. The unqualified kyc_status inside the
-		// SET expression is the row's pre-update value, so this asks "were
-		// they already verified before this delivery?" atomically, without
-		// depending on the previousStatus read above (which is a separate
-		// statement and therefore racy).
-		//
-		// It used to be `CASE WHEN $1 = 'verified' THEN now()`, which re-dated
-		// somebody every time a redelivery or a poll observed them still
-		// verified. Every one of the 37 founding members ended up with a
-		// kyc_verified_at LATER than the wave assignment that verification
-		// caused - impossible, and by up to 26 hours. The column looked like
-		// the authoritative answer to "when did this person verify" and was
-		// the one thing that could not answer it.
-		_, err = h.db.Pool.Exec(c.Context(), `
-UPDATE users
-SET kyc_status = $1,
-    kyc_data = $2,
-    kyc_verified_at = CASE
-      WHEN $1 = 'verified' AND kyc_status IS DISTINCT FROM 'verified' THEN now()
-      ELSE kyc_verified_at
-    END,
-    updated_at = now()
-WHERE id = $3
-`, kycStatus, decisionJSON, userID)
+		// This used to read the previous status in a separate SELECT and said
+		// so itself: "a separate statement and therefore racy". That was
+		// tolerable while the value only guarded referral completion. It is
+		// not tolerable now that a contributor-facing notification hangs off
+		// it, because a stale previous value either misses the message or
+		// sends it twice when Didit redelivers.
+		previousStatus, changed, err := applyKYCStatus(c.Context(), h.db, userID, kycStatus, decisionJSON)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "kyc_update_failed"})
+		}
+
+		// Told on every transition, in both directions. Somebody who was
+		// verified and no longer is must not find out by noticing, and a
+		// redelivery of a status they already have must not tell them twice -
+		// which is why this is gated on `changed` rather than on the write.
+		if changed {
+			notifyKYCStatusChange(c.Context(), h.notify, userID, previousStatus, kycStatus)
 		}
 
 		if kycStatus == "verified" && previousStatus != "verified" {
