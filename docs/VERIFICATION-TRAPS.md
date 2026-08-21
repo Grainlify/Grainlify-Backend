@@ -2762,3 +2762,64 @@ plainly that it does **not** establish the classification, and names the tests
 that do. A guard with an honest scope is worth more than one with an
 aspirational one, because the honest scope tells the next person what still
 needs covering.
+
+## A comment describing machinery that does not name it
+
+```go
+// Reachable by design rather than only by corruption: account deletion
+// leaves an anonymised tombstone - the users row is retained with
+// identifying columns nulled and github_accounts is hard deleted along
+// with its token
+```
+
+There is no account deletion. No route, no handler, nothing that nulls those
+columns. The sentence describes a mechanism that has never existed.
+
+Two people read it in one day and both concluded the path was there. One scoped
+work that depended on wiring into it. The absence was found only by going to
+look for the function to call.
+
+### Why this is a different failure from the comment-as-guard entry
+
+Those comments describe **hazards**, and fail because the author does not heed
+their own warning. These describe **mechanisms**, and fail because *the reader
+cannot tell an aspiration from a fact.*
+
+Prose about machinery has no failure mode. It does not go red, it does not stop
+compiling, and it reads exactly the same whether the machinery was built,
+planned, removed, or renamed. It ages into documentation by sitting still.
+
+Worse, it actively hides the gap it creates. The absence of account deletion was
+harder to notice *because* something in the codebase described it — a search for
+"account deletion" returns a confident paragraph, which is what somebody
+checking would find and stop at.
+
+### The rule
+
+**A comment describing machinery must name it: a function, a file, or a route.**
+
+```go
+// bad   - unfalsifiable prose that reads as documentation
+// account deletion leaves an anonymised tombstone
+
+// good  - a claim that fails a grep the day it stops being true
+// DeleteAccount in handlers/account.go leaves an anonymised tombstone
+```
+
+The named version can be checked in five seconds and **dies honestly**: rename
+the function, delete the file, never write it, and the comment is visibly wrong
+to the next person who looks. The unnamed version survives all four.
+
+This is the same move as globbing rather than enumerating, pointed at prose: tie
+the claim to something the system can contradict.
+
+### The check
+
+For any comment asserting behaviour exists elsewhere, grep the identifier it
+names. If it names none, that is the finding — not because the comment is
+necessarily wrong, but because **nothing will ever tell you when it becomes
+wrong.**
+
+Statements about intent, rationale and consequence need no identifier; they are
+not claims about code. It is specifically the sentence of the form *"X happens
+over there"* that has to say where.
