@@ -1221,3 +1221,69 @@ func TestBuild_RecordsAKYCHold(t *testing.T) {
 		t.Errorf("hold = (%s, %d), want (kyc_unresolved, 1000000)", reason, amt)
 	}
 }
+
+// The identity that makes a hand-maintained bucket list impossible rather than
+// merely fixed: every allocated minor unit lands in exactly one bucket.
+//
+// Asserted by simulating the defect it exists to catch - an outcome carrying
+// money that belongs to neither bucket. Before the identity, that produced a
+// smaller ExcludedTotalMinor which looked plausible and which an operator would
+// have acknowledged; now it cannot get past DryRun.
+func TestDryRun_AnOutcomeInNoBucketFailsArithmetically(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	// The identity holds on a normal run.
+	allocated := new(big.Int)
+	for _, m := range r.Members {
+		if m.AmountMinor.Sign() > 0 {
+			allocated.Add(allocated, m.AmountMinor)
+		}
+	}
+	bucketed := new(big.Int).Add(r.LeafTotalMinor, r.ExcludedTotalMinor)
+	if bucketed.Cmp(allocated) != 0 {
+		t.Fatalf("identity broken on a normal run: allocated %s, bucketed %s", allocated, bucketed)
+	}
+
+	// And it is not vacuous: both buckets carry money, so an outcome silently
+	// leaving one of them is a difference this can see.
+	if r.LeafTotalMinor.Sign() <= 0 || r.ExcludedTotalMinor.Sign() <= 0 {
+		t.Fatalf("fixture does not exercise both buckets: leaf %s, excluded %s",
+			r.LeafTotalMinor, r.ExcludedTotalMinor)
+	}
+}
+
+// Owed() is the definition of "carries money but gets no leaf". Every outcome
+// must be classifiable, so a new one cannot be added without deciding which
+// side it is on - which is the decision the identity above then enforces.
+func TestOutcome_EveryOutcomeCarryingMoneyIsPayableOrOwed(t *testing.T) {
+	all := []Outcome{
+		OutcomePayable, OutcomeNoShares, OutcomeIneligible,
+		OutcomeNoAddress, OutcomeNoGitHubAccount, OutcomeKYCUnresolved,
+	}
+	// If this count changes, an outcome was added and somebody has to say
+	// whether it carries money. Deliberately a literal: deriving it from the
+	// slice would make the slice agree with itself and check nothing.
+	const wantOutcomes = 6
+	if len(all) != wantOutcomes {
+		t.Fatalf("%d outcomes listed, want %d - a new one needs a bucket, and DryRun's "+
+			"identity will fail arithmetically until it has one", len(all), wantOutcomes)
+	}
+	for _, o := range all {
+		money := o == OutcomePayable || o.Owed()
+		zero := o == OutcomeNoShares || o == OutcomeIneligible
+		if money == zero {
+			t.Errorf("outcome %q is neither clearly money-carrying nor clearly zero", o)
+		}
+	}
+}

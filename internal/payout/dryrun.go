@@ -90,6 +90,44 @@ func DryRun(ctx context.Context, pool db.DBPool, s Settlement) (*Report, error) 
 			r.IneligibleCount++
 		}
 	}
+	// THE IDENTITY: every allocated minor unit lands in exactly one bucket.
+	//
+	// Deriving the excluded total from Owed() above fixes one instance. This
+	// makes the class impossible, and the class is worth the arithmetic because
+	// of where it lands.
+	//
+	// The acknowledgement gate's entire value is that a human reads a number.
+	// An outcome missing from these buckets does not break the gate - it shows
+	// a SMALLER total, which looks perfectly plausible, and the operator
+	// acknowledges it. Nothing fails, nothing is logged, nobody is alerted, and
+	// the money held for that person exists in no total anyone read. It is the
+	// worst possible place for a set maintained by hand: the failure is a
+	// number that is wrong in the quiet direction.
+	//
+	// So a seventh outcome belonging to neither bucket fails HERE,
+	// arithmetically and immediately, without anyone having remembered to write
+	// a test for it. Same move as one shared date formatter: two things that
+	// agree became a shape that cannot disagree.
+	//
+	// Why the identity holds by construction, and is therefore safe to assert:
+	// Resolve only assigns NoShares or Ineligible when the amount is <= 0, so
+	// every member carrying a positive amount is Payable or Owed(). A new
+	// outcome that is neither - or an old one that stops being counted - breaks
+	// this sum the moment it is reached.
+	allocated := new(big.Int)
+	for _, m := range members {
+		if m.AmountMinor != nil && m.AmountMinor.Sign() > 0 {
+			allocated.Add(allocated, m.AmountMinor)
+		}
+	}
+	if bucketed := new(big.Int).Add(r.LeafTotalMinor, r.ExcludedTotalMinor); bucketed.Cmp(allocated) != 0 {
+		return nil, fmt.Errorf(
+			"%w: %s minor units are allocated but %s are accounted for (leaf %s + excluded %s); "+
+				"an outcome carrying money belongs to neither bucket, so the total an operator "+
+				"acknowledges before publication understates what was owed",
+			ErrDoesNotReconcile, allocated, bucketed, r.LeafTotalMinor, r.ExcludedTotalMinor)
+	}
+
 	if s.PoolMinor != nil {
 		r.ResidueMinor.Sub(s.PoolMinor, r.LeafTotalMinor)
 	}
