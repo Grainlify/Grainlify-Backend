@@ -2038,6 +2038,76 @@ opinion from the same source.
 wrong.** Find something neither of you touched. If nothing like that exists,
 say so rather than picking a winner.
 
+## A true answer to the question you asked, and a false one to the question you meant
+
+> **A migrated representation makes the old query correct and useless at the same
+> time.** The API is not lying; it is answering something else.
+
+The sponsorship path needed the sponsor's APT balance, to refuse rather than
+drain the account. The obvious read:
+
+```
+GET /v1/accounts/{addr}/resource/0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>
+→ 404 {"message":"Resource not found by Address(0x1b41…)"}
+```
+
+That account holds **9.77 APT**. APT has migrated to a fungible-asset store, so
+the `CoinStore` resource genuinely does not exist — and the question asked was
+*"does this coin resource exist"*, which was answered correctly. The question
+meant was *"does this account hold APT"*.
+
+Nothing errored in a way that pointed anywhere useful. A 404 for a resource is an
+ordinary answer.
+
+### The direction is what makes it dangerous
+
+The balance read is on a **fail-closed** path: too little balance means refuse to
+sponsor. So a false zero refuses **every** claim, for everyone, while the money
+sits in the account untouched.
+
+And the symptom points at the wrong thing. "Sponsorship is refusing because the
+sponsor looks broke" reads as a funding problem, not a query problem — **we would
+have topped the account up and watched nothing change.** The investigation would
+have started at the account and never reached the URL.
+
+### The general form, which is the reusable part
+
+> **A value that means "none" must not be reachable by a path that means "I
+> couldn't tell."**
+
+Zero, empty, false and *absent* are answers. "The lookup failed", "the shape
+changed", "I asked the wrong endpoint" are not answers, and collapsing the second
+set into the first is how a system reports a confident wrong number. It is the
+same family as an empty list meaning two opposite things, and as a filter on a
+field nobody populates — each is a not-knowing wearing the costume of a knowing.
+
+The test that holds it:
+
+```go
+// A failed read must ERROR, never return a bare zero.
+for _, tc := range []struct{ status int; body string }{
+    {404, `{"message":"Resource not found"}`},
+    {200, `not-a-number`},
+    {503, `upstream down`},
+} { /* every one must produce an error */ }
+```
+
+### The checks
+
+**When a read returns "nothing", ask whether the thing is absent or the question
+is stale.** Migrations, renames and representation changes all turn a working
+query into a correct-and-irrelevant one, and none of them break it loudly.
+
+**Check a read against a value you know independently.** The account had a
+balance visible in a block explorer and in the CLI. One comparison against
+something outside the code path settles in seconds what reasoning about the API
+will not settle at all — the oracle rule, applied to a query rather than a
+vector.
+
+**On a fail-closed path, treat "I could not read it" as its own outcome.** Not as
+the safe value. The safe value is a decision; not knowing is a different state and
+usually needs a different sentence.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
