@@ -100,6 +100,75 @@ jobs:
           fi
           echo "Migrations added by this branch collide with nothing."
 
+      # A migration numbered at or below main's highest NEVER RUNS, and nothing
+      # says so.
+      #
+      # golang-migrate records a single version. If PR A adds 000090 and merges,
+      # and PR B adds 000089 and merges after, the recorded version is already
+      # 90: migrate.Up applies nothing, exits 0, and logs "migrations up to date,
+      # no changes needed". There is no error at deploy, no failed migration and
+      # no log line. The first symptom is a column the code expects and the
+      # database does not have, found by whatever touches it first - in
+      # production, at a moment nobody chose.
+      #
+      # That is the entire reason this check earns its place: the failure it
+      # prevents makes no sound at all. It cannot fix ordering; it turns a silent
+      # production failure into a red PR, which is the whole job.
+      #
+      # WHAT IT CANNOT CATCH, said here so a green tick is not read as
+      # "migration ordering is handled": two open PRs that each add the SAME
+      # number. Both pass individually against main's highest, and they collide
+      # only when the second merges. That is invisible from one PR's view of the
+      # world, so it needs saying rather than solving. The separate
+      # collision-across-branches check above is what covers that case, and only
+      # while both branches are pushed.
+      - name: Migrations are numbered above main
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*'
+
+          # Fails CLOSED. "I could not check" and "nothing to report" must not
+          # look alike - the collision check above exits 0 on a missing merge
+          # base, and that is the shape this deliberately does not copy.
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::cannot resolve origin/main, so migration numbering cannot be checked; refusing to pass"
+            exit 1
+          fi
+
+          version_of() { basename "$1" .up.sql | cut -d_ -f1; }
+
+          main_max=$(git ls-tree --name-only origin/main migrations/ \
+                       | grep -E '\.up\.sql$' | while read -r f; do version_of "$f"; done \
+                       | sort -n | tail -1)
+          [ -z "$main_max" ] && main_max=0
+
+          # Set difference, not merge-base: "on HEAD and not on origin/main" is
+          # the same answer on a merge ref as on a branch tip, and needs no
+          # common ancestor to compute. The collision check's merge-base is what
+          # forces its fail-open.
+          git ls-tree --name-only origin/main migrations/ | grep -E '\.up\.sql$' | sort > /tmp/main_migrations
+          git ls-tree --name-only HEAD migrations/ | grep -E '\.up\.sql$' | sort > /tmp/head_migrations
+          added=$(comm -13 /tmp/main_migrations /tmp/head_migrations)
+
+          if [ -z "$added" ]; then
+            echo "This branch adds no migrations; main is at $main_max."
+            exit 0
+          fi
+
+          fail=0
+          for f in $added; do
+            v=$(version_of "$f")
+            if [ "$((10#$v))" -le "$((10#$main_max))" ]; then
+              echo "::error file=$f::$v is at or below main's highest ($main_max), so it would never run: golang-migrate records the higher version and applies nothing, silently"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Renumber above $main_max and force-push. Merging as-is produces a database missing a migration the code expects, with no error anywhere."
+            exit 1
+          fi
+          echo "Every migration this branch adds is numbered above main's highest ($main_max)."
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
