@@ -1718,6 +1718,93 @@ assertion shared an assumption. Here, a test failed because setup violated an
 invariant the assertion depended on. **Both are the fixture, not the code** — and
 in both, the reported result pointed at the wrong thing.
 
+## A check that enumerates its own scope
+
+> **A check that decides for itself what to look at answers a narrower question
+> than the one it was asked — and reports the narrow answer in the wide
+> question's words.**
+
+Four instances in one day, four different mechanisms, one failure:
+
+| The check | How it chose its scope | What it missed |
+|---|---|---|
+| Structural writer check | a hand-written list of files | a file added after the list was written |
+| Scope-doc check | concatenates every payout handler into one blob | *which* handler a key belongs to — a key documented under the wrong endpoint passes |
+| Mutation harness | `cp resolve.go digest.go build.go "$BAK/"` | `serve.go`, added later: mutated, never restored, five deep by the end |
+| Mutation harness, again | `go test -run TestRegister_` | a test written after the filter, so a mutation its own suite would have caught reported SURVIVED |
+
+None of them errored. Each reported a clean result in language that sounded
+total — "no violations", "the document matches the handlers", "all mutations
+killed" — while having examined a subset it selected itself.
+
+**The scope is an input, and it is the input nobody validates.** Enormous care
+goes into the assertion; the list of things the assertion runs over is written
+once and never revisited, because it does not look like part of the logic.
+
+### Why it recurs even once you know about it
+
+The four above were fixed one at a time, hours apart, by somebody who had already
+written up two of them. Each presented as a different problem — a stale file
+list, a grep too coarse, a backup that missed a file, a `-run` filter — and the
+shared shape is only visible when they are put in a column together. That is the
+argument for naming the class rather than the instances: the fifth will not look
+like a file list either.
+
+### The checks
+
+**Prefer a glob, a marker search, or a query to a list.** `cp ./*.go` cannot go
+stale; `cp a.go b.go c.go` goes stale the moment someone adds `d.go`.
+
+**Assert the input before trusting the output.** A check that examined zero files
+finds zero problems, which is indistinguishable from a clean tree. Count what you
+scanned and fail on an implausible count.
+
+**Say what was excluded, in the result.** If a check bounds its scope on purpose,
+that bound belongs in the output next to the verdict — "42 files, 0 violations"
+rather than "0 violations". A number the reader can sanity-check is what turns a
+silent narrowing into a visible one.
+
+**And for a harness that filters tests: widen the filter whenever you add a test
+to the file it guards.** Better, do not filter at all — run the package.
+
+## A constraint added late audits the tests that were written without it
+
+> **Adding a correctness constraint does not only prevent bad data going
+> forward. It tells you which of your existing tests were relying on its
+> absence.** That is a reason to add constraints early which has nothing to do
+> with data integrity.
+
+A unique index was added: one live payout address belongs to one account. The
+production table held a single row, so it applied cleanly and changed nothing
+about the data.
+
+It broke the test suite immediately.
+
+One fixture had been handing the same constant address to three different users.
+Another two packages shared address constants and ran concurrently against one
+database. Both had been passing for weeks — not because they were right, but
+because **nothing had ever asserted the property they were violating.** The
+constraint did not introduce the problem; it revealed that the tests had been
+describing a world the system was about to stop permitting.
+
+The corollary is uncomfortable and worth stating plainly: for as long as a rule
+is unenforced, **passing tests are evidence that the rule is unenforced, not
+evidence that the code respects it.** Every fixture written in that window is
+free to depend on the gap, and none of them will announce that they do.
+
+### The check
+
+**When a constraint is added and tests fail, read the failures as an audit
+before treating them as breakage.** Each one names a place that was relying on
+the absence. The instinct is to fix the fixture and move on; the information is
+in *which* fixtures needed fixing, because production code written in the same
+window had the same freedom.
+
+And the scheduling argument: a constraint costs a handful of fixture edits today
+and an unbounded data-reconciliation exercise once real records depend on the
+gap. **The cheap moment to add one is before it is true by accident** — while the
+table holds one row rather than thirty-eight.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth

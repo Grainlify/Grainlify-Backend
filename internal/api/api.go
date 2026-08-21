@@ -243,6 +243,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/me/payout-readiness", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetReadiness)
 	app.Get("/me/claims", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaims)
 	app.Get("/me/claims/:settlement_id", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaim)
+	// Claimed state and the deadline, read live from chain in one round trip.
+	// Not cached: extend_deadline is the documented remedy for a late claimant,
+	// so a stale deadline contradicts the fix at the moment it is applied.
+	app.Get("/me/claims/:settlement_id/chain", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaimChainState)
 
 	// User profile endpoints
 	userProfile := handlers.NewUserProfileHandler(cfg, deps.DB)
