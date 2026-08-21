@@ -175,6 +175,23 @@ it to verify a transfer means verifying with the query that reports zero for
 funded accounts, and on the fail-closed sponsorship path a false zero refuses
 every claim while the money sits there.
 
+**Both queries, run against the sponsor account in the same minute, immediately
+after the 5 APT transfer landed:**
+
+```
+$ curl .../v1/accounts/0xa1e0…6e79/balance/0x1::aptos_coin::AptosCoin
+500000000                                          <- 5 APT, correct
+
+$ curl .../v1/accounts/0xa1e0…6e79/resource/0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>
+{"message":"Resource not found by Address(0xa1e0…)"}   <- same account, same minute
+```
+
+One account, one moment, two answers. The second is a **true answer to the
+question asked** — that resource genuinely does not exist — and a false answer to
+the question meant. Anybody verifying the transfer with it would have reported a
+failed transfer that had in fact succeeded, and then gone looking at the transfer
+rather than at the query.
+
 **A 16- or 24-byte `SALT_ENC_KEY_B64` is accepted by AES and silently gives you
 AES-128.** The length check refuses it; the check is the only thing between a
 misconfigured key and a quietly weaker one.
