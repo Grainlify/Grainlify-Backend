@@ -212,3 +212,37 @@ func (c *Client) Root(ctx context.Context, module, escrow string) ([]byte, bool,
 	}
 	return b, true, nil
 }
+
+// AptosBalance reads an account's APT balance in octas.
+//
+// Uses /v1/accounts/{addr}/balance/0x1::aptos_coin::AptosCoin rather than the
+// CoinStore resource: APT migrated to a fungible-asset store, and the coin
+// resource now returns "Resource not found" for accounts that hold APT
+// perfectly well - verified against the sponsor account, which has a balance and
+// no CoinStore. Reading the resource would report zero for a funded account,
+// which on the sponsorship path means refusing every claim while the money is
+// sitting there.
+func (c *Client) AptosBalance(ctx context.Context, address string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		c.nodeURL+"/v1/accounts/"+address+"/balance/0x1::aptos_coin::AptosCoin", nil)
+	if err != nil {
+		return 0, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrNodeFailed, err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
+	if res.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("%w: status %d: %s", ErrNodeFailed, res.StatusCode, string(raw))
+	}
+	// Quoted or bare, depending on node version; a u64 does not fit a float64 so
+	// it is parsed from text either way.
+	s := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: balance %q is not a number", ErrBadReply, s)
+	}
+	return n, nil
+}

@@ -158,3 +158,40 @@ func TestView_ARealNodeFailureIsNotAnAbort(t *testing.T) {
 		t.Error("a node failure was reported as a contract abort")
 	}
 }
+
+func TestAptosBalance_ParsesQuotedAndBare(t *testing.T) {
+	for _, body := range []string{`977072000`, `"977072000"`} {
+		c := fakeNode(t, 200, body, nil)
+		got, err := c.AptosBalance(context.Background(), "0xabc")
+		if err != nil || got != 977072000 {
+			t.Errorf("body %s: got %d, err %v", body, got, err)
+		}
+	}
+}
+
+// A funded account whose balance cannot be read must ERROR, never report zero.
+// On the sponsorship path a false zero refuses every claim while the money sits
+// there - the opposite of the failure the balance floor exists to prevent.
+func TestAptosBalance_NeverReportsZeroOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{404, `{"message":"Resource not found"}`},
+		{200, `not-a-number`},
+		{503, `upstream down`},
+	} {
+		c := fakeNode(t, tc.status, tc.body, nil)
+		got, err := c.AptosBalance(context.Background(), "0xabc")
+		if err == nil {
+			t.Errorf("status %d body %q: accepted, returning %d", tc.status, tc.body, got)
+		}
+		if got != 0 {
+			continue
+		}
+		// Zero WITH an error is fine; zero without one is the hazard.
+		if err == nil {
+			t.Errorf("status %d: reported a zero balance with no error", tc.status)
+		}
+	}
+}

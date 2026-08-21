@@ -256,6 +256,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Not cached: extend_deadline is the documented remedy for a late claimant,
 	// so a stale deadline contradicts the fix at the moment it is applied.
 	app.Get("/me/claims/:settlement_id/chain", auth.RequireAuth(cfg.JWTSecret), payoutClaims.GetClaimChainState)
+	// Pay a contributor's gas. Four defences in order, every outcome recorded.
+	app.Post("/me/claims/:settlement_id/sponsor", auth.RequireAuth(cfg.JWTSecret), payoutClaims.PostSponsorClaim)
 
 	// User profile endpoints
 	userProfile := handlers.NewUserProfileHandler(cfg, deps.DB)
