@@ -48,7 +48,7 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 		t.Fatalf("settlement: %v", err)
 	}
 	ents := make([]Entitlement, 0, len(people))
-	for _, p := range people {
+	for i, p := range people {
 		if _, err := d.Pool.Exec(ctx, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, p.id); err != nil {
 			t.Fatalf("user: %v", err)
 		}
@@ -61,11 +61,20 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 			}
 		}
 		if p.addr != "" {
+			// A DISTINCT address per person, written back so the caller can look
+			// up by the one actually used.
+			//
+			// Fixtures used to hand the same constant to several people, which
+			// migration 086 now forbids: one live address belongs to one
+			// account. That is the index doing its job, and the fixture was
+			// relying on something the system no longer permits.
+			a := addrFor(p.id)
 			if _, err := d.Pool.Exec(ctx, `
 				INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-				VALUES ($1,$2,$3,'nonce')`, p.id, chainID, p.addr); err != nil {
-				t.Fatalf("address: %v", err)
+				VALUES ($1,$2,$3,'nonce')`, p.id, chainID, a); err != nil {
+				t.Fatalf("address %s: %v", a, err)
 			}
+			people[i].addr = a
 		}
 		ents = append(ents, Entitlement{UserID: p.id, AmountMinor: big.NewInt(p.amount), IneligibleReason: p.reason})
 	}
@@ -88,6 +97,17 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 
 const addrA = "0x1b419fe2b8c2a694eda8398af4bb6f6980915f9e3ed856b3b0fb4f26597f22c9"
 const addrB = "0xb33bd154899ec9207b25221821265eff51569429d6a95fb31ff0ee71faac4022"
+
+// addrFor derives a distinct canonical address per user.
+//
+// Migration 086 made one live address belong to one account, so fixtures sharing
+// two constants collide the moment two tests register the same one. The insert
+// errors were also being ignored, so the collision surfaced three layers later
+// as "no payable members" rather than at the line that failed.
+func addrFor(id uuid.UUID) string {
+	h := strings.ReplaceAll(id.String(), "-", "")
+	return "0x" + strings.Repeat("0", 64-len(h)) + h
+}
 
 // Exclusion is a classification, not a filter: every member must come back with
 // an outcome, including the ones that are not leaves.
@@ -197,10 +217,11 @@ func TestDryRun_WritesNothing(t *testing.T) {
 func TestBuild_HappyPathWritesRootAndLeaves(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{
-		{id: uuid.New(), login: "alice", addr: addrA, amount: 4_000_000},
-		{id: uuid.New(), login: "bob", addr: addrB, amount: 1_000_000},
-	})
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, err := DryRun(ctx, d.Pool, s)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +245,7 @@ func TestBuild_HappyPathWritesRootAndLeaves(t *testing.T) {
 	var amt int64
 	if err := d.Pool.QueryRow(ctx,
 		`SELECT amount_minor FROM claim_leaves WHERE settlement_id=$1 AND lower(claim_address)=lower($2)`,
-		s.SettlementID, addrA).Scan(&amt); err != nil {
+		s.SettlementID, people[0].addr).Scan(&amt); err != nil {
 		t.Fatalf("address lookup: %v", err)
 	}
 	if amt != 4_000_000 {
@@ -247,7 +268,7 @@ func TestBuild_RefusesWhenInputsChanged(t *testing.T) {
 	// bob registers an address after the report was read.
 	if _, err := d.Pool.Exec(ctx, `
 		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,'aptos-testnet',$2,'n')`, bob, addrB); err != nil {
+		VALUES ($1,'aptos-testnet',$2,'n')`, bob, addrFor(bob)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
@@ -430,10 +451,11 @@ func TestValidate_CatchesAOneUnitOverAllocation(t *testing.T) {
 func TestClaimFor_WorksAfterTheSaltIsDestroyed(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{
-		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
-		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
-	})
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 250_000},
+		{id: uuid.New(), login: "carol", addr: "x", amount: 150_000},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, _ := DryRun(ctx, d.Pool, s)
 	res, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
 	if err != nil {
@@ -449,7 +471,7 @@ func TestClaimFor_WorksAfterTheSaltIsDestroyed(t *testing.T) {
 		t.Fatalf("the salt was not destroyed: %v", err)
 	}
 
-	c, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA)
+	c, err := ClaimFor(ctx, d.Pool, s.SettlementID, people[0].addr)
 	if err != nil {
 		t.Fatalf("could not serve a proof after destroying the salt: %v", err)
 	}
@@ -467,12 +489,14 @@ func TestClaimFor_WorksAfterTheSaltIsDestroyed(t *testing.T) {
 func TestClaimFor_AddressFormIsIrrelevant(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	people := []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, _ := DryRun(ctx, d.Pool, s)
 	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
 		t.Fatal(err)
 	}
-	for _, form := range []string{addrA, strings.ToUpper("0X" + addrA[2:]), "  " + addrA + "  "} {
+	live := people[0].addr
+	for _, form := range []string{live, strings.ToUpper("0X" + live[2:]), "  " + live + "  "} {
 		if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, form); err != nil {
 			t.Errorf("form %q was not found: %v", form, err)
 		}
@@ -482,12 +506,13 @@ func TestClaimFor_AddressFormIsIrrelevant(t *testing.T) {
 func TestClaimFor_UnknownAddressIsNotAClaim(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
+	people := []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, _ := DryRun(ctx, d.Pool, s)
 	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrB); !errors.Is(err, ErrNoClaim) {
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrFor(uuid.New())); !errors.Is(err, ErrNoClaim) {
 		t.Fatalf("want ErrNoClaim, got %v", err)
 	}
 }
@@ -497,13 +522,16 @@ func TestClaimFor_EveryLeafVerifies(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
 	people := []person{}
-	addrs := []string{}
 	for i := 0; i < 5; i++ {
-		a := fmt.Sprintf("0x%064x", 0x1000+i)
-		addrs = append(addrs, a)
-		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("user%d", i), addr: a, amount: int64(1000 * (i + 1))})
+		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("user%d", i), addr: "x", amount: int64(1000 * (i + 1))})
 	}
+	// Addresses are assigned by the fixture, one per person, so read them back
+	// rather than predicting them.
 	s := fixture(t, d, "aptos-testnet", people)
+	addrs := []string{}
+	for _, p := range people {
+		addrs = append(addrs, p.addr)
+	}
 	r, _ := DryRun(ctx, d.Pool, s)
 	res, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
 	if err != nil {
@@ -526,15 +554,16 @@ func TestClaimFor_EveryLeafVerifies(t *testing.T) {
 func TestClaimFor_RefusesWhenLeavesDriftFromThePublishedRoot(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{
+	people := []person{
 		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
 		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
-	})
+	}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, _ := DryRun(ctx, d.Pool, s)
 	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err != nil {
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, people[0].addr); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
 
@@ -544,7 +573,7 @@ func TestClaimFor_RefusesWhenLeavesDriftFromThePublishedRoot(t *testing.T) {
 		WHERE settlement_id=$1 AND leaf_index=1`, s.SettlementID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err == nil {
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, people[0].addr); err == nil {
 		t.Fatal("served a proof from leaves that no longer reproduce the published root")
 	}
 }
@@ -553,8 +582,9 @@ func TestClaimFor_RefusesWhenLeavesDriftFromThePublishedRoot(t *testing.T) {
 func TestClaimFor_RefusesBeforeARootExists(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}})
-	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, addrA); err == nil {
+	people := []person{{id: uuid.New(), login: "alice", addr: addrA, amount: 1000}}
+	s := fixture(t, d, "aptos-testnet", people)
+	if _, err := ClaimFor(ctx, d.Pool, s.SettlementID, people[0].addr); err == nil {
 		t.Fatal("served a claim for a settlement with no leaves or root")
 	}
 }
@@ -565,15 +595,15 @@ func TestClaimFor_RefusesBeforeARootExists(t *testing.T) {
 func TestClaimFor_ReturnsTheRightAmountForEveryLeaf(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	want := map[string]int64{}
 	people := []person{}
 	for i := 0; i < 4; i++ {
-		a := fmt.Sprintf("0x%064x", 0x2000+i)
-		amt := int64(1000 * (i + 1))
-		want[a] = amt
-		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("u%d", i), addr: a, amount: amt})
+		people = append(people, person{id: uuid.New(), login: fmt.Sprintf("u%d", i), addr: "x", amount: int64(1000 * (i + 1))})
 	}
 	s := fixture(t, d, "aptos-testnet", people)
+	want := map[string]int64{}
+	for _, p := range people {
+		want[p.addr] = p.amount
+	}
 	r, _ := DryRun(ctx, d.Pool, s)
 	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
 		t.Fatal(err)
@@ -598,15 +628,16 @@ func TestClaimFor_ReturnsTheRightAmountForEveryLeaf(t *testing.T) {
 func TestClaimFor_ReturnsTheStoredIdentityHash(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	s := fixture(t, d, "aptos-testnet", []person{
+	people := []person{
 		{id: uuid.New(), login: "alice", addr: addrA, amount: 250_000},
 		{id: uuid.New(), login: "carol", addr: addrB, amount: 150_000},
-	})
+	}
+	s := fixture(t, d, "aptos-testnet", people)
 	r, _ := DryRun(ctx, d.Pool, s)
 	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range []string{addrA, addrB} {
+	for _, a := range []string{people[0].addr, people[1].addr} {
 		c, err := ClaimFor(ctx, d.Pool, s.SettlementID, a)
 		if err != nil {
 			t.Fatal(err)

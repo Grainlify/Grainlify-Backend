@@ -171,6 +171,37 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 	}
 	defer tx.Rollback(c.Context())
 
+	// Is this address already the live payout address of ANOTHER account?
+	//
+	// Checked AFTER the signature verifies, deliberately. Checking first would
+	// turn this endpoint into an enumeration oracle: anyone could probe which
+	// addresses are registered without proving they control anything. By here
+	// the caller has produced a signature from the key behind this address, so
+	// telling them it is taken reveals nothing they could not already establish.
+	//
+	// The unique index added in migration 086 is the real guarantee; this exists
+	// so the person meets a sentence instead of a constraint violation. It is
+	// also the right place for the collision to surface at all: registration is
+	// where the person is present and can act, and the claim screen is where
+	// they cannot - and there the account that gets the error is whichever one
+	// asks, usually the innocent one.
+	var otherUser uuid.UUID
+	err = tx.QueryRow(c.Context(), `
+		SELECT user_id FROM contributor_addresses
+		WHERE chain_id = $1 AND address = $2 AND superseded_at IS NULL AND user_id <> $3`,
+		body.ChainID, addr, uid).Scan(&otherUser)
+	if err == nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":   "address_registered_to_another_account",
+			"address": addr,
+			"detail": "This address is already the payout address for a different Grainlify " +
+				"account. One address can only receive payouts for one account, because a " +
+				"settlement paying it could not tell which of you it was for. If this is your " +
+				"other account, remove it there first. If it is not, contact us — a payout " +
+				"address you control being registered elsewhere is worth looking into.",
+		})
+	}
+
 	var prevAddr string
 	var prevAt *time.Time
 	err = tx.QueryRow(c.Context(), `
@@ -194,6 +225,16 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
 		VALUES ($1,$2,$3,$4) RETURNING verified_at`,
 		uid, body.ChainID, addr, body.Nonce).Scan(&verifiedAt); err != nil {
+		// Two requests can pass the check above concurrently; only one can pass
+		// the index. The loser must still get the sentence rather than a 500,
+		// because from their side nothing distinguishes the two.
+		if isDuplicateAddress(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":   "address_registered_to_another_account",
+				"address": addr,
+				"detail":  "This address was registered to another account moments ago.",
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "store_failed"})
 	}
 	if err := tx.Commit(c.Context()); err != nil {
@@ -230,6 +271,22 @@ func (h *PayoutAddressHandler) GetAddress(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "no_payout_address"})
 	}
 	return c.JSON(fiber.Map{"chain_id": chainID, "address": addr, "verified_at": at})
+}
+
+// isDuplicateAddress recognises the unique index from migration 086 firing.
+//
+// Extracted so this branch is reachable from a test. It executes only under a
+// genuine race - two registrations for one address passing the pre-check
+// together - and a test that has to WIN a race to reach a branch is a test that
+// passes for the wrong reason on a slow day. That is the fail-closed-default
+// trap in docs/VERIFICATION-TRAPS.md: with the pre-check in front, nothing
+// distinguishes this branch working from it being absent.
+//
+// Matched on the index name specifically. The other unique index on this table,
+// idx_contributor_addresses_live, means something different - one live address
+// per person - and must not be reported as somebody else holding it.
+func isDuplicateAddress(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "idx_contributor_addresses_one_account")
 }
 
 func addressError(c *fiber.Ctx, err error) error {

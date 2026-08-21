@@ -1632,6 +1632,92 @@ blocked". Silence cannot carry that distinction; a second signal has to.
 **Ask what the empty state looks like when the system is working perfectly.** If
 that is identical to the failure, the interface has no way to tell you it broke.
 
+## A comment describing a hazard, and the same hazard in the test beside it
+
+> **Writing down a trap does not immunise its author against it.** The comment is
+> evidence the hazard was *understood*, and no evidence at all that it was
+> *avoided*.
+
+`payout_claims.go` served an asset symbol. Decimals came from `chain_configs`;
+the symbol beside it was the literal `"USDC"`. The comment written at the time
+said, in as many words:
+
+> nobody is harmed today, because the seeded symbol *is* `USDC` — which is
+> exactly why it would survive a change to anything else
+
+The test written minutes later asserted:
+
+```go
+if asset["symbol"] != "USDC" { t.Errorf(...) }
+```
+
+The seeded symbol is `USDC`. So the assertion passes whether the value comes
+from the row or from the literal, and a mutation restoring the hardcoded string
+survived the suite. **The test could not distinguish the two cases for precisely
+the reason the comment had just finished explaining.**
+
+Nothing was forgotten in between. The comment and the test were written minutes
+apart by the same mind holding the same assumption — that `USDC` is what a
+correct system returns — and that assumption is true in both the working and the
+broken version. Understanding a hazard operates on the code you are looking at;
+it does not carry to the next thing you write, because the next thing feels like
+a different problem.
+
+The fix is to make the two cases *differ*: change the row and require the
+response to follow.
+
+```go
+d.Pool.Exec(ctx, `UPDATE chain_configs SET asset = jsonb_set(asset,'{symbol}','"ZZZ"') …`)
+// ... and now require "ZZZ"
+```
+
+### The check
+
+**When an assertion compares against a constant, ask whether the wrong
+implementation would produce that same constant.** Config that happens to equal
+the default, an ID that happens to be zero, a first element that happens to be
+the right one — in each case the test is confirming agreement between two things
+that were never independent.
+
+And the harder habit: **a comment noting "this only works because X happens to be
+true" is a specification for the test that must be written next.** Treat it as a
+TODO with an assertion attached, not as a caveat that has been dealt with by
+being described.
+
+## A fixture that bypassed an invariant tested the invariant
+
+> **If your test setup writes state the system would never produce, you are
+> testing the guard that rejects it — not the thing you meant to test.**
+
+To reach the "two claims in one settlement" branch, a test inserted a
+`claim_leaves` row directly:
+
+```sql
+INSERT INTO claim_leaves (settlement_id, leaf_index, leaf_hash, …)
+VALUES ($1, 99, decode(repeat('ab',32),'hex'), …)
+```
+
+A fabricated leaf digest, in a tree that was already published. The test failed —
+and the failure was correct. `ClaimFor` compares the rebuilt tree against the
+published root and refuses to serve a proof from leaves that have drifted, which
+is exactly what a hand-written leaf row is.
+
+So the test exercised the drift check, reported it as a failure of the branch
+under test, and said nothing whatsoever about that branch. The fix was to build
+the state the way the system builds it: two real entitlements, a real tree, a
+real publication, and then the address overlap that produces two matches.
+
+### The check
+
+**Ask what the system would have to do to reach the state your fixture wrote
+directly.** If there is no such path, the fixture is describing an impossible
+world and the test's outcome is about the guard standing between them.
+
+This is the mirror of an entry above: there, a test passed because setup and
+assertion shared an assumption. Here, a test failed because setup violated an
+invariant the assertion depended on. **Both are the fixture, not the code** — and
+in both, the reported result pointed at the wrong thing.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth

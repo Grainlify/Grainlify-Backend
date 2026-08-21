@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -20,9 +21,39 @@ import (
 )
 
 const (
-	addrA = "0x1b419fe2b8c2a694eda8398af4bb6f6980915f9e3ed856b3b0fb4f26597f22c9"
-	addrB = "0xb33bd154899ec9207b25221821265eff51569429d6a95fb31ff0ee71faac4022"
+	// Distinct from internal/payout's fixture addresses, on purpose.
+	//
+	// Migration 086 makes one live address belong to one account, so two packages
+	// sharing an address constant collide on that index if they ever run at the
+	// same time against one database - and the failure surfaces as "no payable
+	// members", three layers from the insert that lost.
+	//
+	// This removes THAT collision and nothing else. It does not make the suite
+	// safe to run concurrently: packages sharing one Postgres also race on
+	// schema_migrations and on broad table state, which is why CI passes -p 1 and
+	// says so at length in ci.yml. Run it the way CI does.
+	addrA = "0xaaaa0001b8c2a694eda8398af4bb6f6980915f9e3ed856b3b0fb4f26597f22c9"
+	addrB = "0xaaaa0002899ec9207b25221821265eff51569429d6a95fb31ff0ee71faac4022"
 )
+
+// addrFor derives a distinct canonical address per user.
+//
+// Fixtures used to share two constants, which was fine until migration 086 made
+// one live address belong to one account: the second test registering the same
+// address hit the unique index, the fixture ignored the error, and the failure
+// surfaced three layers away as "no payable members". Unique per user, and every
+// fixture insert now checks its error.
+func addrFor(id uuid.UUID) string {
+	h := strings.ReplaceAll(id.String(), "-", "")
+	return "0x" + strings.Repeat("0", 64-len(h)) + h
+}
+
+func mustExec(t *testing.T, d *db.DB, sql string, args ...any) {
+	t.Helper()
+	if _, err := d.Pool.Exec(context.Background(), sql, args...); err != nil {
+		t.Fatalf("fixture: %v\n  sql: %.90s", err, sql)
+	}
+}
 
 func saltKeyB64() string {
 	b := make([]byte, 32)
@@ -57,6 +88,7 @@ func getJSON(t *testing.T, app *fiber.App, path string) (int, map[string]any) {
 
 // seedClaim builds a real settlement, tree and publication for one user.
 func seedClaim(t *testing.T, d *db.DB, uid uuid.UUID, login, addr string, amount int64) uuid.UUID {
+
 	t.Helper()
 	ctx := context.Background()
 	var sid uuid.UUID
@@ -65,10 +97,10 @@ func seedClaim(t *testing.T, d *db.DB, uid uuid.UUID, login, addr string, amount
 		VALUES (1,1,1,$1,6) RETURNING id`, amount*4).Scan(&sid); err != nil {
 		t.Fatalf("settlement: %v", err)
 	}
-	d.Pool.Exec(ctx, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, uid)
-	d.Pool.Exec(ctx, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
+	mustExec(t, d, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, uid)
+	mustExec(t, d, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
 		VALUES (gen_random_uuid(),$1,$2,$3,'\x00',now(),now())`, uid, int64(uuid.New().ID()), login)
-	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
+	mustExec(t, d, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
 		VALUES ($1,'aptos-testnet',$2,'n')`, uid, addr)
 
 	s, err := payout.LoadSettlement(ctx, d.Pool, sid, "aptos-testnet")
@@ -169,9 +201,10 @@ func TestClaims_CarriesTheFrozenAddressRegistrationDate(t *testing.T) {
 	seedClaim(t, d, uid, "alice", addrA, 250_000)
 
 	// Supersede it, as registering a new address does.
+	replacement := addrB
 	d.Pool.Exec(ctx, `UPDATE contributor_addresses SET superseded_at=now() WHERE user_id=$1`, uid)
 	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,'aptos-testnet',$2,'n2')`, uid, addrB)
+		VALUES ($1,'aptos-testnet',$2,'n2')`, uid, replacement)
 
 	_, body := getJSON(t, appFor(uid, d), "/me/claims")
 	cl := body["claims"].([]any)[0].(map[string]any)
@@ -183,7 +216,7 @@ func TestClaims_CarriesTheFrozenAddressRegistrationDate(t *testing.T) {
 	if cl["address_status"] != "superseded" {
 		t.Errorf("address_status = %v, want superseded", cl["address_status"])
 	}
-	if cl["current_address"] != addrB {
+	if cl["current_address"] != replacement {
 		t.Errorf("current_address = %v, want the live one", cl["current_address"])
 	}
 }

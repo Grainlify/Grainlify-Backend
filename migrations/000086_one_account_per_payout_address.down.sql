@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_contributor_addresses_one_account;
