@@ -163,3 +163,72 @@ A migration numbered at or below what main already has **never runs**, and
 `docs/VERIFICATION-TRAPS.md` for why a silent skip is the worst shape a failure
 can take.
 
+---
+
+# Migration numbering: timestamps, not the next integer
+
+```sh
+scripts/new-migration.sh add_contributor_public_keys
+# migrations/20260821143702_add_contributor_public_keys.up.sql
+# migrations/20260821143702_add_contributor_public_keys.down.sql
+```
+
+**Digits only.** golang-migrate parses the version with `^([0-9]+)_` and
+`ParseUint(m[1], 10, 64)`, so `20260821T143702_name` is not a malformed
+migration — it is an **invisible** one. The driver does not see the file at all,
+and nothing reports a problem.
+
+## Why not the next integer
+
+Two branches created a minute apart pick the same next integer, and that
+collision is detectable in only some of its windows:
+
+| Window | Caught by |
+|---|---|
+| Both branches pushed, neither merged | the across-branches check |
+| One already merged to main | the above-main check (#535) |
+| **Two unpushed branches** | **nothing** |
+
+Three windows, two checks, and the gap is the ordinary case: two people working
+locally before either pushes. A timestamp cannot be produced twice, so the class
+does not arise and no window needs covering.
+
+It also removes the *ordering* requirement that a version bump cannot fix.
+Sequential migrations on parallel branches must merge in ascending order, because
+each is only above main's highest once the ones before it have landed. That
+constraint forced two renumbers in one day here. Timestamps merge in any order.
+
+## Existing migrations stay as they are
+
+`000001` through `000091` are untouched. A timestamp sorts far above them, so the
+chain is unbroken and nothing needs rewriting — which is the whole reason this is
+cheap to adopt.
+
+## It is self-enforcing once one has landed
+
+main's highest becomes ~2.0e13, so **any future sequential number is below it**
+and #535 refuses it by name. Reverting to integers is not possible without
+somebody noticing, which is a stronger property than a convention documented
+here.
+
+## Deployment constraint: 64-bit only
+
+`getLatestMigrationVersion` returns a `uint`. On the 64-bit platforms we deploy
+to that holds values up to ~1.8e19 and a 14-digit timestamp is ~2.0e13, so there
+is enormous headroom.
+
+**On a 32-bit build, `uint` is 32 bits and caps at 4,294,967,295 — a timestamp
+overflows it.** Nothing today is 32-bit and nothing is likely to be, but this is
+a property of the *platform* rather than of the code, so it belongs where
+somebody changing platforms will look rather than in a comment beside a
+function.
+
+## The check that enforces this caught the person who wrote it
+
+Within a day of merging, #535 refused a migration numbered below main's highest —
+added by the author of the check, who had merged another PR out of the order he
+had written down two messages earlier.
+
+That is the only real test of a guard. A check that has only ever caught other
+people is a check whose author still believes they do not need it.
+

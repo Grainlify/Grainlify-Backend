@@ -95,7 +95,7 @@ jobs:
             done
           done
           if [ "$fail" -ne 0 ]; then
-            echo "::error::Renumber to a version free on EVERY branch. A duplicate merges cleanly and then stops the API from starting."
+            echo "::error::Use scripts/new-migration.sh, which numbers by timestamp and cannot collide. A duplicate merges cleanly and then stops the API from starting."
             exit 1
           fi
           echo "Migrations added by this branch collide with nothing."
@@ -164,7 +164,7 @@ jobs:
             fi
           done
           if [ "$fail" -ne 0 ]; then
-            echo "::error::Renumber above $main_max and force-push. Merging as-is produces a database missing a migration the code expects, with no error anywhere."
+            echo "::error::Use scripts/new-migration.sh to renumber by timestamp, then force-push. A timestamp is above any integer here and needs no re-ordering later. Merging as-is produces a database missing a migration the code expects, with no error anywhere."
             exit 1
           fi
           echo "Every migration this branch adds is numbered above main's highest ($main_max)."
