@@ -2698,3 +2698,67 @@ is where the second instance was.
 
 Keep the comment. It explains *why* the check exists, which the check cannot say
 for itself. Just do not let writing it feel like having handled it.
+
+## An invariant whose two sides share an upstream decision
+
+A money-path assertion: when the whole pool is allocated, the residue must equal
+the total owed to excluded members.
+
+```
+residue   = pool - leafTotal            // one route
+excluded  = Σ amount of owed members    // another route
+assert residue == excluded
+```
+
+Two figures, computed differently, meeting. It reads as a check that held money
+was not paid to somebody else — and that is how the comment above it was
+written.
+
+It is not. Reclassifying a held member as payable moves the member's amount
+*into* the leaf total and *out of* the excluded total in the same step: residue
+falls by exactly what excluded falls by, both reach zero, and the equality still
+holds. The assertion survives the precise failure its comment claimed it caught.
+
+### Why it looked like it covered more
+
+**Both sides are computed downstream of the classification.** An error in the
+classification propagates into both, in the same direction, by the same amount.
+The invariant is testing the two *routes* from a decision, not the decision.
+
+And it is convincing because the thing it genuinely catches — money
+double-counted, or belonging to no bucket — is the thing you would naturally
+describe it as checking. "The totals reconcile" is exactly the sentence somebody
+reaches for when asked whether the money is right, which is what makes this
+shape worse on a money path than anywhere else.
+
+### The failure is in the comment, not the code
+
+This is what makes it a class rather than an anecdote.
+
+The assertion is correct, useful, and worth keeping. Nothing about it needs to
+change. **The defect is the next person's belief about what is covered**, and no
+test run can surface that: the suite is green, the invariant holds, and the
+sentence above it is false. It survives review because a reviewer checks whether
+the assertion is true, not whether the claim about it is.
+
+### The check
+
+**When you write down what an invariant proves, mutate the thing you just said
+it catches.** If it survives, the sentence is wrong, not the assertion.
+
+That is the only way this is findable. It was found exactly that way here:
+disabling the classification branch, expecting the identity to fail, and
+watching it pass.
+
+The habit generalises past invariants. Any sentence of the form "this catches X"
+is a testable claim, and mutating X is how you test it. A comment that has never
+been mutated against its own claim is a hypothesis written in the indicative.
+
+### The repair, when the sentence is wrong
+
+Narrow the claim rather than widen the assertion. Here the comment now says the
+identity proves the held money is exactly the money not in the tree, states
+plainly that it does **not** establish the classification, and names the tests
+that do. A guard with an honest scope is worth more than one with an
+aspirational one, because the honest scope tells the next person what still
+needs covering.
