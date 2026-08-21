@@ -39,14 +39,17 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 	type joined struct {
 		login string
 		addr  string
+		kyc   string
 	}
 	found := make(map[uuid.UUID]joined, len(ids))
 
 	rows, err := pool.Query(ctx, `
 		SELECT u.id,
 		       COALESCE(g.login, ''),
-		       COALESCE(a.address, '')
+		       COALESCE(a.address, ''),
+		       COALESCE(usr.kyc_status, '')
 		FROM unnest($1::uuid[]) AS u(id)
+		LEFT JOIN users usr ON usr.id = u.id
 		LEFT JOIN github_accounts g ON g.user_id = u.id
 		LEFT JOIN contributor_addresses a
 		       ON a.user_id = u.id AND a.chain_id = $2 AND a.superseded_at IS NULL`,
@@ -58,7 +61,7 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 	for rows.Next() {
 		var id uuid.UUID
 		var j joined
-		if err := rows.Scan(&id, &j.login, &j.addr); err != nil {
+		if err := rows.Scan(&id, &j.login, &j.addr, &j.kyc); err != nil {
 			return nil, fmt.Errorf("payout.Resolve: scan: %w", err)
 		}
 		found[id] = j
@@ -96,6 +99,17 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 			}
 		}
 
+		// Read live, never from the settlement line. KYC is checked once at
+		// wave assignment and never again (#507), so the status stored when
+		// somebody entered a wave says nothing about whether they are verified
+		// now - which is the entire defect.
+		//
+		// Ordering: KYC is tested before the address because it is upstream. A
+		// person who is unverified AND has no address should be told to verify
+		// first; registering an address would not make them payable. Only one
+		// outcome is assigned per member, and the reason is explanation only -
+		// release re-checks everything, so somebody with both problems is not
+		// released by fixing one.
 		switch {
 		case amt.Sign() <= 0 && e.IneligibleReason != "":
 			m.Outcome = OutcomeIneligible
@@ -103,6 +117,8 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 			m.Outcome = OutcomeNoShares
 		case m.GitHubLogin == "":
 			m.Outcome = OutcomeNoGitHubAccount
+		case j.kyc != "verified":
+			m.Outcome = OutcomeKYCUnresolved
 		case m.ClaimAddress == "":
 			m.Outcome = OutcomeNoAddress
 		default:

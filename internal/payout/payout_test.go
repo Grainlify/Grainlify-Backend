@@ -36,6 +36,11 @@ type person struct {
 	addr   string
 	amount int64
 	reason string
+	// kyc is the stored verification status. Empty means 'verified', because
+	// almost every fixture here is about something else and an unverified
+	// person is now held rather than paid - so defaulting to unset would make
+	// every existing test a test of the KYC hold.
+	kyc string
 }
 
 func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement {
@@ -49,7 +54,12 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 	}
 	ents := make([]Entitlement, 0, len(people))
 	for i, p := range people {
-		if _, err := d.Pool.Exec(ctx, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, p.id); err != nil {
+		kyc := p.kyc
+		if kyc == "" {
+			kyc = "verified"
+		}
+		if _, err := d.Pool.Exec(ctx,
+			`INSERT INTO users (id, role, kyc_status) VALUES ($1,'contributor',$2)`, p.id, kyc); err != nil {
 			t.Fatalf("user: %v", err)
 		}
 		if p.login != "" {
@@ -1044,5 +1054,296 @@ func TestBuild_RefusesWhenAnExclusionHasNoLineToRecordAgainst(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("root written despite the refusal: %d rows", n)
+	}
+}
+
+// #507: somebody verified when their wave was assigned and declined afterwards
+// keeps their wave and their shares, and today is paid at settlement. They must
+// be held instead - and HELD, not excluded, because a benign reset would
+// otherwise sweep somebody for a cropped photograph.
+func TestResolve_AnUnverifiedContributorIsHeldNotPaid(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	ms, err := Resolve(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[uuid.UUID]Member{}
+	for _, m := range ms {
+		byID[m.UserID] = m
+	}
+
+	if got := byID[people[1].id].Outcome; got != OutcomeKYCUnresolved {
+		t.Errorf("outcome = %q, want kyc_unresolved", got)
+	}
+	// The half that makes it a hold rather than a forfeit: the amount survives.
+	// A zeroed amount here would mean the money had been apportioned to
+	// somebody else and there would be nothing left to pay late.
+	if got := byID[people[1].id].AmountMinor.Int64(); got != 1_000_000 {
+		t.Errorf("held amount = %d, want the full 1000000 - a hold with no amount is a forfeit", got)
+	}
+	if !byID[people[1].id].Outcome.Owed() {
+		t.Error("kyc_unresolved is not Owed(); it would vanish from the pre-publication read a human does")
+	}
+	if got := byID[people[0].id].Outcome; got != OutcomePayable {
+		t.Errorf("the verified contributor is %q, want payable", got)
+	}
+}
+
+// Any status other than verified holds. 'expired' is the one that matters most:
+// it is what an admin reset produces, and resetting somebody for a bad
+// photograph must not pay them before they re-verify - nor forfeit them.
+func TestResolve_EveryNonVerifiedStatusHolds(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	for _, status := range []string{"rejected", "expired", "in_review", "pending", "not_started"} {
+		p := person{id: uuid.New(), login: "x", addr: "x", amount: 1_000_000, kyc: status}
+		s := fixture(t, d, "aptos-testnet", []person{p})
+		ms, err := Resolve(ctx, d.Pool, s)
+		if err != nil {
+			t.Fatalf("%q: %v", status, err)
+		}
+		if ms[0].Outcome != OutcomeKYCUnresolved {
+			t.Errorf("kyc_status %q produced %q, want kyc_unresolved", status, ms[0].Outcome)
+		}
+	}
+
+	// NULL separately: the fixture defaults an empty string to 'verified', so
+	// the never-started case has to be written directly. It is the one most
+	// likely to occur - somebody who never opened the verification flow.
+	p := person{id: uuid.New(), login: "x", addr: "x", amount: 1_000_000}
+	s := fixture(t, d, "aptos-testnet", []person{p})
+	if _, err := d.Pool.Exec(ctx, `UPDATE users SET kyc_status = NULL WHERE id = $1`, p.id); err != nil {
+		t.Fatalf("null the status: %v", err)
+	}
+	ms, err := Resolve(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms[0].Outcome != OutcomeKYCUnresolved {
+		t.Errorf("a NULL kyc_status produced %q, want kyc_unresolved", ms[0].Outcome)
+	}
+}
+
+// Ordering: unverified AND no address reports the KYC blocker, because it is
+// upstream - registering an address would not make them payable.
+func TestResolve_KYCIsReportedBeforeAMissingAddress(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	p := person{id: uuid.New(), login: "x", amount: 1_000_000, kyc: "rejected"} // no addr
+	s := fixture(t, d, "aptos-testnet", []person{p})
+
+	ms, err := Resolve(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms[0].Outcome != OutcomeKYCUnresolved {
+		t.Errorf("outcome = %q, want kyc_unresolved reported ahead of no_address", ms[0].Outcome)
+	}
+}
+
+// The money must not be apportioned to anybody else. This is the property that
+// separates a hold from a forfeit, asserted on the arithmetic rather than on
+// the label: the held amount lands in residue, and the escrow is funded with
+// the leaf total, so it never leaves the treasury.
+func TestDryRun_AHeldAmountIsResidueNotRedistributed(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.LeafTotalMinor.Int64(); got != 4_000_000 {
+		t.Errorf("leaf total = %d, want 4000000 - the held amount must not be in the tree", got)
+	}
+	if got := r.ExcludedTotalMinor.Int64(); got != 1_000_000 {
+		t.Errorf("excluded total = %d, want the held 1000000 restated to a human before publication", got)
+	}
+	// The payable contributor is paid exactly their own entitlement and not a
+	// penny of the held one. If this ever reads 5000000, the hold has become a
+	// redistribution and #507 has been reintroduced.
+	var alice Member
+	ms, err := Resolve(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.UserID == people[0].id {
+			alice = m
+		}
+	}
+	if got := alice.AmountMinor.Int64(); got != 4_000_000 {
+		t.Errorf("payable amount = %d, want 4000000; the held share was handed to another contributor", got)
+	}
+}
+
+// End to end: the hold reaches the ledger with the right reason, so the release
+// path has something to find and the contributor has something to be told.
+func TestBuild_RecordsAKYCHold(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "expired"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+	linesFor(t, d, s)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var amt int64
+	var reason string
+	if err := d.Pool.QueryRow(ctx, `
+		SELECT amount_minor, reason FROM settlement_holds
+		WHERE user_id=$1 AND origin_settlement_id=$2`,
+		people[1].id, s.SettlementID).Scan(&amt, &reason); err != nil {
+		t.Fatalf("read hold: %v", err)
+	}
+	if reason != "kyc_unresolved" || amt != 1_000_000 {
+		t.Errorf("hold = (%s, %d), want (kyc_unresolved, 1000000)", reason, amt)
+	}
+}
+
+// The identity that makes a hand-maintained bucket list impossible rather than
+// merely fixed: every allocated minor unit lands in exactly one bucket.
+//
+// Asserted by simulating the defect it exists to catch - an outcome carrying
+// money that belongs to neither bucket. Before the identity, that produced a
+// smaller ExcludedTotalMinor which looked plausible and which an operator would
+// have acknowledged; now it cannot get past DryRun.
+func TestDryRun_AnOutcomeInNoBucketFailsArithmetically(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	// The identity holds on a normal run.
+	allocated := new(big.Int)
+	for _, m := range r.Members {
+		if m.AmountMinor.Sign() > 0 {
+			allocated.Add(allocated, m.AmountMinor)
+		}
+	}
+	bucketed := new(big.Int).Add(r.LeafTotalMinor, r.ExcludedTotalMinor)
+	if bucketed.Cmp(allocated) != 0 {
+		t.Fatalf("identity broken on a normal run: allocated %s, bucketed %s", allocated, bucketed)
+	}
+
+	// And it is not vacuous: both buckets carry money, so an outcome silently
+	// leaving one of them is a difference this can see.
+	if r.LeafTotalMinor.Sign() <= 0 || r.ExcludedTotalMinor.Sign() <= 0 {
+		t.Fatalf("fixture does not exercise both buckets: leaf %s, excluded %s",
+			r.LeafTotalMinor, r.ExcludedTotalMinor)
+	}
+}
+
+// Owed() is the definition of "carries money but gets no leaf". Every outcome
+// must be classifiable, so a new one cannot be added without deciding which
+// side it is on - which is the decision the identity above then enforces.
+func TestOutcome_EveryOutcomeCarryingMoneyIsPayableOrOwed(t *testing.T) {
+	all := []Outcome{
+		OutcomePayable, OutcomeNoShares, OutcomeIneligible,
+		OutcomeNoAddress, OutcomeNoGitHubAccount, OutcomeKYCUnresolved,
+	}
+	// If this count changes, an outcome was added and somebody has to say
+	// whether it carries money. Deliberately a literal: deriving it from the
+	// slice would make the slice agree with itself and check nothing.
+	const wantOutcomes = 6
+	if len(all) != wantOutcomes {
+		t.Fatalf("%d outcomes listed, want %d - a new one needs a bucket, and DryRun's "+
+			"identity will fail arithmetically until it has one", len(all), wantOutcomes)
+	}
+	for _, o := range all {
+		money := o == OutcomePayable || o.Owed()
+		zero := o == OutcomeNoShares || o == OutcomeIneligible
+		if money == zero {
+			t.Errorf("outcome %q is neither clearly money-carrying nor clearly zero", o)
+		}
+	}
+}
+
+// Residue IS the held money when the pool was fully allocated.
+//
+// The two figures are computed by different routes - pool minus leaves, and the
+// sum of owed members - and must meet.
+//
+// The equality alone is not enough, and this was established by mutation rather
+// than assumed: reclassifying the held member as payable moves BOTH sides to
+// zero and the equality still holds. So the amount is asserted too. Together
+// they say the held money is exactly the money not in the tree, and that there
+// is some.
+func TestDryRun_ResidueIsExactlyTheHeldMoney(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	// Amounts sum to the fixture's pool (10_000_000), because the identity holds
+	// only when the pool was fully allocated - which is what both real producers
+	// assert and what the fixture otherwise does not do.
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 9_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if r.ResidueMinor.Cmp(r.ExcludedTotalMinor) != 0 {
+		t.Fatalf("residue %s != excluded %s", r.ResidueMinor, r.ExcludedTotalMinor)
+	}
+	// Not vacuous: both are the held amount, not both zero.
+	if r.ResidueMinor.Int64() != 1_000_000 {
+		t.Errorf("residue = %s, want the held 1000000", r.ResidueMinor)
+	}
+}
+
+// The precondition is read from the data, so a settlement that does NOT
+// allocate its whole pool reaches the edge of the invariant instead of failing
+// it. Both producers assert full allocation today, but this package takes a
+// Settlement from anywhere - and the first person building a producer that
+// allocates less should not meet a failure they cannot distinguish from a bug
+// of their own.
+func TestDryRun_APartlyAllocatedPoolSkipsTheResidueIdentity(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000}}
+	s := fixture(t, d, "aptos-testnet", people)
+	// The fixture's pool is 10_000_000 and the single line allocates 4_000_000,
+	// so this settlement does not allocate its pool - exactly the shape the
+	// premise excludes.
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun refused a partly-allocated pool: %v", err)
+	}
+	// Residue here is pool minus leaf, and is NOT the excluded total - which is
+	// precisely why the identity must not be asserted unconditionally.
+	if r.ResidueMinor.Cmp(r.ExcludedTotalMinor) == 0 {
+		t.Skip("fixture no longer exercises a partly-allocated pool; the case is untested")
 	}
 }

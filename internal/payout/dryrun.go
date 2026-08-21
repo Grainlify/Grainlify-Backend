@@ -69,19 +69,110 @@ func DryRun(ctx context.Context, pool db.DBPool, s Settlement) (*Report, error) 
 		ResidueMinor:       new(big.Int),
 	}
 	for _, m := range members {
-		switch m.Outcome {
-		case OutcomePayable:
+		// Owed() rather than a list of outcomes.
+		//
+		// This used to name OutcomeNoAddress and OutcomeNoGitHubAccount
+		// explicitly, so adding a third owed outcome silently dropped it from
+		// this total - and this total is what Build makes a human acknowledge
+		// before publishing. A hold missing from it is a person the operator
+		// was never shown, on the one screen that exists to show them.
+		//
+		// Owed() is the definition; anything that has to be kept in step with
+		// it by hand will eventually not be.
+		switch {
+		case m.Outcome == OutcomePayable:
 			r.LeafTotalMinor.Add(r.LeafTotalMinor, m.AmountMinor)
-		case OutcomeNoAddress, OutcomeNoGitHubAccount:
+		case m.Outcome.Owed():
 			r.ExcludedTotalMinor.Add(r.ExcludedTotalMinor, m.AmountMinor)
-		case OutcomeNoShares:
+		case m.Outcome == OutcomeNoShares:
 			r.NoSharesCount++
-		case OutcomeIneligible:
+		case m.Outcome == OutcomeIneligible:
 			r.IneligibleCount++
 		}
 	}
+	// THE IDENTITY: every allocated minor unit lands in exactly one bucket.
+	//
+	// Deriving the excluded total from Owed() above fixes one instance. This
+	// makes the class impossible, and the class is worth the arithmetic because
+	// of where it lands.
+	//
+	// The acknowledgement gate's entire value is that a human reads a number.
+	// An outcome missing from these buckets does not break the gate - it shows
+	// a SMALLER total, which looks perfectly plausible, and the operator
+	// acknowledges it. Nothing fails, nothing is logged, nobody is alerted, and
+	// the money held for that person exists in no total anyone read. It is the
+	// worst possible place for a set maintained by hand: the failure is a
+	// number that is wrong in the quiet direction.
+	//
+	// So a seventh outcome belonging to neither bucket fails HERE,
+	// arithmetically and immediately, without anyone having remembered to write
+	// a test for it. Same move as one shared date formatter: two things that
+	// agree became a shape that cannot disagree.
+	//
+	// Why the identity holds by construction, and is therefore safe to assert:
+	// Resolve only assigns NoShares or Ineligible when the amount is <= 0, so
+	// every member carrying a positive amount is Payable or Owed(). A new
+	// outcome that is neither - or an old one that stops being counted - breaks
+	// this sum the moment it is reached.
+	allocated := new(big.Int)
+	for _, m := range members {
+		if m.AmountMinor != nil && m.AmountMinor.Sign() > 0 {
+			allocated.Add(allocated, m.AmountMinor)
+		}
+	}
+	if bucketed := new(big.Int).Add(r.LeafTotalMinor, r.ExcludedTotalMinor); bucketed.Cmp(allocated) != 0 {
+		return nil, fmt.Errorf(
+			"%w: %s minor units are allocated but %s are accounted for (leaf %s + excluded %s); "+
+				"an outcome carrying money belongs to neither bucket, so the total an operator "+
+				"acknowledges before publication understates what was owed",
+			ErrDoesNotReconcile, allocated, bucketed, r.LeafTotalMinor, r.ExcludedTotalMinor)
+	}
+
 	if s.PoolMinor != nil {
 		r.ResidueMinor.Sub(s.PoolMinor, r.LeafTotalMinor)
+
+		// THE SECOND IDENTITY: residue IS the held money, when the pool was
+		// fully allocated.
+		//
+		// What it proves, stated exactly, because the obvious reading is wrong.
+		//
+		// It proves the money classified as held is precisely the money not in
+		// the tree: the two figures are computed by different routes - one from
+		// the pool minus the leaves, one by summing owed members - and they must
+		// meet. Held money that was ALSO paid, or pool money belonging to
+		// neither bucket, breaks it.
+		//
+		// It does NOT prove the classification is right. Reclassifying a held
+		// member as payable moves both sides to zero together and the equality
+		// still holds; that failure is caught by the resolve-time tests, not
+		// here. Checked by mutation rather than assumed - turning the KYC branch
+		// off leaves this identity satisfied.
+		//
+		// So: this is the guard against the two totals drifting apart, which is
+		// the property #507 rests on once the classification is correct. It is
+		// not a second opinion on the classification.
+		//
+		// # Its precondition, and why it is checked rather than assumed
+		//
+		// It follows only from the pool being fully allocated: residue is
+		// pool - leaf, and leaf + excluded == allocated (above), so residue ==
+		// excluded exactly when allocated == pool. Both producers assert that
+		// today - founding/settlement.go and hackathon/settlement_producer.go
+		// each refuse to return a Result whose lines do not sum to the pool -
+		// but that is a property of the PRODUCER, not of this package, and this
+		// package accepts a Settlement from anywhere.
+		//
+		// So the premise is read from the data rather than inferred from which
+		// producer built it. A future producer that deliberately allocates less
+		// than the pool reaches the edge of this invariant and is skipped, which
+		// is what stops the first person building one from hitting a failure
+		// they cannot tell from a bug of their own.
+		if allocated.Cmp(s.PoolMinor) == 0 && r.ResidueMinor.Cmp(r.ExcludedTotalMinor) != 0 {
+			return nil, fmt.Errorf(
+				"%w: the whole pool was allocated, so residue (%s) must be exactly the money owed "+
+					"to excluded members (%s); a difference means money is double-counted or belongs to no bucket",
+				ErrDoesNotReconcile, r.ResidueMinor, r.ExcludedTotalMinor)
+		}
 	}
 	return r, nil
 }
