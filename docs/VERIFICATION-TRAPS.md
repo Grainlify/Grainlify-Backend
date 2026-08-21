@@ -2887,3 +2887,66 @@ demonstration as a deployment — which is the same failure as the
 machinery-comment entry, arriving from the opposite direction. There, prose
 described machinery that did not exist. Here, machinery existed and its
 production absence was described by nobody.
+
+## Copy that is true now and false later, with no expiry attached
+
+Two sentences about the same fact, written weeks apart:
+
+> We cover the network cost, so the full 12.50 arrives.
+
+> You'll pay a small network fee in APT from this wallet.
+
+The first was written when a sponsored claim had just been demonstrated. It was
+never true of production, and nothing about it said when it would become true or
+whether it already was. It sat in a flow specification and was read as current.
+
+The second is true today and becomes false the day a fee payer deploys.
+
+### The problem is not that copy goes stale
+
+Everything goes stale. The problem is that **a sentence with no stated expiry
+cannot be distinguished from one that is permanently true**, so nobody knows
+whether to check it, and the check has no trigger.
+
+A wrong sentence about behaviour is not usually found by re-reading — it is found
+by somebody acting on it. That is a long feedback loop, and on a money path it is
+somebody's money.
+
+### The device
+
+Give any such sentence its **removal condition**, beside it, naming the thing
+that will make it false:
+
+```
+{/* ── REMOVE WHEN Grainlify-Backend#536 SHIPS ──────────────────────
+    True today and false the day a fee payer is deployed.
+    When #536 lands, DELETE this paragraph; do not edit it into
+    "we cover the network cost" - that sentence has its own home and
+    its own removal condition there.
+    ─────────────────────────────────────────────────────────────── */}
+```
+
+Three parts, and each is doing work:
+
+1. **The condition, named as an issue.** A tracked thing that closes, so the
+   expiry has an event rather than a date somebody has to remember.
+2. **Delete, not edit.** Editing invites the replacement to inherit the position
+   without inheriting the scrutiny — which is precisely how a promise about
+   money ends up in a screen nobody re-read.
+3. **Why the condition lives here** rather than in the issue alone. The issue is
+   read by whoever picks up the work; the copy is read by whoever touches the
+   file for an unrelated reason, and that is the person who would otherwise
+   preserve it.
+
+Where a test can hold the sentence, pair one with it and mark both for deletion
+together. Then removing the copy is a deliberate act with a failing test behind
+it, rather than a tidy-up somebody does or forgets.
+
+### The general form
+
+**Any statement that is true because of a current state should name the state.**
+Not "we cover the network cost" but "we cover it, since #536 shipped"; not "the
+claimant pays" but "the claimant pays until #536 ships".
+
+The version without the condition is not more concise. It is the same sentence
+with the expiry deleted, and the deletion is invisible.
