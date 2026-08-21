@@ -79,19 +79,101 @@ Check all of these before touching anything. Each has bitten at least once.
 | Sponsor holds APT | `aptos account balance --profile grainlify-testnet` | funding transactions fail midway |
 | Sponsor holds USDC ≥ leaf total | `primary_fungible_store::balance` | you discover it between funding and publishing, with a half-funded escrow |
 | Migrations at 81+ | `SELECT version FROM schema_migrations` | `claim_leaves` does not exist |
-| **`APTOS_TESTNET_RPC_URL` is set** in the API's environment | see below | every live chain read returns `chain_endpoint_not_configured` |
+| **`APTOS_TESTNET_RPC_URL` is set** | see *Environment variables* below | every live chain read returns `chain_endpoint_not_configured` |
+| **`APTOS_SPONSOR_KEY` is set** | see *Environment variables* below | the API refuses to boot; claims cannot be sponsored |
+| **Sponsor account is above the floor** | `curl .../v1/accounts/<sponsor>/balance/0x1::aptos_coin::AptosCoin` | sponsorship refuses for **everyone** |
 
-**The chain reads need a node, and nothing falls back to a public one.**
-`chain_configs.rpc_endpoint_ref` holds the NAME of an environment variable
-(`APTOS_TESTNET_RPC_URL`) so that no endpoint carrying an API key is ever written
-into a migration. If that variable is unset, `/me/claims/:id/chain` returns
-**503 `chain_endpoint_not_configured`** naming the variable, and deadline
-reminders cannot read a deadline.
+### Environment variables
 
-That refusal is deliberate: defaulting to `https://fullnode.testnet.aptoslabs.com`
-would work in development and mislead in production, where the difference between
-"reading the chain" and "reading *a* chain" matters. Set it before the first
-settlement is published.
+Both are set in the API's environment (Railway). Neither has a fallback, on
+purpose: a default that works in development and misleads in production is the
+failure mode that produced Grainlify-Backend#536.
+
+#### `APTOS_TESTNET_RPC_URL`
+
+```
+https://api.testnet.aptoslabs.com
+```
+
+**Without the `/v1`, and this is the trap.** Aptos's own documentation lists the
+endpoint as `https://api.testnet.aptoslabs.com/v1`, so the next person will paste
+that — and the client appends its own `/v1`, producing `/v1/v1/...` and a 404 on
+every chain read. Verified: the base returns `chain_id 2`; the documented form
+with `/v1` returns 404 once the client appends.
+
+`chain_configs.rpc_endpoint_ref` holds the *name* of this variable rather than
+the URL, so no endpoint carrying an API key is ever written into a migration.
+Unset, `/me/claims/:id/chain` returns **503 `chain_endpoint_not_configured`**
+naming the variable, and deadline reminders cannot read a deadline.
+
+#### `APTOS_SPONSOR_KEY`
+
+The sponsor's Ed25519 private key. **Never in a migration, a log, an error body,
+a response or a fixture** — enforced by surface tests in `internal/sponsor`.
+
+Accepted formats, all equivalent, so paste whatever the tooling prints:
+
+| form | example shape |
+|---|---|
+| bare hex | `abc1…` |
+| `0x`-prefixed | `0xabc1…` |
+| AIP-80 | `ed25519-priv-0xabc1…` |
+| 32 bytes (seed) **or** 64 bytes (expanded) | either |
+
+Anything else **refuses at boot**, naming the variable and never echoing the
+value. It does not fall back to unsponsored claims.
+
+**Confirm Railway is using the account you think it is** by checking the address,
+which is public and safe to paste anywhere:
+
+```
+0xa1e01282cfd196ae6f1b236d136bc27bc23bcdd1614dc678d624a3c9a20d6e79
+```
+
+The service derives this address *from the key* rather than reading it from
+config, so a mismatch here means the wrong key is set — not a mismatched pair.
+
+#### Funding the sponsor
+
+All figures from the measured milestone transaction: 14,920 gas units x 100
+octas = **0.01492 APT per claim**. The first claim per recipient is the expensive
+one, because it creates their token store — which is the case this exists for.
+
+| | APT | meaning |
+|---|---|---|
+| one claim | 0.01492 | measured, not estimated |
+| one 38-person settlement | 0.5670 | |
+| **hard floor** | **1.7009** | below this the service **stops sponsoring and says so** |
+| **minimum to run a payout at all** | **2.2678** | floor + one settlement |
+| recommended | 5 | ~5 settlements of headroom above the floor |
+
+The floor exists because an alarm needs a recipient and no channel reaches anyone
+off-site. A floor depends on nobody reading anything: it bounds the drain and
+surfaces to a contributor, who then tells us. **Failing visibly beats alerting
+into a void.**
+
+**The testnet faucet is web-only** — programmatic funding was removed, and
+`aptos account fund-with-faucet` now replies *"you must visit
+https://aptos.dev/network/faucet"*. To top up from an existing account instead:
+
+```sh
+cd Aptos-Contracts   # the CLI profile lives here
+aptos account transfer --profile grainlify-testnet \
+  --account 0xa1e01282cfd196ae6f1b236d136bc27bc23bcdd1614dc678d624a3c9a20d6e79 \
+  --amount 500000000    # 5 APT, in octas
+```
+
+**Check the balance with the fungible-asset read, never the coin resource:**
+
+```sh
+curl -s https://api.testnet.aptoslabs.com/v1/accounts/<addr>/balance/0x1::aptos_coin::AptosCoin
+```
+
+`0x1::coin::CoinStore<AptosCoin>` returns **"Resource not found" for an account
+holding APT perfectly well** — APT has migrated to a fungible-asset store. Using
+it to verify a transfer means verifying with the query that reports zero for
+funded accounts, and on the fail-closed sponsorship path a false zero refuses
+every claim while the money sits there.
 
 **A 16- or 24-byte `SALT_ENC_KEY_B64` is accepted by AES and silently gives you
 AES-128.** The length check refuses it; the check is the only thing between a
