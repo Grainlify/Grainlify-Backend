@@ -71,6 +71,16 @@ const (
 	// on the page built for these messages.
 	TypeKYCStatusChanged Type = "kyc_status_changed"
 
+	// TypeClaimDeadline carries every claim-window message: the reminders
+	// before a deadline and the one after it has passed.
+	//
+	// One type for all four, following TypeSocialFollowCompleted. The message
+	// after the deadline is the reason this is not named "reminder": it is not
+	// one. It reaches somebody who has already missed the window, and a design
+	// that goes silent at the deadline abandons exactly the people it was built
+	// for.
+	TypeClaimDeadline Type = "claim_deadline"
+
 	// TypeFoundingPosition tells somebody where they stand in the Founding
 	// Contributor Pool: that they hold a position, that it is permanent, and
 	// what it still needs.
@@ -125,6 +135,8 @@ var AllTypes = []Type{
 	TypeSocialFollowCompleted,
 	TypeKYCReset,
 	TypeKYCStatusChanged,
+
+	TypeClaimDeadline,
 	TypeFoundingPosition,
 	TypeRedemptionPaid,
 	TypeRedemptionRejected,

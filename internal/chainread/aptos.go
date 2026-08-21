@@ -160,6 +160,37 @@ func (c *Client) ClaimDeadline(ctx context.Context, module, escrow string) (int6
 }
 
 // Root returns the published root of an escrow, or false if none is published.
+// Balance is what the escrow still holds, and it is how a sweep is observed.
+//
+// The module has no `swept` flag: sweep_unclaimed withdraws
+// fungible_asset::balance(escrow.store) in full and emits SweptUnclaimed, so
+// afterwards the balance is zero and there is nothing else to look at.
+//
+// That is a better signal than a flag would be for the question actually being
+// asked. "Was a sweep run" is not what a post-deadline reminder needs to know -
+// it needs to know whether this person's money is still there to claim, and a
+// balance answers that directly. A fully-claimed escrow reads the same as a
+// swept one, which is correct: in both cases there is nothing to tell anybody
+// to come and collect.
+func (c *Client) Balance(ctx context.Context, module, escrow string) (uint64, error) {
+	out, err := c.view(ctx, module+"::escrow::balance", []any{escrow})
+	if err != nil {
+		return 0, err
+	}
+	if len(out) == 0 {
+		return 0, fmt.Errorf("chainread.Balance: empty view result")
+	}
+	var raw string
+	if err := json.Unmarshal(out[0], &raw); err != nil {
+		return 0, fmt.Errorf("chainread.Balance: decode: %w", err)
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("chainread.Balance: parse %q: %w", raw, err)
+	}
+	return v, nil
+}
+
 func (c *Client) Root(ctx context.Context, module, escrow string) ([]byte, bool, error) {
 	out, err := c.view(ctx, module+"::escrow::root", []any{escrow})
 	if err != nil {
