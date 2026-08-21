@@ -236,6 +236,15 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.PostAddress)
 	app.Get("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.GetAddress)
 
+	// Optional, and asked for on the payout screen rather than at signup: that
+	// is the one moment somebody is doing something consequential with money
+	// and understands why we might need to reach them. PUT with an empty string
+	// clears it, so removal is the same endpoint as saving and cannot end up
+	// with the clear half unbuilt.
+	payoutContact := handlers.NewPayoutContactHandler(deps.DB)
+	app.Get("/me/payout-contact", auth.RequireAuth(cfg.JWTSecret), payoutContact.Get)
+	app.Put("/me/payout-contact", auth.RequireAuth(cfg.JWTSecret), payoutContact.Put)
+
 	payoutClaims := handlers.NewPayoutClaimsHandler(deps.DB)
 	// The only route that speaks to somebody who has NOT registered an address.
 	// An empty claims list means opposite things before and after publication and
