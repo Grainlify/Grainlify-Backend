@@ -2597,3 +2597,55 @@ hand-written list: **an absence produced by the tooling, reported as a normal
 result.** Three tests passing is a real number. A clean `git status` is a real
 state. Neither says "and something you wrote is no longer here", because nothing
 in the pipeline was asked to compare against what you expected to still exist.
+
+## A test that constructs a state its own system cannot produce
+
+`settlement_lines.excluded_reason` was read in two places and written in none.
+`ExclusionsFor` filters `WHERE excluded_reason IS NOT NULL`, so it returned zero
+rows always; `/me/payout-readiness` could never answer `excluded_from_published`;
+and a UI state built for that answer was unreachable in production.
+
+Every test covering it passed, because each test **inserted the row itself**.
+
+That is the shape: a fixture writes a value no code path writes, the assertions
+against it hold, and the suite reports a working feature. The test is not wrong
+about what the code does with the state — it is wrong that the state occurs.
+
+### Why this survives review
+
+A fixture that sets up its own preconditions is *correct practice*. Nothing in
+the test looks suspicious: it inserts a row, calls the code, asserts the result.
+The defect is not in what the test contains but in what the system does not, and
+no amount of reading the test file reveals it. You have to go and ask who writes
+the column, which is a question a passing test actively discourages.
+
+It is also the most convincing kind of green. A feature with tests reads as more
+finished than one without, so the tests make the gap *harder* to find than if
+they had never been written.
+
+### The check
+
+**For any state a test constructs by hand, ask what in production produces it.**
+If the answer is a code path, name it in the fixture. If there is no answer, that
+is the bug, and it is upstream of everything the test asserts.
+
+Mechanically, for a column: grep for writes, not for uses.
+
+```sh
+grep -rn "excluded_reason" --include='*.go' . | grep -iE "insert|update|set "
+```
+
+Empty output against a column with readers is the finding. The same question for
+an enum value, a status string, or an error code: **who emits it?**
+
+### The general form
+
+**A test proves the code handles a state. It does not prove the state exists.**
+Those are different claims, and only the first is checked by running the suite -
+which means the second has to be established deliberately, once, by looking.
+
+Third instance of this family recorded here, all found in one day: the harness
+button asserted against a control the code could not reach, the writer-guard
+counted a hand-written list rather than the tree, and this. The common root is
+that a check derives its own subject from something the author supplied instead
+of from the system, so it measures the author's belief rather than the code.
