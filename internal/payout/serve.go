@@ -200,17 +200,3 @@ func ExclusionsFor(ctx context.Context, pool db.DBPool, userID uuid.UUID) ([]Exc
 	}
 	return out, rows.Err()
 }
-
-// AssetDecimalsFor reads the asset's precision from chain_configs.
-//
-// From the chain config rather than the settlement, because that is where asset
-// metadata belongs: the decimals are a property of the token, not of one event's
-// arithmetic. It also keeps the settlement tables out of the read path entirely.
-func AssetDecimalsFor(ctx context.Context, pool db.DBPool, chainID string) (int32, error) {
-	var dec int32
-	if err := pool.QueryRow(ctx,
-		`SELECT (asset->>'decimals')::int FROM chain_configs WHERE chain_id = $1`, chainID).Scan(&dec); err != nil {
-		return 0, fmt.Errorf("payout.AssetDecimalsFor: no chain config for %q: %w", chainID, err)
-	}
-	return dec, nil
-}

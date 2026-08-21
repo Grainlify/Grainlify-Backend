@@ -84,6 +84,30 @@ func (h *PayoutClaimsHandler) GetClaim(c *fiber.Ctx) error {
 	if len(claims) == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "no_claim"})
 	}
+	// claims[0] used to be returned and any second match discarded in silence.
+	//
+	// claimsFor loops over EVERY address this user has ever registered, so two
+	// of their addresses both holding leaves in one settlement produces two
+	// rows. The realistic route there is two users registering the same address
+	// - the live-address index is unique per (user, chain), not per address - so
+	// one of them sees a claim belonging to the other.
+	//
+	// Whatever the cause, returning the first and dropping the rest answers a
+	// question about money with an arbitrary choice. Note the shape: this is the
+	// same [0] as the multi-key signature bug in the frontend client, on the
+	// same path, found the same day. Taking the first element of something you
+	// believe has one element is a load-bearing assumption written as a
+	// subscript, and it never announces itself.
+	if len(claims) > 1 {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":         "multiple_claims_for_settlement",
+			"settlement_id": sid,
+			"count":         len(claims),
+			"detail": "More than one leaf in this settlement pays an address registered to this " +
+				"account. Returning either one would be an arbitrary choice about somebody's money, " +
+				"so nothing is returned until it is understood.",
+		})
+	}
 	return c.JSON(claims[0])
 }
 
@@ -92,12 +116,19 @@ func (h *PayoutClaimsHandler) claimsFor(c *fiber.Ctx, uid uuid.UUID, only *uuid.
 
 	// Every address, live and superseded, plus which one is live now.
 	type addrRow struct {
-		addr    string
-		chainID string
-		live    bool
+		addr       string
+		chainID    string
+		live       bool
+		verifiedAt time.Time
 	}
+	// verified_at comes along because the claim row needs it and nothing else
+	// can supply it: GET /me/payout-address filters on superseded_at IS NULL, so
+	// the registration date of a SUPERSEDED address is unreachable through the
+	// API. Without this, the scope doc's own model copy - "the address you
+	// registered on 3 July" - cannot be written against the API that doc
+	// describes.
 	rows, err := h.db.Pool.Query(ctx, `
-		SELECT address, chain_id, superseded_at IS NULL
+		SELECT address, chain_id, superseded_at IS NULL, verified_at
 		FROM contributor_addresses WHERE user_id = $1`, uid)
 	if err != nil {
 		return nil, err
@@ -106,7 +137,7 @@ func (h *PayoutClaimsHandler) claimsFor(c *fiber.Ctx, uid uuid.UUID, only *uuid.
 	current := map[string]string{} // chain -> live address
 	for rows.Next() {
 		var a addrRow
-		if err := rows.Scan(&a.addr, &a.chainID, &a.live); err != nil {
+		if err := rows.Scan(&a.addr, &a.chainID, &a.live, &a.verifiedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -156,13 +187,13 @@ func (h *PayoutClaimsHandler) claimsFor(c *fiber.Ctx, uid uuid.UUID, only *uuid.
 				lrows.Close()
 				return nil, err
 			}
-			// Decimals come from the chain config: they are a property of the
-			// token, not of one event's arithmetic.
-			decimals, err := payout.AssetDecimalsFor(ctx, h.db.Pool, chainID)
+			// Everything a client would otherwise hardcode, from one place.
+			cc, err := payout.ChainConfigFor(ctx, h.db.Pool, chainID)
 			if err != nil {
 				lrows.Close()
 				return nil, err
 			}
+			decimals := cc.AssetDecimals
 			cl, err := payout.ClaimFor(ctx, h.db.Pool, sid, claimAddr)
 			if err != nil {
 				lrows.Close()
@@ -173,32 +204,62 @@ func (h *PayoutClaimsHandler) claimsFor(c *fiber.Ctx, uid uuid.UUID, only *uuid.
 				proof[i] = hex0x(p[:])
 			}
 
+			// THREE states, not two.
+			//
+			// The frozen address is either the one live now, an old one with a
+			// live replacement, or an old one with NO live replacement at all -
+			// and the third is not the second with a null beside it. It is its
+			// own situation, and the UI owes that person a different sentence:
+			// they must claim from a wallet they no longer have registered, AND
+			// they have nothing registered for future payouts either.
+			//
+			// It does not arise through the registration handler, which always
+			// leaves a live row behind. It arises from an address superseded
+			// without a replacement - an admin action, a compromise, or a future
+			// "remove my payout address". Defensive, and cheap to name.
 			status := "current"
 			var currentAddr any
-			if cur, ok := current[chainID]; !ok || cur != claimAddr {
+			cur, hasLive := current[chainID]
+			switch {
+			case hasLive && cur == claimAddr:
+				status = "current"
+			case hasLive:
 				status = "superseded"
-				if ok {
-					currentAddr = cur
-				}
+				currentAddr = cur
+			default:
+				status = "no_live_address"
 			}
 
 			out = append(out, fiber.Map{
-				"settlement_id":   sid,
-				"chain_id":        chainID,
-				"pool":            pool,
-				"escrow_address":  escrow,
-				"asset":           fiber.Map{"symbol": "USDC", "decimals": decimals},
-				"amount_minor":    fmt.Sprintf("%d", amount),
-				"amount":          minorToDecimal(amount, decimals),
-				"claim_address":   claimAddr,
-				"address_status":  status,
-				"current_address": currentAddr,
-				"identity_hash":   hex0x(cl.IdentityHash[:]),
-				"leaf_hash":       hex0x(cl.LeafHash[:]),
-				"leaf_index":      cl.LeafIndex,
-				"proof":           proof,
-				"root":            hex0x(cl.Root[:]),
-				"published_tx":    publishedTx,
+				"settlement_id":  sid,
+				"chain_id":       chainID,
+				"pool":           pool,
+				"escrow_address": escrow,
+				// Served, never hardcoded - by the client OR by us. The symbol
+				// was a server-side literal sitting beside decimals read from
+				// config: the same defect one layer up, harmless only because
+				// the seeded symbol happened to match the literal.
+				"contract_address":      cc.ContractAddress,
+				"network":               cc.Network,
+				"explorer_url_template": cc.ExplorerURLTemplate,
+				"asset":                 fiber.Map{"symbol": cc.AssetSymbol, "decimals": decimals},
+				"amount_minor":          fmt.Sprintf("%d", amount),
+				"amount":                minorToDecimal(amount, decimals),
+				"claim_address":         claimAddr,
+				// The registration date of the FROZEN address. Otherwise
+				// unreachable: GET /me/payout-address filters on
+				// superseded_at IS NULL, so once an address is replaced its date
+				// is gone from the API, and "the address you registered on
+				// 3 July" cannot be written.
+				"claim_address_verified_at": a.verifiedAt,
+				"address_status":            status,
+				"current_address":           currentAddr,
+				"identity_hash":             hex0x(cl.IdentityHash[:]),
+				"leaf_hash":                 hex0x(cl.LeafHash[:]),
+				"leaf_index":                cl.LeafIndex,
+				"proof":                     proof,
+				"root":                      hex0x(cl.Root[:]),
+				"published_tx":              publishedTx,
 			})
 		}
 		lrows.Close()

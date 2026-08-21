@@ -220,12 +220,15 @@ reachable from one another.
       "pool": "contributor",
       "contract_address": "0x1b41…22c9",
       "escrow_address": "0xe5ff…22bc",
+      "network": "testnet",
+      "explorer_url_template": "https://explorer.aptoslabs.com/txn/%s?network=testnet",
       "asset": { "symbol": "USDC", "decimals": 6 },
 
       "amount_minor": "250000",
       "amount": "0.250000",
 
       "claim_address": "0x1b41…22c9",
+      "claim_address_verified_at": "2026-07-03T09:12:00Z",
       "address_status": "current",
       "current_address": null,
 
@@ -262,6 +265,25 @@ Notes on specific fields, because each is there for a reason:
 - **`identity_hash` is returned, never recomputed.** The contract takes it as a
   caller-supplied argument, and recomputing it would need the salt and would
   produce a different value for anybody who renamed on GitHub.
+- **`network` is a LABEL, never a URL.** `"testnet"` / `"mainnet"`, which the
+  Aptos SDK resolves to endpoints itself. A URL we serve is a URL we are on the
+  hook for keeping alive — clients cache it, and rotating a provider breaks
+  claims for everyone still holding the old one. `rpc_endpoint_ref` holds the
+  *name* of an environment variable precisely so no keyed endpoint reaches a
+  migration, so it cannot be served verbatim either. If public-node rate limits
+  ever make claims fail intermittently, the answer is **a proxy we own, not a
+  served URL** — that future does not get to decide this field.
+
+- **`claim_address_verified_at` is on the claim row rather than an address-history
+  endpoint.** The row already carries `claim_address`, and this is the date of
+  *that* address. A history route would be a larger surface, two round trips for
+  one line of copy, and — worst — it would serve live data that can disagree with
+  a frozen claim row. Without this field the date is unreachable: `GET
+  /me/payout-address` filters on `superseded_at IS NULL`, so once an address is
+  replaced its registration date leaves the API, and this document's own model
+  copy — *"the address you registered on 3 July"* — could not be written against
+  the API this document describes.
+
 - **`contract_address` and `escrow_address` are served, not hardcoded.** A
   frontend with a baked-in module address is a frontend that pays into the wrong
   contract after a redeploy.

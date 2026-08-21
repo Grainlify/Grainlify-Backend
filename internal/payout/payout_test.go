@@ -626,3 +626,99 @@ func TestClaimFor_ReturnsTheStoredIdentityHash(t *testing.T) {
 		}
 	}
 }
+
+// --- served chain values ----------------------------------------------------
+
+// A chain with no row and a chain with a half-filled row are different operator
+// mistakes and must not share an error.
+func TestChainConfigFor_DistinguishesUnseededFromHalfSeeded(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+
+	if _, err := ChainConfigFor(ctx, d.Pool, "no-such-chain"); !errors.Is(err, ErrChainNotConfigured) {
+		t.Fatalf("unseeded chain: want ErrChainNotConfigured, got %v", err)
+	}
+
+	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations)
+		VALUES ('half-seeded', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1) ON CONFLICT DO NOTHING`)
+	t.Cleanup(func() { d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='half-seeded'`) })
+
+	_, err := ChainConfigFor(ctx, d.Pool, "half-seeded")
+	if !errors.Is(err, ErrChainConfigIncomplete) {
+		t.Fatalf("half-seeded chain: want ErrChainConfigIncomplete, got %v", err)
+	}
+	// It must name what is missing, or fixing it is a guessing game.
+	for _, want := range []string{"contract_address", "explorer_url_template", "network"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name the missing %q: %v", want, err)
+		}
+	}
+}
+
+// No field may fall back to an empty string. A "" contract address is
+// concatenated into ::escrow::claim and submitted against 0x.
+func TestChainConfigFor_NeverReturnsAnEmptyFieldAlongsideNoError(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	for _, null := range []string{"contract_address", "explorer_url_template", "network"} {
+		d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='probe'`)
+		d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations,
+			contract_address, explorer_url_template, network)
+			VALUES ('probe', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')`)
+		d.Pool.Exec(ctx, `UPDATE chain_configs SET `+null+` = NULL WHERE chain_id='probe'`)
+
+		cc, err := ChainConfigFor(ctx, d.Pool, "probe")
+		if err == nil {
+			t.Errorf("%s NULL was accepted, yielding %+v", null, cc)
+		}
+		// The WHOLE struct, not two fields of it. Checking only the fields
+		// assigned after the guard passes even when the partly-built value is
+		// returned - which is how a caller ends up with a ChainID and nothing
+		// else and treats it as a config.
+		if cc != (ChainConfig{}) {
+			t.Errorf("%s: a partly-populated config was returned alongside an error: %+v", null, cc)
+		}
+	}
+	d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='probe'`)
+}
+
+// The symbol must come from the row, and a test that asserts "USDC" cannot tell
+// the difference when the seeded value IS "USDC". A mutation restoring the
+// hardcoded literal survived until this existed - the same trap the code comment
+// describes, reproduced in the test that was meant to catch it.
+func TestChainConfigFor_SymbolComesFromTheRowNotALiteral(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations,
+		contract_address, explorer_url_template, network)
+		VALUES ('symbol-probe', true, '{"symbol":"ZZZ","decimals":9}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')
+		ON CONFLICT (chain_id) DO NOTHING`)
+	t.Cleanup(func() { d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='symbol-probe'`) })
+
+	cc, err := ChainConfigFor(ctx, d.Pool, "symbol-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc.AssetSymbol != "ZZZ" {
+		t.Errorf("AssetSymbol = %q, want ZZZ — it is being read from a literal, not the row", cc.AssetSymbol)
+	}
+	if cc.AssetDecimals != 9 {
+		t.Errorf("AssetDecimals = %d, want 9", cc.AssetDecimals)
+	}
+}
+
+func TestChainConfigFor_ReadsTheSeededChain(t *testing.T) {
+	d := dbtest.DB(t)
+	cc, err := ChainConfigFor(context.Background(), d.Pool, "aptos-testnet")
+	if err != nil {
+		t.Fatalf("the seeded chain did not read: %v", err)
+	}
+	if cc.ContractAddress == "" || cc.Network != "testnet" || cc.AssetSymbol != "USDC" || cc.AssetDecimals != 6 {
+		t.Fatalf("unexpected config: %+v", cc)
+	}
+	// A label, never a URL: a served URL is one we must keep alive, and
+	// rpc_endpoint_ref holds an env var name so no keyed URL escapes.
+	if strings.Contains(cc.Network, "://") {
+		t.Errorf("network is a URL (%q); it must be a label the SDK resolves itself", cc.Network)
+	}
+}
