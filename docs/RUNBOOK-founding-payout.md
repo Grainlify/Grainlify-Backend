@@ -79,6 +79,19 @@ Check all of these before touching anything. Each has bitten at least once.
 | Sponsor holds APT | `aptos account balance --profile grainlify-testnet` | funding transactions fail midway |
 | Sponsor holds USDC ≥ leaf total | `primary_fungible_store::balance` | you discover it between funding and publishing, with a half-funded escrow |
 | Migrations at 81+ | `SELECT version FROM schema_migrations` | `claim_leaves` does not exist |
+| **`APTOS_TESTNET_RPC_URL` is set** in the API's environment | see below | every live chain read returns `chain_endpoint_not_configured` |
+
+**The chain reads need a node, and nothing falls back to a public one.**
+`chain_configs.rpc_endpoint_ref` holds the NAME of an environment variable
+(`APTOS_TESTNET_RPC_URL`) so that no endpoint carrying an API key is ever written
+into a migration. If that variable is unset, `/me/claims/:id/chain` returns
+**503 `chain_endpoint_not_configured`** naming the variable, and deadline
+reminders cannot read a deadline.
+
+That refusal is deliberate: defaulting to `https://fullnode.testnet.aptoslabs.com`
+would work in development and mislead in production, where the difference between
+"reading the chain" and "reading *a* chain" matters. Set it before the first
+settlement is published.
 
 **A 16- or 24-byte `SALT_ENC_KEY_B64` is accepted by AES and silently gives you
 AES-128.** The length check refuses it; the check is the only thing between a

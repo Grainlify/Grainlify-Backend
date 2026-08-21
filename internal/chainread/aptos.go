@@ -22,6 +22,7 @@ package chainread
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -155,4 +157,27 @@ func (c *Client) ClaimDeadline(ctx context.Context, module, escrow string) (int6
 		return 0, fmt.Errorf("%w: claim_deadline %q is not a number", ErrBadReply, s)
 	}
 	return n, nil
+}
+
+// Root returns the published root of an escrow, or false if none is published.
+func (c *Client) Root(ctx context.Context, module, escrow string) ([]byte, bool, error) {
+	out, err := c.view(ctx, module+"::escrow::root", []any{escrow})
+	if err != nil {
+		return nil, false, err
+	}
+	// Option<vector<u8>> comes back as {"vec":["0x…"]} or {"vec":[]}.
+	var opt struct {
+		Vec []string `json:"vec"`
+	}
+	if err := json.Unmarshal(out[0], &opt); err != nil {
+		return nil, false, fmt.Errorf("%w: root returned %s", ErrBadReply, out[0])
+	}
+	if len(opt.Vec) == 0 {
+		return nil, false, nil
+	}
+	b, err := hex.DecodeString(strings.TrimPrefix(opt.Vec[0], "0x"))
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: root %q is not hex", ErrBadReply, opt.Vec[0])
+	}
+	return b, true, nil
 }

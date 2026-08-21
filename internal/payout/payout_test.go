@@ -753,3 +753,134 @@ func TestChainConfigFor_ReadsTheSeededChain(t *testing.T) {
 		t.Errorf("network is a URL (%q); it must be a label the SDK resolves itself", cc.Network)
 	}
 }
+
+// --- the live reader: no cache, ever -----------------------------------------
+
+type countingClient struct {
+	deadlineCalls int
+	claimedCalls  int
+	deadline      int64
+}
+
+func (c *countingClient) ClaimDeadline(ctx context.Context, module, escrow string) (int64, error) {
+	c.deadlineCalls++
+	return c.deadline, nil
+}
+func (c *countingClient) IsClaimed(ctx context.Context, module, escrow, leaf string) (bool, error) {
+	c.claimedCalls++
+	return false, nil
+}
+
+func publishedFixture(t *testing.T, d *db.DB) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	people := []person{{id: uuid.New(), login: "alice", addr: "x", amount: 250_000}}
+	s := fixture(t, d, "aptos-testnet", people)
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(ctx, d.Pool, saltKey(t), s,
+		Acknowledgement{InputDigest: r.InputDigest, ExcludedTotalMinor: r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Pool.Exec(ctx, `UPDATE payout_event_roots
+		SET published_tx='0xtx', escrow_address='0xesc', published_at=now() WHERE settlement_id=$1`, s.SettlementID); err != nil {
+		t.Fatal(err)
+	}
+	return s.SettlementID
+}
+
+// The property the reminder path depends on: every call reads the chain.
+//
+// A cached deadline is wrong exactly when extend_deadline has been used, which
+// is exactly when somebody asked us for help - and a reminder would then fire on
+// the old date, telling them they are about to lose money we had already given
+// them more time to collect.
+func TestLiveReader_NeverCachesTheDeadline(t *testing.T) {
+	d := dbtest.DB(t)
+	t.Setenv("APTOS_TESTNET_RPC_URL", "https://node.invalid")
+	sid := publishedFixture(t, d)
+
+	c := &countingClient{deadline: 1_800_000_000}
+	r := NewLiveReaderWith(d.Pool, func(string) ChainClient { return c })
+
+	for i := 1; i <= 3; i++ {
+		if _, err := r.Deadline(context.Background(), sid); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if c.deadlineCalls != i {
+			t.Fatalf("after %d calls the chain was read %d times; a cache has been introduced", i, c.deadlineCalls)
+		}
+	}
+}
+
+// The deadline MOVING must be visible immediately, which is the whole point.
+func TestLiveReader_SeesAnExtensionOnTheVeryNextCall(t *testing.T) {
+	d := dbtest.DB(t)
+	t.Setenv("APTOS_TESTNET_RPC_URL", "https://node.invalid")
+	sid := publishedFixture(t, d)
+
+	c := &countingClient{deadline: 1_800_000_000}
+	r := NewLiveReaderWith(d.Pool, func(string) ChainClient { return c })
+
+	before, err := r.Deadline(context.Background(), sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.deadline = 1_900_000_000 // an admin extends the window
+	after, err := r.Deadline(context.Background(), sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.After(before) {
+		t.Fatalf("an extension was invisible: before=%s after=%s", before, after)
+	}
+}
+
+func TestLiveReader_NeverCachesClaimedState(t *testing.T) {
+	d := dbtest.DB(t)
+	t.Setenv("APTOS_TESTNET_RPC_URL", "https://node.invalid")
+	sid := publishedFixture(t, d)
+
+	c := &countingClient{}
+	r := NewLiveReaderWith(d.Pool, func(string) ChainClient { return c })
+	for i := 1; i <= 2; i++ {
+		if _, err := r.Claimed(context.Background(), sid, "0xleaf"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.claimedCalls != 2 {
+		t.Fatalf("claimed was read %d times for 2 calls", c.claimedCalls)
+	}
+}
+
+// An unpublished settlement has no escrow to read, and must say so rather than
+// reading a zero address.
+func TestLiveReader_RefusesAnUnpublishedSettlement(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	t.Setenv("APTOS_TESTNET_RPC_URL", "https://node.invalid")
+	people := []person{{id: uuid.New(), login: "alice", addr: "x", amount: 1000}}
+	s := fixture(t, d, "aptos-testnet", people)
+	r, _ := DryRun(ctx, d.Pool, s)
+	if _, err := Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor}); err != nil {
+		t.Fatal(err)
+	}
+	// Built but never published.
+	lr := NewLiveReaderWith(d.Pool, func(string) ChainClient { return &countingClient{} })
+	if _, err := lr.Deadline(ctx, s.SettlementID); err == nil {
+		t.Fatal("a deadline was returned for a settlement with no recorded publication")
+	}
+}
+
+// Without a node endpoint the reader must fail, not fall back.
+func TestLiveReader_RefusesWithoutAnEndpoint(t *testing.T) {
+	d := dbtest.DB(t)
+	t.Setenv("APTOS_TESTNET_RPC_URL", "")
+	sid := publishedFixture(t, d)
+	lr := NewLiveReaderWith(d.Pool, func(string) ChainClient { return &countingClient{} })
+	if _, err := lr.Deadline(context.Background(), sid); err == nil {
+		t.Fatal("a deadline was returned with no node configured")
+	}
+}

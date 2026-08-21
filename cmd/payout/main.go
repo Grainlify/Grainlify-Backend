@@ -34,6 +34,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -44,6 +45,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jagadeesh/grainlify/backend/internal/chainread"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbguard"
@@ -272,6 +274,53 @@ func cmdPublish(ctx context.Context, d *db.DB, args []string) error {
 	if escrow == "" || tx == "" {
 		return errors.New("publish requires --escrow <address> and --tx <hash>")
 	}
+	// VERIFY THE ESCROW BEFORE RECORDING IT.
+	//
+	// --escrow is typed by a person, and `initialise` is ungated: anybody can
+	// create an escrow at an address they control. Recording an unverified
+	// address means every later chain read - claimed state, deadline, reminders -
+	// asks somebody else's escrow and believes the answer is ours.
+	//
+	// The root makes the address self-verifying. Ours committed to a specific
+	// 32 bytes; another escrow has different bytes or none. A typo cannot survive
+	// this check, and neither can a substitution.
+	var want []byte
+	var chainID string
+	if err := d.Pool.QueryRow(ctx,
+		`SELECT root, chain_id FROM payout_event_roots WHERE settlement_id = $1`, sid).Scan(&want, &chainID); err != nil {
+		return fmt.Errorf("no tree built for settlement %s: %w", sid, err)
+	}
+	cc, err := payout.ChainConfigFor(ctx, d.Pool, chainID)
+	if err != nil {
+		return err
+	}
+	var ref *string
+	_ = d.Pool.QueryRow(ctx, `SELECT rpc_endpoint_ref FROM chain_configs WHERE chain_id=$1`, chainID).Scan(&ref)
+	refName := ""
+	if ref != nil {
+		refName = *ref
+	}
+	nodeURL, err := chainread.EndpointFor(refName)
+	if err != nil {
+		return fmt.Errorf("cannot verify the escrow without a node: %w", err)
+	}
+	got, published, err := chainread.New(nodeURL).Root(ctx, cc.ContractAddress, escrow)
+	if err != nil {
+		return fmt.Errorf("reading the root of %s: %w", escrow, err)
+	}
+	if !published {
+		return fmt.Errorf("escrow %s has NO published root.\n"+
+			"Either the publish_root transaction did not land, or this is not the escrow you published to",
+			escrow)
+	}
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("escrow %s does not hold our root.\n"+
+			"  on chain: 0x%x\n  ours:     0x%x\n"+
+			"Nothing has been recorded. This address belongs to a different escrow - `initialise` is "+
+			"ungated, so an escrow existing at an address proves nothing about whose it is.",
+			escrow, got, want)
+	}
+
 	tag, err := d.Pool.Exec(ctx, `
 		UPDATE payout_event_roots
 		SET escrow_address = $2, published_tx = $3, published_at = now()

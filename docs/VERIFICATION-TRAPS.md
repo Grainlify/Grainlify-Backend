@@ -1805,6 +1805,70 @@ and an unbounded data-reconciliation exercise once real records depend on the
 gap. **The cheap moment to add one is before it is true by accident** — while the
 table holds one row rather than thirty-eight.
 
+## An error named after the layer that noticed it
+
+> **An error name that describes the layer which noticed the problem, rather
+> than the problem, sends every future reader to the wrong place — and does it
+> confidently.**
+
+A view call to an Aptos fullnode returned `400`. The client mapped every non-200
+to one error:
+
+```go
+ErrNodeFailed = errors.New("chain_node_unreachable")
+```
+
+The node was perfectly reachable. It had answered, correctly and quickly, with a
+Move abort: `E_NOT_INITIALISED(0x2)` — *there is no escrow at that address.*
+
+Two opposite facts arrive under one HTTP status. One means **check the network**;
+the other means **check the address**. The name asserted the first with total
+confidence, and an operator following it would examine node health, DNS, the RPC
+provider and their own connectivity, finding nothing wrong with any of them,
+because nothing was.
+
+The name was accurate about **where the failure was detected** — the HTTP layer,
+which saw a non-200 — and silent about **what failed**, which was neither HTTP
+nor the node.
+
+### Why this is easy to write and hard to see
+
+At the point the error is constructed, the layer that noticed is the only thing
+in scope. You are holding a `*http.Response`; "the node did not give me a 200" is
+a true and complete description *of what you can see from there*. The
+distinction requires looking INTO the body you already have, and the body is
+right there — which is what makes this a habit failure rather than a
+missing-information failure.
+
+It was found by pointing the client at a real node with a deliberately wrong
+address, reading the message, and noticing it named the wrong thing.
+
+The fix separates the causes:
+
+```go
+ErrNodeFailed      // transport, timeout, non-200 with no abort in it
+ErrContractAborted // the contract answered, and said no
+```
+
+with a test asserting neither satisfies the other's `errors.Is` — because two
+names that both match are one name wearing two hats.
+
+### The check
+
+**Read your error names as instructions.** `chain_node_unreachable` is an
+instruction: *go and look at the node.* If following that instruction would waste
+somebody's time in the most likely failure case, the name is wrong regardless of
+how accurate it is about the mechanism.
+
+**Ask what the layer below actually said before summarising it.** A non-200 with
+a body is not one fact; it is a status *and* a payload, and the payload usually
+contains the real answer. Discarding it and naming the status is how a precise
+upstream error becomes a vague local one.
+
+And the general form, of which this is one instance: **name errors after causes,
+not after detectors.** "Timeout", "unreachable", "parse failed", "non-200" all
+describe the observer. "The escrow does not exist" describes the world.
+
 ## What a test asserts is not what its author believed it asserted
 
 A family rather than an incident, and it now has enough members to be worth
