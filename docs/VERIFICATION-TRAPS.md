@@ -1663,6 +1663,24 @@ broken version. Understanding a hazard operates on the code you are looking at;
 it does not carry to the next thing you write, because the next thing feels like
 a different problem.
 
+**This has now happened twice, in the same shape.** The second time was a
+balance check: `CheckBalance` was tested with the balance set *equal to* the
+floor, and the assertion looked for the floor's rendered value — which appeared
+in the message from the **balance** position. A mutation replacing the floor with
+a placeholder passed, because the expected string was still there for a different
+reason.
+
+Two instances, one rule:
+
+> **Pick fixture values that CANNOT coincide with the thing being asserted.**
+> If the setup value and the expected value are equal, the assertion cannot tell
+> you which one it found — and "the right answer for the wrong reason" is
+> indistinguishable from "the right answer".
+
+Seeded symbol `USDC`, expected `USDC`. Balance equal to floor, expecting the
+floor. In both, one distinct value in the fixture would have made the test
+meaningful, and the cost of choosing one is zero.
+
 The fix is to make the two cases *differ*: change the row and require the
 response to follow.
 
