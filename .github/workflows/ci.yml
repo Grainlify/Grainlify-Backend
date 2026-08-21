@@ -1,11 +1,35 @@
 name: CI
 
-# PUSH is scoped to this working branch, not main - production is deployed by
-# hand from this exact branch today, and the deploy job below runs on push.
-# Adding main here would deploy on every main merge, which is a separate
-# decision from testing. Gating automation on an eventual main merge (undated,
-# non-trivial given the structural divergence between branches) would mean
-# indefinitely more manual deploys. Revisit if/when this branch merges to main.
+# THIS WORKFLOW TESTS. IT DOES NOT DEPLOY PRODUCTION.
+#
+# Railway deploys production itself, from main, through its own GitHub
+# integration. Merging to main deployed 71bf161 within three minutes with no
+# job here involved - confirmed by GET https://api.grainlify.com/version,
+# which reports the running commit.
+#
+# The comment that used to sit here said the opposite: that production was
+# deployed by hand from restore/initial-commit-with-auth-fixes, and that
+# adding main to the push trigger "would deploy on every main merge". Both
+# were false by the time anybody read them, in the file that controls
+# deployment. It is the machinery-comment failure in the worst possible place:
+# the reader who most needs to know how production ships is the one this
+# misled.
+#
+# WHY THERE IS NO PUSH TRIGGER ANY MORE.
+#
+# It used to fire on push to restore/initial-commit-with-auth-fixes, and that
+# job ran `railway up` against the production service. That branch sits 124
+# commits behind main and is fully contained in it - it contributes nothing
+# and has not moved in months.
+#
+# So one accidental push to a stale branch would have deployed a six-month-old
+# tree over production. The failure would have been silent in every direction:
+# no job fails, no migration errors (golang-migrate simply applies nothing when
+# the recorded version is already higher), and the smoke test below PASSES,
+# because /health returning 200 and an OAuth redirect resolving are true of
+# every version this repository has ever had. A green deploy of ancient code.
+#
+# Deploying is now workflow_dispatch only: a person choosing a ref on purpose.
 #
 # PULL_REQUEST covers main as well, and the omission was not deliberate.
 # main is the default branch, so every PR opened against it - which is most of
@@ -13,13 +37,7 @@ name: CI
 # flaky one: no build, no vet, no test, no migration-collision check. Between
 # 2026-07-31, the last pull_request run this repository recorded, and
 # 2026-08-20, 52 pull requests merged into main without any of it.
-#
-# The deploy job cannot fire from here: it is guarded on
-# github.event_name == 'push' || 'workflow_dispatch'. Testing PRs against main
-# therefore adds no deploy behaviour, which is why the two triggers differ.
 on:
-  push:
-    branches: [restore/initial-commit-with-auth-fixes]
   pull_request:
     branches: [restore/initial-commit-with-auth-fixes, main]
   workflow_dispatch:
@@ -210,7 +228,11 @@ jobs:
   deploy:
     name: Deploy to Railway
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # workflow_dispatch ONLY. The 'push' half was removed with the push
+    # trigger rather than left as a harmless-looking clause: leaving it means
+    # adding any push trigger later - for testing, for a branch, for anything -
+    # silently re-arms a production deploy.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: production
     concurrency:
