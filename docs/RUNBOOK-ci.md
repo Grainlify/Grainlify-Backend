@@ -93,3 +93,73 @@ result also looks like from a distance.
 - Local suite behaviour, the `-p 1` requirement, and known flakes: `docs/TESTING-DEBT.md`
 - Why a green suite says nothing about the Move contract: `internal/chain/aptos_fixture_drift_test.go`
 - Counting what ran rather than reading the totals: `docs/VERIFICATION-TRAPS.md`
+
+---
+
+# Running the suite locally: one database per BRANCH
+
+`#535` fails a PR whose migrations sit at or below main's highest. It runs at PR
+time and does nothing for you at your desk. This section is the local half, and
+it is workflow rather than a lesson: **create the database when you create the
+branch, not after the collision.**
+
+## Why a shared database breaks the moment two branches exist
+
+`migrate.Up` records one version per database. A branch carrying migration N+1
+migrates the shared database to N+1; switch to a branch that does not have that
+file and the next run fails:
+
+```
+migrate.Up: no migration found for version 89: read down for version 89 .: file does not exist
+```
+
+Nothing is wrong with either branch. The database is simply ahead of one of them,
+and it stays ahead until somebody drops it.
+
+This is not rare and it is not a sign of a mistake. It happens the moment two
+branches with migrations exist, which on any active day is most of them — three
+separate times in one day here, at versions 88, 89 and 90.
+
+## The workflow
+
+One container, many databases. Creating a database is instant; migrating it is
+the slow part and it happens once per branch either way.
+
+```sh
+# when you create the branch, in the same breath
+git checkout -b my-branch origin/main
+createdb -h localhost -p 5435 -U postgres grainlify_test_my_branch
+
+# and every run on that branch
+TEST_DB_URL='postgres://postgres:test@localhost:5435/grainlify_test_my_branch?sslmode=disable' \
+  go test -count=1 -p 1 ./...
+```
+
+`-p 1` is not optional — several packages share the one database and mutate
+global state, so Go's default concurrent-per-package execution races without it.
+CI passes it and says so at length.
+
+## Do not hand-edit `schema_migrations`
+
+Rolling back a local migration means **dropping the database**. Running a
+`.down.sql` by hand and deleting the row leaves the recorded version pointing at
+a state the files disagree with, and the next `migrate.Up` fails at some
+unrelated earlier version — which reads as corruption rather than as the edit it
+was. Drop it and let the chain re-run; it is a local test database and holds
+nothing anyone needs.
+
+## Why not just drop and recreate the shared one each time
+
+Because the failure is silent in the other direction. A database migrated by
+another branch does not announce itself, and the symptom — a test failing on a
+duplicate key, or a column that does not exist — points at the test rather than
+at the database. Separate databases remove the class instead of teaching people
+to recognise it.
+
+## The related trap
+
+A migration numbered at or below what main already has **never runs**, and
+`migrate.Up` reports success. See #535 for the CI check and
+`docs/VERIFICATION-TRAPS.md` for why a silent skip is the worst shape a failure
+can take.
+
