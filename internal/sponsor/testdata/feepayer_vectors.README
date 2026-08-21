@@ -1,0 +1,15 @@
+// Golden vectors for the fee-payer signing message, produced by the Aptos TS SDK
+// via Aptos-Contracts/tools/wallet-check (generateSigningMessageForTransaction).
+//
+// A DIFFERENT implementation is the point: if the Go encoder reproduces these
+// bytes, the hand-written struct layout matches the reference one for this shape.
+//
+// The shape is the PRODUCTION one, unlike milestone 1:
+//   - SIX proof elements, so the vector<vector<u8>> path is exercised non-empty
+//   - sequence_number 258, which is multi-byte and would catch a u64 endianness
+//     error that 0 cannot
+//   - both fee-payer forms: the sender signing 0x0, and the sender signing the
+//     real payer address
+//
+// Regenerate with tools/wallet-check/genvec.mjs if the encoding ever legitimately
+// changes. Do NOT edit these bytes to make a test pass: they are the oracle.

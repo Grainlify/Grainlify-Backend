@@ -1,7 +1,9 @@
 package sponsor
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -215,3 +217,65 @@ func claimArgsBCS(f TxnFields) ([][]byte, error) {
 // ParseU64 is a small helper: amounts arrive as decimal strings because a u64
 // does not fit a float64.
 func ParseU64(s string) (uint64, error) { return strconv.ParseUint(s, 10, 64) }
+
+// FeePayerForm records which of the two legal shapes a sender actually signed.
+//
+// Not a preference and not a configuration value: a fact about the submission in
+// hand, established by checking rather than assumed.
+type FeePayerForm string
+
+const (
+	// FormZeroAddress: the sender signed fee_payer_address = 0x0, not knowing
+	// who would pay. The TS SDK path does this.
+	FormZeroAddress FeePayerForm = "zero_address"
+	// FormNamedPayer: the sender signed the real fee payer address, having been
+	// given it first. Petra does this.
+	FormNamedPayer FeePayerForm = "named_payer"
+)
+
+// ErrSignatureMatchesNeitherForm means the sender's signature is not over either
+// legal fee-payer message.
+//
+// **Refusing here is the only thing between a malformed submission and a
+// transaction we pay for that then aborts.** A fee payer is charged for a failed
+// transaction, so submitting something we could not verify is us buying an
+// abort.
+var ErrSignatureMatchesNeitherForm = errors.New("sender_signature_invalid")
+
+// VerifySenderForm establishes WHICH fee-payer message the sender signed.
+//
+// # Why this checks both instead of choosing one
+//
+// Both forms are live in this workstream: Petra had to be given the fee payer
+// address before signing and therefore signs the real one, while the TS SDK path
+// used for the first milestone signs 0x0. Assuming either makes the service work
+// against whichever half it was tested with and fail against the other - and the
+// failure is INVALID_SIGNATURE at submission, which reads to a contributor as a
+// broken wallet rather than as our bug.
+//
+// Checking both costs two ed25519 verifications, which is nothing next to the
+// transaction we are about to pay for.
+//
+// The form is returned so the caller can RECORD it. That record is what tells us
+// later whether a wallet changed behaviour, which is not a question anybody can
+// answer retrospectively from an INVALID_SIGNATURE.
+func VerifySenderForm(f TxnFields, senderPubKey, senderSig []byte) (FeePayerForm, error) {
+	named := f
+	zero := f
+	zero.FeePayer = ZeroAddress
+
+	for form, fields := range map[FeePayerForm]TxnFields{
+		FormZeroAddress: zero,
+		FormNamedPayer:  named,
+	} {
+		msg, err := FeePayerSigningMessage(fields)
+		if err != nil {
+			return "", err
+		}
+		if ed25519.Verify(senderPubKey, msg, senderSig) {
+			return form, nil
+		}
+	}
+	return "", fmt.Errorf("%w: the signature is over neither the zero-address nor the "+
+		"named-payer message, so nothing is submitted", ErrSignatureMatchesNeitherForm)
+}
