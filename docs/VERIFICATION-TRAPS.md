@@ -3477,3 +3477,45 @@ copy.
 
 When such a test fails, the first question is whether the copy is wrong or the
 rule is. It was the rule both times it happened here.
+
+## A queue maintained by what is changing drops what has stopped
+
+A status report listed the open pull requests at the end of a long session. It
+was accurate about every branch touched that hour and silent about one that had
+been green and unmerged since the morning — the oldest item, with no
+dependencies, and the only one that could have merged at any point.
+
+Nothing was wrong with the list. It was assembled the way such lists are
+assembled: from what had just moved.
+
+### Why the omission selects for the worst item
+
+An item drops off a working set when it stops generating events. So the thing a
+change-driven list forgets is, by construction, **the thing that has been
+quietly ready the longest** — no failures, no conflicts, no notifications, and
+therefore nothing to put it back in view.
+
+The list is not merely incomplete. Its blind spot is aimed at the item with the
+lowest cost to finish and the longest time already spent waiting.
+
+### The check
+
+**Enumerate from the system, not from memory.** The queue is not what you recall
+touching; it is what the system says is open:
+
+```sh
+gh pr list --state open --json number,title,updatedAt \
+  --jq 'sort_by(.updatedAt)|.[]|"\(.updatedAt[0:10]) #\(.number) \(.title)"'
+```
+
+Sorted **oldest first**, deliberately: newest-first reproduces the same bias the
+report had, because recency is what put the other items in mind already.
+
+### The general form
+
+Same family as globbing rather than enumerating and as counting declared tests
+against executed ones — a check whose inputs come from the author's attention
+covers what the author attended to. Here the input was a working memory of a
+session, and the property being reported on — *is anything outstanding* — is
+precisely the one that memory is worst at, because an item outstanding for long
+enough stops being remembered as outstanding at all.
