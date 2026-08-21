@@ -2794,3 +2794,541 @@ all passing on the strength of the old reason.
 
 Say that sentence out loud in the review. It is the only thing that reliably
 stops the change being read as a tidy-up.
+
+## A structural check that enumerates its own inputs
+
+`TestKYCVerifiedAt_EveryWriterGuardsTheTransition` reads the handler sources and
+asserts that every write of `kyc_verified_at` is guarded by the transition
+check. Its own comment states the promise:
+
+> It fails if a third writer appears, or if either existing one reverts — the
+> case the behavioural tests above cannot see.
+
+It could not fail if a third writer appeared. The list was written by hand:
+
+```go
+files := []string{"kyc.go", "didit_webhook.go"}
+```
+
+A third writer arrived in `kyc_status_reconciler.go`, carrying its own copy of
+the `CASE` block. The test never read that file, because a file nobody adds to
+the slice is a file it cannot see. The count stayed at **2**, matched
+`wantWriters`, and read as correct for as long as it existed.
+
+The check was not weakened. It was **never covering what it claimed to cover**,
+and its own success was the evidence offered for that claim.
+
+### Why the count made it worse
+
+The `wantWriters` constant is the good idea in that test — the thing that turns
+"all the ones I looked at are guarded" into "and there are exactly this many."
+It is the same countable invariant that appears elsewhere in this file, and it
+is why the drift is supposed to be impossible.
+
+But a count over a hand-written list counts *the list*, not the codebase. Both
+halves — the guard and the count — were computed from the same incomplete input,
+so they agreed with each other perfectly and with reality not at all. **Two
+checks derived from one wrong premise do not corroborate; they repeat.**
+
+### The check
+
+**Glob, do not enumerate.**
+
+```go
+entries, _ := filepath.Glob("*.go")            // every file, not a list of files
+for _, name := range entries {
+    if strings.HasSuffix(name, "_test.go") { continue }
+    ...
+}
+if len(files) < 10 {
+    t.Fatalf("globbed only %d source files; the scan is not running where it thinks it is", len(files))
+}
+```
+
+The floor assertion matters as much as the glob. A glob that silently returns
+nothing — wrong working directory, wrong pattern — produces zero findings, which
+is indistinguishable from a clean codebase. Assert the *input* is plausible
+before trusting the *output*, because a scan of nothing passes every check you
+can write about its results.
+
+### The general form
+
+**Any check whose inputs are listed by hand is a check on that list.** It will
+find what somebody remembered to give it and report the result as if it had
+looked everywhere. The failure is silent, it survives review — the list looks
+deliberate — and it gets *more* convincing over time as the list ages into
+something nobody questions.
+
+Third instance of this shape recorded here: the mutation harness that mutated
+one file from a fixed set, this guard, and the deferred-tool sweep that scanned
+a directory it had been handed rather than the tree. Where a check can derive
+its own inputs, it must; where it genuinely cannot, the list needs an assertion
+about its own size, so that shrinking it is a failure rather than a quieter run.
+
+## An undo whose blast radius exceeds the change
+
+Two incidents, one shape, both self-inflicted while verifying something else.
+
+**One — `git stash`, proving a new test could fail.** The right instinct: revert
+the implementation, keep the test, confirm it goes red. The command was
+`git stash`, which took *both* — the test was uncommitted too. The run reported
+`Tests 3 passed`, and 3 is what passes when the new test is not there at all.
+The check proved nothing and looked like it had proved everything.
+
+**Two — `git checkout -- <file>`, undoing one added line.** A line had been added
+to a document to confirm a new check caught it. `git checkout --` restores the
+file to HEAD, so it discarded that line *and* every correction made to the file
+in the preceding hour. The command printed nothing, which is what it prints on
+success.
+
+### The part that is not "be careful with git"
+
+Both commands **report success identically whether they undid one thing or
+forty.** There is no output that distinguishes the intended scope from the
+actual one. `git stash` says nothing about what it swept; `git checkout --` says
+nothing at all.
+
+So the loss is not discoverable at the moment it happens. It is discoverable at
+the **next check that reads the file** — and only if there is one. In the first
+case that was the test count, noticed because 3 was a suspicious number. In the
+second it was a grep for a string that should have been present. Both were
+noticed by accident, one step later, and either could as easily have been
+noticed by nobody: a stash that hides a test produces a green run, and a revert
+that removes an hour of edits produces a document that still parses.
+
+### The check
+
+**Verify the undo, not the flags.** Before trusting any result that depended on
+reverting something, assert the revert did what you meant:
+
+```sh
+git status --porcelain          # what is actually modified now
+git stash list                  # did that sweep more than intended
+```
+
+And prefer an undo whose scope is stated rather than implied. Copying the one
+file aside and back is uglier than `git checkout --` and cannot take anything
+with it:
+
+```sh
+cp target.go /tmp/keep && git checkout -- target.go   # ... test ...
+cp /tmp/keep target.go
+```
+
+The general rule is about **when** you verify rather than which command you
+type: a destructive step performed *in service of* a check must be confirmed
+before the check's result is believed, because the check itself will not notice
+that its inputs were removed. A test run does not know its test is missing. A
+document does not know a paragraph is gone.
+
+### Why this belongs with the rest of this file
+
+It is the same failure as the panic reporting `SKIP 0` and the guard counting a
+hand-written list: **an absence produced by the tooling, reported as a normal
+result.** Three tests passing is a real number. A clean `git status` is a real
+state. Neither says "and something you wrote is no longer here", because nothing
+in the pipeline was asked to compare against what you expected to still exist.
+
+## A test that constructs a state its own system cannot produce
+
+`settlement_lines.excluded_reason` was read in two places and written in none.
+`ExclusionsFor` filters `WHERE excluded_reason IS NOT NULL`, so it returned zero
+rows always; `/me/payout-readiness` could never answer `excluded_from_published`;
+and a UI state built for that answer was unreachable in production.
+
+Every test covering it passed, because each test **inserted the row itself**.
+
+That is the shape: a fixture writes a value no code path writes, the assertions
+against it hold, and the suite reports a working feature. The test is not wrong
+about what the code does with the state — it is wrong that the state occurs.
+
+### Why this survives review
+
+A fixture that sets up its own preconditions is *correct practice*. Nothing in
+the test looks suspicious: it inserts a row, calls the code, asserts the result.
+The defect is not in what the test contains but in what the system does not, and
+no amount of reading the test file reveals it. You have to go and ask who writes
+the column, which is a question a passing test actively discourages.
+
+It is also the most convincing kind of green. A feature with tests reads as more
+finished than one without, so the tests make the gap *harder* to find than if
+they had never been written.
+
+### The check
+
+**For any state a test constructs by hand, ask what in production produces it.**
+If the answer is a code path, name it in the fixture. If there is no answer, that
+is the bug, and it is upstream of everything the test asserts.
+
+Mechanically, for a column: grep for writes, not for uses.
+
+```sh
+grep -rn "excluded_reason" --include='*.go' . | grep -iE "insert|update|set "
+```
+
+Empty output against a column with readers is the finding. The same question for
+an enum value, a status string, or an error code: **who emits it?**
+
+### The general form
+
+**A test proves the code handles a state. It does not prove the state exists.**
+Those are different claims, and only the first is checked by running the suite -
+which means the second has to be established deliberately, once, by looking.
+
+Third instance of this family recorded here, all found in one day: the harness
+button asserted against a control the code could not reach, the writer-guard
+counted a hand-written list rather than the tree, and this. The common root is
+that a check derives its own subject from something the author supplied instead
+of from the system, so it measures the author's belief rather than the code.
+
+## A comment is a weak guard even against its own author
+
+Migration 086 made one live payout address belong to one account, and its own
+comment says what that does to fixtures:
+
+> Fixtures used to hand the same constant to several people, which migration 086
+> now forbids: one live address belongs to one account. That is the index doing
+> its job, and the fixture was relying on something the system no longer permits.
+
+A fixture in a second package went on using two fixed address constants. The
+tests passed against a fresh database and collided permanently on any database
+where a run had failed before its cleanup registered — the exact hazard, in the
+exact form, written down by somebody who had just fixed it elsewhere.
+
+The warning existed. It was in the repository. It had been read — the fix it
+describes was applied in one package the same day. And the second package was
+not checked, because a comment records a hazard where the hazard *was*, not
+where the reader is.
+
+### The stronger claim
+
+The usual lesson is "comments do not enforce anything", which invites the reply
+that a careful reader will still act on them. This is worse than that:
+
+**The person who documents a hazard is not reliably guarded by their own
+documentation.** Writing it down feels like discharging it. The note is
+addressed to a future stranger, and the author is not who they are picturing
+when they write it.
+
+So a comment is a good explanation and a poor control, *including* for the
+person who wrote it, minutes later, in a file they did not think of as related.
+
+### The check
+
+Where a hazard is enumerable, ask the system rather than the reader:
+
+```sql
+-- every column a repeated fixture value could collide on
+SELECT a.attname FROM pg_index i ... WHERE i.indisunique
+```
+
+Then sweep the tree against that set. Thirty-eight columns and one glob answers
+"does this hazard exist anywhere else" in a way that no number of careful
+readers does — and it answers it for packages nobody thought to look at, which
+is where the second instance was.
+
+Keep the comment. It explains *why* the check exists, which the check cannot say
+for itself. Just do not let writing it feel like having handled it.
+
+## An invariant whose two sides share an upstream decision
+
+A money-path assertion: when the whole pool is allocated, the residue must equal
+the total owed to excluded members.
+
+```
+residue   = pool - leafTotal            // one route
+excluded  = Σ amount of owed members    // another route
+assert residue == excluded
+```
+
+Two figures, computed differently, meeting. It reads as a check that held money
+was not paid to somebody else — and that is how the comment above it was
+written.
+
+It is not. Reclassifying a held member as payable moves the member's amount
+*into* the leaf total and *out of* the excluded total in the same step: residue
+falls by exactly what excluded falls by, both reach zero, and the equality still
+holds. The assertion survives the precise failure its comment claimed it caught.
+
+### Why it looked like it covered more
+
+**Both sides are computed downstream of the classification.** An error in the
+classification propagates into both, in the same direction, by the same amount.
+The invariant is testing the two *routes* from a decision, not the decision.
+
+And it is convincing because the thing it genuinely catches — money
+double-counted, or belonging to no bucket — is the thing you would naturally
+describe it as checking. "The totals reconcile" is exactly the sentence somebody
+reaches for when asked whether the money is right, which is what makes this
+shape worse on a money path than anywhere else.
+
+### The failure is in the comment, not the code
+
+This is what makes it a class rather than an anecdote.
+
+The assertion is correct, useful, and worth keeping. Nothing about it needs to
+change. **The defect is the next person's belief about what is covered**, and no
+test run can surface that: the suite is green, the invariant holds, and the
+sentence above it is false. It survives review because a reviewer checks whether
+the assertion is true, not whether the claim about it is.
+
+### The check
+
+**When you write down what an invariant proves, mutate the thing you just said
+it catches.** If it survives, the sentence is wrong, not the assertion.
+
+That is the only way this is findable. It was found exactly that way here:
+disabling the classification branch, expecting the identity to fail, and
+watching it pass.
+
+The habit generalises past invariants. Any sentence of the form "this catches X"
+is a testable claim, and mutating X is how you test it. A comment that has never
+been mutated against its own claim is a hypothesis written in the indicative.
+
+### The repair, when the sentence is wrong
+
+Narrow the claim rather than widen the assertion. Here the comment now says the
+identity proves the held money is exactly the money not in the tree, states
+plainly that it does **not** establish the classification, and names the tests
+that do. A guard with an honest scope is worth more than one with an
+aspirational one, because the honest scope tells the next person what still
+needs covering.
+
+## A comment describing machinery that does not name it
+
+```go
+// Reachable by design rather than only by corruption: account deletion
+// leaves an anonymised tombstone - the users row is retained with
+// identifying columns nulled and github_accounts is hard deleted along
+// with its token
+```
+
+There is no account deletion. No route, no handler, nothing that nulls those
+columns. The sentence describes a mechanism that has never existed.
+
+Two people read it in one day and both concluded the path was there. One scoped
+work that depended on wiring into it. The absence was found only by going to
+look for the function to call.
+
+### Why this is a different failure from the comment-as-guard entry
+
+Those comments describe **hazards**, and fail because the author does not heed
+their own warning. These describe **mechanisms**, and fail because *the reader
+cannot tell an aspiration from a fact.*
+
+Prose about machinery has no failure mode. It does not go red, it does not stop
+compiling, and it reads exactly the same whether the machinery was built,
+planned, removed, or renamed. It ages into documentation by sitting still.
+
+Worse, it actively hides the gap it creates. The absence of account deletion was
+harder to notice *because* something in the codebase described it — a search for
+"account deletion" returns a confident paragraph, which is what somebody
+checking would find and stop at.
+
+### The rule
+
+**A comment describing machinery must name it: a function, a file, or a route.**
+
+```go
+// bad   - unfalsifiable prose that reads as documentation
+// account deletion leaves an anonymised tombstone
+
+// good  - a claim that fails a grep the day it stops being true
+// DeleteAccount in handlers/account.go leaves an anonymised tombstone
+```
+
+The named version can be checked in five seconds and **dies honestly**: rename
+the function, delete the file, never write it, and the comment is visibly wrong
+to the next person who looks. The unnamed version survives all four.
+
+This is the same move as globbing rather than enumerating, pointed at prose: tie
+the claim to something the system can contradict.
+
+### The check
+
+For any comment asserting behaviour exists elsewhere, grep the identifier it
+names. If it names none, that is the finding — not because the comment is
+necessarily wrong, but because **nothing will ever tell you when it becomes
+wrong.**
+
+Statements about intent, rationale and consequence need no identifier; they are
+not claims about code. It is specifically the sentence of the form *"X happens
+over there"* that has to say where.
+
+## A demonstrated capability read as a shipped one
+
+A sponsored claim landed on Aptos testnet on 18 August: a real transaction, a
+real `fee_payer_signature`, `sequence_number: 0`, the claimant's first-ever
+transaction, full amount received, nothing paid. It was the headline result of
+the milestone.
+
+Nothing in production implements it. There is no fee-payer service, no sponsor
+account handling, and no endpoint that co-signs a claim. A contributor clicking
+Claim pays their own gas.
+
+Two people built on the belief that sponsorship was live. One wrote specimen
+claim-screen copy promising "we cover the network cost". The other justified a
+fail-open Claim button partly on the grounds that gas was sponsored.
+
+### Nothing anywhere was false
+
+This is what separates it from every other entry in this file. There is no
+incorrect statement to find:
+
+- The milestone document describes the sponsored claim **accurately**. It
+  happened, and the transaction hash resolves.
+- Sponsorship is a **transaction-layer** concern, and it was described as one.
+  The on-chain module neither knows nor cares who pays the fee, so nothing in
+  the contract's documentation is wrong either.
+- The self-paid path is the **absence of a restriction**, not a decision. Nobody
+  wrote "contributors pay their own gas", because nobody chose it — it is simply
+  what happens when no fee payer is attached.
+
+So every document stayed true, and a false conclusion was available to every
+reader. The gap was not in what was written but in what nobody thought to write:
+**that the transaction layer had no production implementation.** Absence has no
+natural home in a document about a presence.
+
+### Why "it works" is the most dangerous phrase in a milestone
+
+A demonstration answers *can this happen*. A deploy answers *does this happen*.
+The two are reported in the same words, celebrated in the same message, and the
+first is very often produced by tooling that will not exist on the real path — a
+script, a local signer, a hand-built transaction, a key on somebody's laptop.
+
+**A milestone proves a thing CAN happen. Only a deploy proves it DOES.**
+
+### The check
+
+When a capability is demonstrated, record the demonstration and the deployment
+state **in the same sentence**, because they will otherwise be read as one fact:
+
+```
+Sponsored claim: WORKING on testnet (0xe33e61b8…), via a local signer.
+NOT DEPLOYED - no production fee payer exists. See #536.
+```
+
+And for anything a demonstration relies on, ask what carried it: if the answer is
+a script, a laptop key, or a hand-assembled call, that thing is the gap, and it
+is invisible from the result.
+
+The general habit: **for any capability you believe the system has, name the
+code path that provides it in production.** If you cannot, you have read a
+demonstration as a deployment — which is the same failure as the
+machinery-comment entry, arriving from the opposite direction. There, prose
+described machinery that did not exist. Here, machinery existed and its
+production absence was described by nobody.
+
+## Copy that is true now and false later, with no expiry attached
+
+Two sentences about the same fact, written weeks apart:
+
+> We cover the network cost, so the full 12.50 arrives.
+
+> You'll pay a small network fee in APT from this wallet.
+
+The first was written when a sponsored claim had just been demonstrated. It was
+never true of production, and nothing about it said when it would become true or
+whether it already was. It sat in a flow specification and was read as current.
+
+The second is true today and becomes false the day a fee payer deploys.
+
+### The problem is not that copy goes stale
+
+Everything goes stale. The problem is that **a sentence with no stated expiry
+cannot be distinguished from one that is permanently true**, so nobody knows
+whether to check it, and the check has no trigger.
+
+A wrong sentence about behaviour is not usually found by re-reading — it is found
+by somebody acting on it. That is a long feedback loop, and on a money path it is
+somebody's money.
+
+### The device
+
+Give any such sentence its **removal condition**, beside it, naming the thing
+that will make it false:
+
+```
+{/* ── REMOVE WHEN Grainlify-Backend#536 SHIPS ──────────────────────
+    True today and false the day a fee payer is deployed.
+    When #536 lands, DELETE this paragraph; do not edit it into
+    "we cover the network cost" - that sentence has its own home and
+    its own removal condition there.
+    ─────────────────────────────────────────────────────────────── */}
+```
+
+Three parts, and each is doing work:
+
+1. **The condition, named as an issue.** A tracked thing that closes, so the
+   expiry has an event rather than a date somebody has to remember.
+2. **Delete, not edit.** Editing invites the replacement to inherit the position
+   without inheriting the scrutiny — which is precisely how a promise about
+   money ends up in a screen nobody re-read.
+3. **Why the condition lives here** rather than in the issue alone. The issue is
+   read by whoever picks up the work; the copy is read by whoever touches the
+   file for an unrelated reason, and that is the person who would otherwise
+   preserve it.
+
+Where a test can hold the sentence, pair one with it and mark both for deletion
+together. Then removing the copy is a deliberate act with a failing test behind
+it, rather than a tidy-up somebody does or forgets.
+
+### The general form
+
+**Any statement that is true because of a current state should name the state.**
+Not "we cover the network cost" but "we cover it, since #536 shipped"; not "the
+claimant pays" but "the claimant pays until #536 ships".
+
+The version without the condition is not more concise. It is the same sentence
+with the expiry deleted, and the deletion is invisible.
+
+## A forbidden-phrase list matches the sentence denying the thing
+
+A test asserted that no claim-deadline message states a date on which something
+happens, because nothing does — the sweep needs an admin signer, not a clock. It
+banned a list of phrases, one of which was `"automatically on"`.
+
+It failed on the copy that was already right:
+
+> After the window closes we may return unclaimed payouts to Grainlify. **Nothing
+> happens automatically on that date**, and if you are late you can ask us to
+> extend it.
+
+The sentence denies the event. The substring cannot see that.
+
+### Why this is worth a line
+
+**Negation is invisible to a substring**, so a forbidden-phrase list flags the
+text most carefully written to avoid the thing it is banning. The better the copy,
+the more likely it names the hazard in order to deny it — so the check is
+biased against exactly the sentences you want.
+
+The failure mode is not the false positive. It is what the false positive
+provokes: the quickest fix is to reword the *copy* until the test passes, which
+means a test with a bad rule silently edits the product. Here that would have
+removed the sentence telling people the date is not a guillotine.
+
+### The general form
+
+**A phrase is only bannable if it asserts the thing regardless of what precedes
+it.**
+
+```go
+// bad  - "Nothing happens automatically on that date" trips this
+"automatically on"
+
+// good - assertions whatever comes before them
+"will be returned on"
+"is returned on"
+"funds are returned on"
+```
+
+Same shape as the enumerated-inputs entry, pointed at language rather than
+files: the check tests the strings someone thought of, not the property. Where
+the property matters more than the phrasing — and in copy it usually does — the
+honest options are to assert the *presence* of the true sentence rather than the
+absence of false ones, or to accept that the list is a smoke alarm and read the
+copy.
+
+When such a test fails, the first question is whether the copy is wrong or the
+rule is. It was the rule both times it happened here.
