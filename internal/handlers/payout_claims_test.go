@@ -32,8 +32,26 @@ const (
 	// safe to run concurrently: packages sharing one Postgres also race on
 	// schema_migrations and on broad table state, which is why CI passes -p 1 and
 	// says so at length in ci.yml. Run it the way CI does.
-	addrA = "0xaaaa0001b8c2a694eda8398af4bb6f6980915f9e3ed856b3b0fb4f26597f22c9"
-	addrB = "0xaaaa0002899ec9207b25221821265eff51569429d6a95fb31ff0ee71faac4022"
+	addrAStem = "aaaa0001"
+	addrBStem = "aaaa0002"
+)
+
+// Unique per PROCESS, not fixed.
+//
+// addrA and addrB were constants, which made every test using them pass exactly
+// once against a given database: migration 086 makes one live address belong to
+// one account, this database is never truncated, and a run that fails before its
+// cleanup registers leaves a row that collides on every future run for ever.
+// That is precisely what happened - one orphan from one failed run made four
+// tests fail with a duplicate-key error unrelated to what they test.
+//
+// Same defect as the reconciler fixture's process-local counter: a fixture value
+// that repeats is a fixture that works once. The tests do not care what the
+// address is, only that it is theirs.
+var (
+	addrRun = strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
+	addrA   = "0x" + addrAStem + addrRun + strings.Repeat("0", 64-len(addrAStem)-len(addrRun))
+	addrB   = "0x" + addrBStem + addrRun + strings.Repeat("0", 64-len(addrBStem)-len(addrRun))
 )
 
 // addrFor derives a distinct canonical address per user.
@@ -97,7 +115,10 @@ func seedClaim(t *testing.T, d *db.DB, uid uuid.UUID, login, addr string, amount
 		VALUES (1,1,1,$1,6) RETURNING id`, amount*4).Scan(&sid); err != nil {
 		t.Fatalf("settlement: %v", err)
 	}
-	mustExec(t, d, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, uid)
+	// Verified, because an unverified contributor is now HELD rather than paid
+	// (#507) and would have no leaf - so every claims test would be asserting
+	// against an empty list for a reason that has nothing to do with claims.
+	mustExec(t, d, `INSERT INTO users (id, role, kyc_status) VALUES ($1,'contributor','verified')`, uid)
 	mustExec(t, d, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
 		VALUES (gen_random_uuid(),$1,$2,$3,'\x00',now(),now())`, uid, int64(uuid.New().ID()), login)
 	mustExec(t, d, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
@@ -274,7 +295,10 @@ func TestGetClaim_RefusesRatherThanReturningTheFirstOfSeveral(t *testing.T) {
 		if i == 1 {
 			addr = addrB
 		}
-		d.Pool.Exec(ctx, `INSERT INTO users (id, role) VALUES ($1,'contributor')`, u)
+		// Verified for the same reason seedClaim is: unverified is now a hold,
+		// and a held member has no leaf, so this test's two-matches setup
+		// would never produce even one.
+		d.Pool.Exec(ctx, `INSERT INTO users (id, role, kyc_status) VALUES ($1,'contributor','verified')`, u)
 		d.Pool.Exec(ctx, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
 			VALUES (gen_random_uuid(),$1,$2,$3,'\x00',now(),now())`, u, int64(uuid.New().ID()), fmt.Sprintf("u%d", i))
 		d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)

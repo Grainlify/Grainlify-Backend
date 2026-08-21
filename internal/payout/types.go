@@ -68,12 +68,40 @@ const (
 	// aborting the whole build over one row is the wrong failure mode when the
 	// entitlement is real.
 	OutcomeNoGitHubAccount Outcome = "no_github_account"
+
+	// OutcomeKYCUnresolved earned an amount and is not currently verified.
+	//
+	// # Why this is here and not in founding.Eligible
+	//
+	// This is the placement, and it is not a taxonomy preference. Adding a KYC
+	// check to Eligible zeroes the line's effective weight; a zero weight is
+	// out of the divisor; Apportion then divides the whole pool across the
+	// remaining lines and asserts it allocated all of it. **That hands this
+	// person's money to the other contributors, permanently** - recovering it
+	// would mean taking it back from people who did nothing wrong.
+	//
+	// Resolved here, the person keeps a positive weight and a real allocation,
+	// gets no leaf, and their amount lands in residue. The escrow is funded
+	// with LeafTotalMinor, so the money never leaves the treasury and is never
+	// given to anybody else. That is what makes a hold possible at all.
+	//
+	// Anyone moving this check into Eligible has converted a hold into a
+	// forfeit, and the diff will not look like it.
+	//
+	// # Why held rather than excluded
+	//
+	// We reset people for benign reasons - a cropped scan, an unreadable photo
+	// - so a settlement running mid-reset would sweep somebody for a
+	// photograph. Held, a benign reset resolves and pays late while a genuine
+	// refusal never resolves and never pays: both correct outcomes fall out of
+	// one rule, and the rule never has to tell them apart.
+	OutcomeKYCUnresolved Outcome = "kyc_unresolved"
 )
 
 // Owed reports whether this outcome describes somebody who earned an amount they
 // will not receive. Those are the rows a human must read before publication.
 func (o Outcome) Owed() bool {
-	return o == OutcomeNoAddress || o == OutcomeNoGitHubAccount
+	return o == OutcomeNoAddress || o == OutcomeNoGitHubAccount || o == OutcomeKYCUnresolved
 }
 
 // Entitlement is one payable person in one event, as a producer computes them.

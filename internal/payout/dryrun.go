@@ -69,14 +69,24 @@ func DryRun(ctx context.Context, pool db.DBPool, s Settlement) (*Report, error) 
 		ResidueMinor:       new(big.Int),
 	}
 	for _, m := range members {
-		switch m.Outcome {
-		case OutcomePayable:
+		// Owed() rather than a list of outcomes.
+		//
+		// This used to name OutcomeNoAddress and OutcomeNoGitHubAccount
+		// explicitly, so adding a third owed outcome silently dropped it from
+		// this total - and this total is what Build makes a human acknowledge
+		// before publishing. A hold missing from it is a person the operator
+		// was never shown, on the one screen that exists to show them.
+		//
+		// Owed() is the definition; anything that has to be kept in step with
+		// it by hand will eventually not be.
+		switch {
+		case m.Outcome == OutcomePayable:
 			r.LeafTotalMinor.Add(r.LeafTotalMinor, m.AmountMinor)
-		case OutcomeNoAddress, OutcomeNoGitHubAccount:
+		case m.Outcome.Owed():
 			r.ExcludedTotalMinor.Add(r.ExcludedTotalMinor, m.AmountMinor)
-		case OutcomeNoShares:
+		case m.Outcome == OutcomeNoShares:
 			r.NoSharesCount++
-		case OutcomeIneligible:
+		case m.Outcome == OutcomeIneligible:
 			r.IneligibleCount++
 		}
 	}
