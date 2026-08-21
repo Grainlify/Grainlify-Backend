@@ -231,6 +231,23 @@ func main() {
 		//
 		// Alerts only. It never changes a status, and the claim table makes it
 		// silent for any session already alerted about.
+		// Claim-window messages, including the one after a deadline passes.
+		//
+		// It reaches only people already visiting the site - NotifyInApp sends
+		// no email and users.email is populated for nobody - which is a known
+		// limitation rather than an oversight (#521). For the first settlement
+		// the 38 are contacted by hand.
+		var deadlineMailer email.Mailer
+		if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
+			deadlineMailer = m
+		}
+		claimDeadlines := handlers.NewClaimDeadlineNotifier(cfg, database,
+			notifications.New(database, deadlineMailer, cfg.FrontendBaseURL))
+		go func() {
+			slog.Info("claim deadline notifier started")
+			claimDeadlines.Run(context.Background())
+		}()
+
 		kycSweeper := handlers.NewKYCReviewSweeper(cfg, database)
 		go func() {
 			slog.Info("kyc review sweeper started")
