@@ -1287,3 +1287,63 @@ func TestOutcome_EveryOutcomeCarryingMoneyIsPayableOrOwed(t *testing.T) {
 		}
 	}
 }
+
+// Residue IS the held money when the pool was fully allocated.
+//
+// The two figures are computed by different routes - pool minus leaves, and the
+// sum of owed members - and must meet.
+//
+// The equality alone is not enough, and this was established by mutation rather
+// than assumed: reclassifying the held member as payable moves BOTH sides to
+// zero and the equality still holds. So the amount is asserted too. Together
+// they say the held money is exactly the money not in the tree, and that there
+// is some.
+func TestDryRun_ResidueIsExactlyTheHeldMoney(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	// Amounts sum to the fixture's pool (10_000_000), because the identity holds
+	// only when the pool was fully allocated - which is what both real producers
+	// assert and what the fixture otherwise does not do.
+	people := []person{
+		{id: uuid.New(), login: "alice", addr: "x", amount: 9_000_000},
+		{id: uuid.New(), login: "bob", addr: "x", amount: 1_000_000, kyc: "rejected"},
+	}
+	s := fixture(t, d, "aptos-testnet", people)
+
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if r.ResidueMinor.Cmp(r.ExcludedTotalMinor) != 0 {
+		t.Fatalf("residue %s != excluded %s", r.ResidueMinor, r.ExcludedTotalMinor)
+	}
+	// Not vacuous: both are the held amount, not both zero.
+	if r.ResidueMinor.Int64() != 1_000_000 {
+		t.Errorf("residue = %s, want the held 1000000", r.ResidueMinor)
+	}
+}
+
+// The precondition is read from the data, so a settlement that does NOT
+// allocate its whole pool reaches the edge of the invariant instead of failing
+// it. Both producers assert full allocation today, but this package takes a
+// Settlement from anywhere - and the first person building a producer that
+// allocates less should not meet a failure they cannot distinguish from a bug
+// of their own.
+func TestDryRun_APartlyAllocatedPoolSkipsTheResidueIdentity(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	people := []person{{id: uuid.New(), login: "alice", addr: "x", amount: 4_000_000}}
+	s := fixture(t, d, "aptos-testnet", people)
+	// The fixture's pool is 10_000_000 and the single line allocates 4_000_000,
+	// so this settlement does not allocate its pool - exactly the shape the
+	// premise excludes.
+	r, err := DryRun(ctx, d.Pool, s)
+	if err != nil {
+		t.Fatalf("DryRun refused a partly-allocated pool: %v", err)
+	}
+	// Residue here is pool minus leaf, and is NOT the excluded total - which is
+	// precisely why the identity must not be asserted unconditionally.
+	if r.ResidueMinor.Cmp(r.ExcludedTotalMinor) == 0 {
+		t.Skip("fixture no longer exercises a partly-allocated pool; the case is untested")
+	}
+}

@@ -130,6 +130,49 @@ func DryRun(ctx context.Context, pool db.DBPool, s Settlement) (*Report, error) 
 
 	if s.PoolMinor != nil {
 		r.ResidueMinor.Sub(s.PoolMinor, r.LeafTotalMinor)
+
+		// THE SECOND IDENTITY: residue IS the held money, when the pool was
+		// fully allocated.
+		//
+		// What it proves, stated exactly, because the obvious reading is wrong.
+		//
+		// It proves the money classified as held is precisely the money not in
+		// the tree: the two figures are computed by different routes - one from
+		// the pool minus the leaves, one by summing owed members - and they must
+		// meet. Held money that was ALSO paid, or pool money belonging to
+		// neither bucket, breaks it.
+		//
+		// It does NOT prove the classification is right. Reclassifying a held
+		// member as payable moves both sides to zero together and the equality
+		// still holds; that failure is caught by the resolve-time tests, not
+		// here. Checked by mutation rather than assumed - turning the KYC branch
+		// off leaves this identity satisfied.
+		//
+		// So: this is the guard against the two totals drifting apart, which is
+		// the property #507 rests on once the classification is correct. It is
+		// not a second opinion on the classification.
+		//
+		// # Its precondition, and why it is checked rather than assumed
+		//
+		// It follows only from the pool being fully allocated: residue is
+		// pool - leaf, and leaf + excluded == allocated (above), so residue ==
+		// excluded exactly when allocated == pool. Both producers assert that
+		// today - founding/settlement.go and hackathon/settlement_producer.go
+		// each refuse to return a Result whose lines do not sum to the pool -
+		// but that is a property of the PRODUCER, not of this package, and this
+		// package accepts a Settlement from anywhere.
+		//
+		// So the premise is read from the data rather than inferred from which
+		// producer built it. A future producer that deliberately allocates less
+		// than the pool reaches the edge of this invariant and is skipped, which
+		// is what stops the first person building one from hitting a failure
+		// they cannot tell from a bug of their own.
+		if allocated.Cmp(s.PoolMinor) == 0 && r.ResidueMinor.Cmp(r.ExcludedTotalMinor) != 0 {
+			return nil, fmt.Errorf(
+				"%w: the whole pool was allocated, so residue (%s) must be exactly the money owed "+
+					"to excluded members (%s); a difference means money is double-counted or belongs to no bucket",
+				ErrDoesNotReconcile, r.ResidueMinor, r.ExcludedTotalMinor)
+		}
 	}
 	return r, nil
 }
