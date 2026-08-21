@@ -2533,3 +2533,67 @@ one file from a fixed set, this guard, and the deferred-tool sweep that scanned
 a directory it had been handed rather than the tree. Where a check can derive
 its own inputs, it must; where it genuinely cannot, the list needs an assertion
 about its own size, so that shrinking it is a failure rather than a quieter run.
+
+## An undo whose blast radius exceeds the change
+
+Two incidents, one shape, both self-inflicted while verifying something else.
+
+**One — `git stash`, proving a new test could fail.** The right instinct: revert
+the implementation, keep the test, confirm it goes red. The command was
+`git stash`, which took *both* — the test was uncommitted too. The run reported
+`Tests 3 passed`, and 3 is what passes when the new test is not there at all.
+The check proved nothing and looked like it had proved everything.
+
+**Two — `git checkout -- <file>`, undoing one added line.** A line had been added
+to a document to confirm a new check caught it. `git checkout --` restores the
+file to HEAD, so it discarded that line *and* every correction made to the file
+in the preceding hour. The command printed nothing, which is what it prints on
+success.
+
+### The part that is not "be careful with git"
+
+Both commands **report success identically whether they undid one thing or
+forty.** There is no output that distinguishes the intended scope from the
+actual one. `git stash` says nothing about what it swept; `git checkout --` says
+nothing at all.
+
+So the loss is not discoverable at the moment it happens. It is discoverable at
+the **next check that reads the file** — and only if there is one. In the first
+case that was the test count, noticed because 3 was a suspicious number. In the
+second it was a grep for a string that should have been present. Both were
+noticed by accident, one step later, and either could as easily have been
+noticed by nobody: a stash that hides a test produces a green run, and a revert
+that removes an hour of edits produces a document that still parses.
+
+### The check
+
+**Verify the undo, not the flags.** Before trusting any result that depended on
+reverting something, assert the revert did what you meant:
+
+```sh
+git status --porcelain          # what is actually modified now
+git stash list                  # did that sweep more than intended
+```
+
+And prefer an undo whose scope is stated rather than implied. Copying the one
+file aside and back is uglier than `git checkout --` and cannot take anything
+with it:
+
+```sh
+cp target.go /tmp/keep && git checkout -- target.go   # ... test ...
+cp /tmp/keep target.go
+```
+
+The general rule is about **when** you verify rather than which command you
+type: a destructive step performed *in service of* a check must be confirmed
+before the check's result is believed, because the check itself will not notice
+that its inputs were removed. A test run does not know its test is missing. A
+document does not know a paragraph is gone.
+
+### Why this belongs with the rest of this file
+
+It is the same failure as the panic reporting `SKIP 0` and the guard counting a
+hand-written list: **an absence produced by the tooling, reported as a normal
+result.** Three tests passing is a real number. A clean `git status` is a real
+state. Neither says "and something you wrote is no longer here", because nothing
+in the pipeline was asked to compare against what you expected to still exist.
