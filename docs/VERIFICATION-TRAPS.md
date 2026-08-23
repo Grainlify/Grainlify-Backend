@@ -3519,3 +3519,113 @@ covers what the author attended to. Here the input was a working memory of a
 session, and the property being reported on — *is anything outstanding* — is
 precisely the one that memory is worst at, because an item outstanding for long
 enough stops being remembered as outstanding at all.
+
+## The match is not the code: a grep that read as a leak, and a gate that said otherwise
+
+A sweep for logged secrets turned up this, in the shared API client:
+
+```js
+console.log("API Request - Headers:", requestHeaders);
+console.log("API Request - Parsed JSON response:", jsonData);
+```
+
+Read as a grep result, that is every request header — including
+`Authorization: Bearer <jwt>` — and every response body, for every endpoint,
+printed to the console. It was the worst-looking find of the sweep.
+
+Reading the surrounding code, both lines sit inside `if (endpoint ===
+"/ecosystems")`. And `getEcosystems` calls `apiRequest("/ecosystems")` with no
+options, so `requiresAuth` defaults to `false` and **no `Authorization` header
+is ever set on that request**. The lines logged an empty header object and a
+public list.
+
+### Why this is worth an entry
+
+Every other entry in this file is a check that reported success without doing
+the work. This is the mirror image — a check reporting a problem that isn't
+there — and it costs something real: a false leak spends the same emergency
+credibility as a true one, and the next report is read more slowly for it.
+
+The trap is that a grep answers **"does this text appear"** while the question
+was **"does this code do that"**. Two facts stood between the match and the
+claim, and neither is visible in the matched line: a guard four lines above,
+and a default argument in a different function in a different file.
+
+### The check
+
+**Report what the code does, not what the match suggests.** For anything a
+match implies about behaviour, read the enclosing scope and follow the value to
+its source before writing it down.
+
+The tell that you are about to make this mistake is severity: the more alarming
+a match looks, the more it deserves reading, and the more the urgency argues
+against it. In the same sweep, `sampleInvoices` — passed to a live invoice
+table — read as fabricated financial records shown to real users. The file
+says `export const sampleInvoices: Invoice[] = []`.
+
+## A log made an unimplemented function indistinguishable from a working one
+
+Deleting 62 `console.log` statements left one function with an empty body:
+
+```js
+const handleSave = () => {
+  // TODO: Implement save to backend
+  console.log('Saving payout preferences:', projectMappings);
+};
+```
+
+It was wired to a prominent Save button on the payout screen, reachable by
+every signed-in contributor, and it had never saved anything. It shipped in
+the initial commit and survived six months.
+
+**The deletion did not cause the bug. It revealed it.**
+
+### Why the log sustained it
+
+A developer verifies a button by clicking it and watching the console. This
+button produced console output. It behaved exactly like a working control
+under exactly the check most likely to be applied to it — and the output even
+carried the data, `projectMappings`, which is what a *successful* save would
+have logged.
+
+The contributor saw nothing: no error, no confirmation, no save. The two
+audiences got opposite impressions from the same line of code, and only one of
+them was in a position to file a bug.
+
+### Two things that should have caught it, and why neither did
+
+**Tests.** Five covered the card. All green. None asserted that Save saves.
+
+**A comment saying so, in the repository, in writing.** The test file read:
+
+> `handleSave just console.logs a TODO, per the source, so it isn't exercised here`
+
+Someone read the source, understood the function did nothing, wrote it down —
+and filed it as a **reason to narrow a test** rather than as a defect. That
+framing is what preserved it. A scoping note reads as considered and invites no
+follow-up; a bug report gets fixed. The knowledge was never missing. It was
+mis-filed.
+
+### The check
+
+When removing debug output at scale, **treat every function left empty, and
+every declaration left unused, as a candidate defect rather than as cleanup.**
+Bulk log removal is the moment this class becomes visible, and the only moment
+it is cheap to see.
+
+Mechanically: after the removal, compile with `noUnusedLocals` and
+`noUnusedParameters` on — the compiler enumerates the dead reads exactly, which
+is how two query-param reads that existed only to be logged were found — then
+sweep separately for function bodies containing nothing but comments, which no
+compiler flags.
+
+And when a control is found to do nothing, prefer removing it to disabling it.
+A disabled Save still promises a feature that has no backend behind it.
+
+### The general form
+
+A debug statement can be load-bearing for the *appearance* of implementation.
+Anywhere the evidence that something works is output the code emits about
+itself, rather than the effect the code was supposed to have, the same
+substitution is available: **the console showing activity is not the system
+doing work.**
