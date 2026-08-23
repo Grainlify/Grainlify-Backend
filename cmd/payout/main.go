@@ -50,19 +50,26 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbguard"
 	"github.com/jagadeesh/grainlify/backend/internal/founding"
+	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/payout"
 	"github.com/jagadeesh/grainlify/backend/internal/settlement"
 )
 
-const usage = `payout — the founding-pool payout sequence
+const usage = `payout — the settlement and payout sequence
+
+  Two producers, one pipeline. dry-run and persist choose a producer; every
+  later step takes a settlement id and does not care which one made it.
+
+    founding    --pool-usdc <amount>
+    hackathon   --hackathon <id> --pool <contributor|maintainer>
 
   READ-ONLY (repeatable, writes nothing)
-    dry-run  --pool-usdc <amount>    compute a settlement without recording it
+    dry-run  <producer flags>        compute a settlement without recording it
     report   --settlement <id>       the payout gate: leaves, exclusions, totals
     status   --settlement <id>       what has been built and published so far
 
   IRREVERSIBLE (each its own act, deliberately)
-    persist  --pool-usdc <amount>    record a settlement  [creates the id everything keys to]
+    persist  <producer flags>        record a settlement  [creates the id everything keys to]
     build    --settlement <id> --digest <hex> --acknowledge-undeliverable <minor>
     publish  --settlement <id> --escrow <addr> --tx <hash>
 
@@ -168,16 +175,57 @@ func foundingConfig(args []string) (map[string]string, error) {
 	return map[string]string{"founding_pool_usdc": pool}, nil
 }
 
-func cmdDryRun(ctx context.Context, d *db.DB, args []string) error {
-	fc, err := foundingConfig(args)
-	if err != nil {
-		return err
+// produce runs whichever producer the flags name, and refuses to guess.
+//
+// Both producers return *settlement.Result - founding.Result is an alias of it -
+// so this is a choice of producer, not a fork in the pipeline. Everything after
+// persist takes a settlement id and never learns which one ran.
+//
+// AMBIGUITY IS AN ERROR, not a precedence rule. --pool-usdc alongside
+// --hackathon is a person who has changed their mind mid-command, and picking
+// either one for them records a settlement they did not ask for, with an id
+// that every later step keys to.
+func produce(ctx context.Context, d *db.DB, args []string) (*settlement.Result, error) {
+	hackID := flagValue(args, "--hackathon")
+	poolUSDC := flagValue(args, "--pool-usdc")
+
+	switch {
+	case hackID != "" && poolUSDC != "":
+		return nil, errors.New("--hackathon and --pool-usdc name different producers; pass one")
+	case hackID == "" && poolUSDC == "":
+		return nil, errors.New("name a producer: --pool-usdc <amount> for founding, " +
+			"or --hackathon <id> --pool <contributor|maintainer>")
+	case hackID != "":
+		id, err := uuid.Parse(hackID)
+		if err != nil {
+			return nil, fmt.Errorf("--hackathon %q is not a uuid", hackID)
+		}
+		// REQUIRED rather than defaulted to contributor, for the same reason
+		// --pool-usdc is required. The pool is hashed into every leaf and
+		// decides which escrow is funded; a default here would let the more
+		// dangerous of the two pools be selected by omission.
+		poolKind := flagValue(args, "--pool")
+		if poolKind == "" {
+			return nil, errors.New("--pool <contributor|maintainer> is required for a hackathon settlement.\n" +
+				"It is not defaulted: the pool is hashed into every leaf and decides which escrow is funded")
+		}
+		return hackathon.SettlementFor(ctx, d.Pool, id, poolKind, chainOf(args))
+	default:
+		fc, err := foundingConfig(args)
+		if err != nil {
+			return nil, err
+		}
+		return founding.DryRun(ctx, d.Pool, fc)
 	}
-	res, err := founding.DryRun(ctx, d.Pool, fc)
+}
+
+func cmdDryRun(ctx context.Context, d *db.DB, args []string) error {
+	res, err := produce(ctx, d, args)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("SETTLEMENT DRY RUN — nothing recorded\n")
+	fmt.Printf("  pool               %s\n", res.Pool)
 	fmt.Printf("  members            %d\n", len(res.Lines))
 	fmt.Printf("  payable            %d\n", len(res.PayableLines()))
 	fmt.Printf("  pool (minor)       %s\n", res.PoolMinor)
@@ -189,18 +237,14 @@ func cmdDryRun(ctx context.Context, d *db.DB, args []string) error {
 func cmdPersist(ctx context.Context, d *db.DB, args []string) error {
 	// Its own subcommand rather than a --persist flag, because this creates the
 	// settlement id that every later step keys to and it completes quietly.
-	fc, err := foundingConfig(args)
-	if err != nil {
-		return err
-	}
-	res, err := founding.DryRun(ctx, d.Pool, fc)
+	res, err := produce(ctx, d, args)
 	if err != nil {
 		return err
 	}
 	if err := settlement.Persist(ctx, d.Pool, res); err != nil {
 		return err
 	}
-	fmt.Printf("SETTLEMENT PERSISTED\n  settlement_id  %s\n", res.SettlementID)
+	fmt.Printf("SETTLEMENT PERSISTED\n  settlement_id  %s\n  pool           %s\n", res.SettlementID, res.Pool)
 	fmt.Printf("\nNext: payout report --settlement %s\n", res.SettlementID)
 	return nil
 }
