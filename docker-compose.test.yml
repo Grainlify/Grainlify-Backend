@@ -1,0 +1,46 @@
+# The test-database container, so the scheme survives `docker system prune`.
+#
+# This file exists because the container it describes was created by hand and
+# its definition lived nowhere. docs/RUNBOOK-ci.md told people to connect to
+# port 5435 with user postgres and password test, and nothing in any repository
+# could produce a container matching that description. One cleanup command and
+# the runbook would have described infrastructure nobody could recreate.
+#
+# WHAT THIS IS NOT. Not production, not a dev database, and not shared. It
+# holds one database per branch, created by hand, dropped when the branch is
+# gone - see RUNBOOK-ci.md for why one database per branch rather than one
+# shared one (a migration from another branch leaves the shared database ahead,
+# and the symptom points at the test rather than at the database).
+#
+# The password is `test` and is in version control on purpose: it guards a
+# container bound to localhost holding nothing but disposable test data, and a
+# secret nobody can look up is a secret people work around.
+services:
+  test-db:
+    image: postgres:16
+    container_name: grainlify-test-db
+    restart: "no"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      # Created so a connection to the container succeeds before any
+      # per-branch database exists; the branch databases are made beside it.
+      POSTGRES_DB: grainlify_test
+    ports:
+      # Host 5435 is not arbitrary - it is the port RUNBOOK-ci.md has always
+      # named, and other local projects hold 5432, 5433 and 5434. Changing it
+      # here means changing the runbook in the same commit.
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - test-db-data:/var/lib/postgresql/data
+    healthcheck:
+      # So `docker compose up --wait` returns when the server can actually
+      # answer, rather than when the process has started. A test run that
+      # begins one second too early fails in a way that reads as a broken test.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d grainlify_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  test-db-data:
