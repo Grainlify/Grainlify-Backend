@@ -155,9 +155,12 @@ WHERE h.phase = 'live'
   AND hi.status = 'published'
   AND hi.application_window_closes_at IS NOT NULL
   AND hi.application_window_closes_at <= now()
+  -- "Nobody holds this issue", derived rather than enumerated. This listed
+  -- ('active','pr_submitted'), which silently excluded 'completed': a merged
+  -- issue read as free, came back into this set, and was re-advertised.
   AND NOT EXISTS (
     SELECT 1 FROM hackathon_assignments x
-    WHERE x.hackathon_issue_id = hi.id AND x.status IN ('active', 'pr_submitted')
+    WHERE x.hackathon_issue_id = hi.id AND NOT hackathon_assignment_released(x.status)
   )
 -- §3.7 draw_order is 'randomised': issues are processed one at a time in
 -- random order so that, under sequential slot consumption, which issue a
