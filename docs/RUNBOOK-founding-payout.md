@@ -1,4 +1,8 @@
-# Runbook: paying the founding pool
+# Runbook: paying a settlement
+
+Written for the founding pool, which is the sequence that has been run. A
+hackathon settlement uses the same commands from Phase 3 onward; only Phase 2
+differs, and that difference is documented inside Phase 2.
 
 Every step somebody performs, in order, from an empty database to money in
 contributors' wallets. Nobody has performed the whole sequence. Every individual
@@ -236,6 +240,37 @@ go run ./cmd/payout persist --pool-usdc 3000     # IRREVERSIBLE
 Persist prints the `settlement_id`, and **everything downstream is keyed to it.**
 Persisting twice creates two settlements and the second will happily build its
 own tree, so record the id and use it.
+
+### The same phase, for a hackathon
+
+Phase 2 is the only phase that differs between producers. Everything from
+Phase 3 on takes a `--settlement <id>` and never learns which producer made it.
+
+```sh
+go run ./cmd/payout dry-run --hackathon <hackathon-id> --pool contributor
+go run ./cmd/payout persist --hackathon <hackathon-id> --pool contributor   # IRREVERSIBLE
+```
+
+`--pool` is required and not defaulted: the pool is hashed into every leaf and
+decides which escrow is funded, so it is typed rather than inherited.
+
+Persisting twice for the same event and pool is safe — `settlements_one_per_event_pool`
+is a unique index on `(hackathon_id, pool)` — which is **not** true of founding,
+where a second persist silently creates a second settlement.
+
+Three things that are true today and worth knowing before you run it:
+
+- **`--pool maintainer` will refuse.** The maintainer pool is not settled from
+  verdicts; it is computed separately into `hackathon_maintainer_payouts` on the
+  `settled` transition, and that table has no disbursement path yet. Configure a
+  test event contributor-only.
+- **A held winner stays held.** Someone with no address or unresolved KYC is
+  recorded in `settlement_holds` rather than paid, exactly as in founding — and
+  nothing reads that table yet, so releasing a hold needs code that does not
+  exist.
+- **The event must have reached `settled`**, because `units` and
+  `curve_multiplier` are written by `CloseAppealsAndRecompute` on that
+  transition. Before it they are NULL and there is nothing to settle.
 
 ---
 

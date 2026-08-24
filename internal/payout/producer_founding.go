@@ -1,13 +1,9 @@
 package payout
 
 import (
-	"context"
 	"fmt"
 	"math/big"
 
-	"github.com/google/uuid"
-
-	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/founding"
 )
 
@@ -61,55 +57,5 @@ func FromFounding(res *founding.Result, chainID string) (Settlement, error) {
 		// different event with its own settlement and its own root.
 		Pool:         "contributor",
 		Entitlements: ents,
-	}, nil
-}
-
-// LoadSettlement reconstructs the neutral shape from a persisted founding
-// settlement.
-//
-// Lives here rather than in cmd/payout because constructing a Settlement is this
-// package's job: a command that assembled one itself would be a second place
-// that decides what an entitlement is, and the two would drift.
-func LoadSettlement(ctx context.Context, pool db.DBPool, settlementID uuid.UUID, chainID string) (Settlement, error) {
-	var poolMinor int64
-	var decimals int32
-	if err := pool.QueryRow(ctx, `
-		SELECT pool_minor, asset_decimals FROM settlements WHERE id = $1`,
-		settlementID).Scan(&poolMinor, &decimals); err != nil {
-		return Settlement{}, fmt.Errorf("payout.LoadSettlement: no settlement %s: %w", settlementID, err)
-	}
-
-	rows, err := pool.Query(ctx, `
-		SELECT user_id, amount_minor, COALESCE(ineligible_reason, '')
-		FROM `+settlementLinesTable+` WHERE settlement_id = $1 ORDER BY user_id`, settlementID)
-	if err != nil {
-		return Settlement{}, fmt.Errorf("payout.LoadSettlement: lines: %w", err)
-	}
-	defer rows.Close()
-
-	var ents []Entitlement
-	for rows.Next() {
-		var e Entitlement
-		var amt int64
-		if err := rows.Scan(&e.UserID, &amt, &e.IneligibleReason); err != nil {
-			return Settlement{}, err
-		}
-		e.AmountMinor = big.NewInt(amt)
-		ents = append(ents, e)
-	}
-	if err := rows.Err(); err != nil {
-		return Settlement{}, err
-	}
-	if len(ents) == 0 {
-		return Settlement{}, fmt.Errorf("payout.LoadSettlement: settlement %s has no lines", settlementID)
-	}
-
-	return Settlement{
-		SettlementID:  settlementID,
-		ChainID:       chainID,
-		PoolMinor:     big.NewInt(poolMinor),
-		AssetDecimals: decimals,
-		Pool:          "contributor",
-		Entitlements:  ents,
 	}, nil
 }

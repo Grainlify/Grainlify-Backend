@@ -61,9 +61,24 @@ type settlementPreviewDTO struct {
 // Preview handles GET /admin/hackathons/:id/settlement-preview?pool=contributor
 //
 // Computes the settlement and **writes nothing**. This is the readable artefact
-// before the act: the transition to `settled` is what actually persists, and
-// this is what a person reads first so that transition is a confirmation rather
-// than a discovery.
+// before the act.
+//
+// WHAT PERSISTS IT, corrected. This comment used to say "the transition to
+// `settled` is what actually persists". It does not, and never did. Transition
+// runs CloseAppealsAndRecompute and SettleMaintainerPool; neither writes a
+// settlement row. Nothing in any request path calls settlement.Persist.
+//
+// That mattered more than an ordinary stale comment, because of where it sat:
+// an admin reads this immediately before moving an event to `settled`, and it
+// told them the action recorded something it did not. The settlement existed
+// only as this preview until somebody ran the CLI.
+//
+// Recording a hackathon settlement is `payout persist --hackathon <id> --pool
+// <kind>`, deliberately outside the API - it creates the id every later step
+// keys to, and the acknowledgement gate that follows is a person reading a
+// report and restating a figure, which is not a thing an HTTP call does well.
+// See docs/RUNBOOK-founding-payout.md; the sequence is the same for both
+// producers.
 //
 // It deliberately re-computes rather than reading back a stored settlement. A
 // preview of what is already recorded would answer a different question - "what
