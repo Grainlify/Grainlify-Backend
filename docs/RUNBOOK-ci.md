@@ -125,6 +125,19 @@ separate times in one day here, at versions 88, 89 and 90.
 One container, many databases. Creating a database is instant; migrating it is
 the slow part and it happens once per branch either way.
 
+The container itself comes from `docker-compose.test.yml`:
+
+```sh
+docker compose -f docker-compose.test.yml up -d --wait
+```
+
+That file exists because this container used to be created by hand and its
+definition lived nowhere — this runbook named a port, a user and a password,
+and nothing in any repository could produce a container matching them. One
+`docker system prune` and these instructions would have described
+infrastructure nobody could recreate. If the port here and the port in the
+compose file ever disagree, the compose file is the one that runs.
+
 ```sh
 # when you create the branch, in the same breath
 git checkout -b my-branch origin/main
