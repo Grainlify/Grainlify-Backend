@@ -155,6 +155,31 @@ func dynamicBlockers(ctx context.Context, pool db.DBPool, h *Hackathon, toPhase 
 			})
 		}
 
+		// An event with no issues goes live and then does nothing at all.
+		//
+		// Every component behaves correctly: AssignmentRunner looks for issues
+		// whose window has closed, finds none, and runs no draw. No assignment,
+		// no verdict, no error, no log line. A contributor who opens it sees a
+		// live GrainHack with nothing to apply to, and the first person to
+		// notice is a contributor rather than an admin.
+		//
+		// Counted the same way as the results_published blocker below, and for
+		// the same reason: the check that costs one query is worth more than
+		// the day it takes somebody to work out why an event is inert.
+		var published int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM hackathon_issues
+WHERE hackathon_id = $1 AND status = 'published'
+`, h.ID).Scan(&published); err != nil {
+			return nil, fmt.Errorf("hackathon.dynamicBlockers: count published issues: %w", err)
+		}
+		if published == 0 {
+			reasons = append(reasons, BlockingReason{
+				"no_published_issues",
+				"This GrainHack has no published issues, so going live would advertise an event with nothing to apply to and no draw would ever run. Publish at least one issue first.",
+			})
+		}
+
 	case "results_published":
 		// §6 exists so a contributor can contest a verdict. Publishing while
 		// some PRs have not been judged would start that clock for people

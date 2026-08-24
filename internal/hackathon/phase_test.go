@@ -246,10 +246,14 @@ func TestTransition_ShadowModeBlocksGoingLive(t *testing.T) {
 		t.Errorf("phase = %q after a refused transition, want it unchanged at issue_prep", phase)
 	}
 
-	// Turning it off clears the blocker and lets the event go live.
+	// Turning it off clears the blocker and lets the event go live - once the
+	// event also has an issue to advertise (#490), which is a separate live
+	// blocker and would otherwise leave this test asserting "no blockers"
+	// while a different one was firing.
 	if err := SetValue(ctx, d.Pool, &hackathonID, "judging_shadow_mode", "false", actor); err != nil {
 		t.Fatalf("SetValue: %v", err)
 	}
+	fxPublishedIssue(t, d.Pool, hackathonID, fxProject(t, d.Pool, fxUser(t, d.Pool), ""), 901, "standard")
 	blocking, _, err = Readiness(ctx, d.Pool, hackathonID)
 	if err != nil {
 		t.Fatalf("Readiness (after disabling shadow mode): %v", err)
@@ -284,6 +288,10 @@ func TestTransition_IssuePrepToLive_SnapshotsConfig(t *testing.T) {
 	if err := SetValue(ctx, d.Pool, &hackathonID, "judging_shadow_mode", "false", actor); err != nil {
 		t.Fatalf("SetValue judging_shadow_mode: %v", err)
 	}
+	// Same reason as the shadow-mode line above: going live also requires an
+	// issue to apply to (#490). Kept here rather than weakening the guard, so
+	// this test stays about the config snapshot.
+	fxPublishedIssue(t, d.Pool, hackathonID, fxProject(t, d.Pool, fxUser(t, d.Pool), ""), 902, "standard")
 
 	if err := Transition(ctx, d.Pool, hackathonID, "live", actor); err != nil {
 		t.Fatalf("Transition issue_prep -> live: %v", err)

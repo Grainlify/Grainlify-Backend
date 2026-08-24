@@ -292,7 +292,10 @@ func ActiveAssignee(ctx context.Context, pool db.DBPool, projectID uuid.UUID, is
 	var login string
 	err := pool.QueryRow(ctx, `
 SELECT github_login FROM hackathon_assignments
-WHERE project_id = $1 AND issue_number = $2 AND status IN ('active', 'pr_submitted')
+-- Who holds this issue, which includes whoever completed it: this reconciles
+-- the GitHub assignee, and a merged issue must not read as unassigned.
+WHERE project_id = $1 AND issue_number = $2 AND NOT hackathon_assignment_released(status)
+ORDER BY assigned_at DESC
 LIMIT 1
 `, projectID, issueNumber).Scan(&login)
 	if errors.Is(err, pgx.ErrNoRows) {

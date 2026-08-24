@@ -68,6 +68,11 @@ WHERE id = $1`, hackathonID); err != nil {
 		t.Fatalf("leave shadow mode: %v", err)
 	}
 
+	// An event needs something to apply to before it can go live (#490).
+	// Publishing an issue is what a real admin does in issue_prep, and this
+	// walkthrough is the real path.
+	fxPublishedIssue(t, pool, hackathonID, projectID, 900, "standard")
+
 	// The config snapshot is taken here and is what the event reads from now
 	// on.
 	advance("live")

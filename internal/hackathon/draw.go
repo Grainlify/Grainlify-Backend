@@ -512,7 +512,7 @@ INSERT INTO hackathon_assignments
   (hackathon_id, hackathon_issue_id, project_id, issue_number, user_id, github_login,
    org_login, draw_id, status, holds_slot, stale_at, prior_association)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',true,$9,$10)
-ON CONFLICT (hackathon_issue_id) WHERE status IN ('active','pr_submitted') DO NOTHING
+ON CONFLICT (hackathon_issue_id) WHERE NOT hackathon_assignment_released(status) DO NOTHING
 RETURNING id
 `, s.HackathonID, s.IssueID, s.ProjectID, s.IssueNumber, s.UserID, s.GitHubLogin,
 		s.OrgLogin, s.DrawID, staleAt, paJSON).Scan(&assignmentID)

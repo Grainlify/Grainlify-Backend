@@ -109,6 +109,20 @@ WHERE hackathon_id = $1 AND difficulty_tier = $2 AND status = 'published' AND id
 // used by the draw runner when a window closed with nobody in the pool
 // (§3.7's empty_window_retries).
 func ReopenWindow(ctx context.Context, pool db.DBPool, hackathonID, issueID uuid.UUID) error {
+	// Finished work is never re-advertised, whoever is asking.
+	//
+	// Here rather than in the callers because there are three of them - the
+	// empty-window retry, the stale-release path, and a handler a contributor
+	// reaches over HTTP - and a gate in one would have left the other two open.
+	// See IssueIsFinished for why "its caller checks" is not an invariant.
+	finished, err := IssueIsFinished(ctx, pool, issueID)
+	if err != nil {
+		return err
+	}
+	if finished {
+		return fmt.Errorf("hackathon.ReopenWindow: %w: issue %s", ErrIssueFinished, issueID)
+	}
+
 	hours, err := EffectiveValue(ctx, pool, &hackathonID, "application_window_hours")
 	if err != nil {
 		return err

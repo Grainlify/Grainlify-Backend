@@ -3629,3 +3629,169 @@ Anywhere the evidence that something works is output the code emits about
 itself, rather than the effect the code was supposed to have, the same
 substitution is available: **the console showing activity is not the system
 doing work.**
+
+## When you must enumerate, enumerate the small safe set
+
+A status list decided whether a hackathon issue was still spoken for:
+
+```sql
+WHERE status IN ('active', 'pr_submitted')
+```
+
+Later, `completed` was added to the schema. It matched neither branch, so a
+merged issue read as **free**: it was re-advertised, and a second contributor
+could be assigned work that was already done and paid for. Nine call sites
+carried that list; the state that broke them was added to only one of them.
+
+Deriving from the system is better and was not available here — there is no
+`pg_index`-equivalent to ask "which statuses mean occupied", because that is a
+domain fact, not a schema fact. So the fix is not derivation. It is choosing
+**which side of the list to write down**.
+
+### The two ways to write the same rule
+
+```sql
+status IN ('active','pr_submitted','completed')       -- enumerate OCCUPIED
+NOT (status IN ('released_stale','released_voluntary','released_event_end'))  -- enumerate RELEASED
+```
+
+Identical today. They differ entirely in what happens to the state nobody
+remembered:
+
+| enumerated | a forgotten state is treated as | failure |
+|---|---|---|
+| occupied | free | finished work handed to a second person |
+| released | occupied | an issue stays closed too long |
+
+The second failure is visible to a person and costs a day. The first is
+invisible and costs a payout. **Enumerate the set whose complement is the safe
+default**, which is usually the smaller and more stable one — "released" is a
+terminal, deliberate act with three named forms, while "occupied" is every
+state the workflow may grow.
+
+### The tell that this had already gone wrong
+
+One file — `judging_intake.go` — carried the correct three-element list while
+nine others carried two. Somebody understood the rule, wrote it into the query
+in front of them, and nothing propagated it.
+
+A hand-maintained list that is **already inconsistent within one package** is
+not a list that needs updating. It is a list that needs to stop being a list.
+
+## A fixture that builds the value under test never calls the function under test
+
+`internal/payout` is heavily tested — dry runs, digests, mutation-tested tree
+building, claims after salt destruction. A hardcoded field survived in it for
+months, in the path that moves money: `LoadSettlement` returned a constant
+`Pool: "contributor"` instead of the settlement's recorded pool.
+
+The reason no test caught it is in the fixture:
+
+```go
+return Settlement{
+    SettlementID: sid, ChainID: chainID, PoolMinor: big.NewInt(10_000_000),
+    AssetDecimals: 6, Pool: "contributor", Entitlements: ents,
+}
+```
+
+The fixture **constructs the Settlement by hand** and hands it to `Resolve`,
+`DryRun` and `Build`. Every one of those is exercised thoroughly against a
+value the test supplied itself. `LoadSettlement` — the only thing that turns a
+database row into that value in production — was never called by any test.
+
+The suite tested everything downstream of the bug and nothing that could
+produce it.
+
+### Why this is hard to see from inside
+
+Coverage looks excellent, because it is: the tests are real, the assertions are
+sharp, and the package is genuinely well covered. What is missing is not a
+case. It is an **entry point** — and no coverage tool reports "this function is
+never reached from a test" as loudly as it reports an unexercised branch,
+because the function does have coverage from the one place that calls it.
+
+### The check
+
+For any function that adapts external state into the shape the rest of a
+package trusts — a loader, a parser, a config reader — ask whether **a test
+ever calls it against real external state**. If every test starts from a
+hand-built struct, the adapter is untested no matter what the coverage says.
+
+Same family as the fixture that constructed an impossible state, and its exact
+inverse: there the fixture made an unreachable state reachable, here it made a
+reachable function unreached.
+
+## A test whose scope was drawn from what exists cannot fail for what is missing
+
+`lifecycle_e2e_test.go` walks a hackathon through every phase — draft, issue
+prep, live, closed, results published, settled — asserting the state each
+transition leaves behind. It is a good test and it passes.
+
+It stops at `settled`. So does the implementation: nothing in any request path
+or scheduled job records a hackathon settlement, so the event reaches its final
+phase and no money can ever be paid.
+
+The test does not fail for that. It cannot. **Its scope was drawn from the set
+of phases that exist**, and the gap is that a phase which should exist does not.
+
+### Why this is not a missing assertion
+
+An "end to end" test names a promise: that the lifecycle it walks is the
+lifecycle. When the walk is built by reading the code, the test's boundary and
+the implementation's boundary are the same line, and the test can only fail
+when the code contradicts itself — never when the code stops early.
+
+The name is what makes it dangerous. "Walks one hackathon through every phase"
+reads as coverage of the feature, and what it covers is the state machine.
+
+### The check
+
+For any test named for a **journey** rather than a unit, write the steps down
+from what the feature promises a person — *create, apply, work, merge, close,
+settle, publish, claim* — before opening the code, then map each to an
+assertion. Steps with no assertion are either untested or unbuilt, and which of
+the two it is has to be established rather than assumed.
+
+Same family as the test comment that recorded an unimplemented function as a
+scoping note: in both cases the knowledge was present and filed as a
+description of scope rather than as an absence.
+
+## A failed read and an empty read must not be able to produce the same sentence
+
+Already an entry here as *fails closed* — "I could not check" and "nothing to
+report" must not look alike. It is repeated because it caught its own author
+within hours of writing it.
+
+Checking whether a stray database had been dropped:
+
+```sh
+psql "postgres://…" -lqt | cut -d\| -f1 | grep hkset || echo "  gone"
+```
+
+The server was down. `psql` failed, printed nothing to stdout, `grep` matched
+nothing, and the shell printed **"gone"** — the same word it would have printed
+had the database genuinely been absent. That was then reported as fact.
+
+### Why remembering is not the fix
+
+The author had filed this exact rule the same day and applied it deliberately
+elsewhere in the same session. The pipeline is what made it invisible: an error
+on stderr, an empty stdout, and `||` treating "no match" and "could not look"
+identically.
+
+So the rule is not "remember to distinguish them". It is: **build the check so
+the two outcomes cannot render as the same string.** Check the exit status of
+the reader, not just the emptiness of its output:
+
+```sh
+if ! out=$(psql "$DSN" -Atqc "SELECT 1 FROM pg_database WHERE datname='hkset'"); then
+  echo "COULD NOT CHECK: $DSN unreachable"
+elif [ -z "$out" ]; then
+  echo "absent"
+else
+  echo "present"
+fi
+```
+
+Three outcomes, three sentences, none of which can be produced by the wrong
+one.
