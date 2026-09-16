@@ -211,6 +211,12 @@ func keeperhubError(c *fiber.Ctx, err error, hid uuid.UUID) error {
 		status, name = fiber.StatusNotFound, "not_found"
 	case errors.Is(err, hackathon.ErrNothingToSettle):
 		status, name = fiber.StatusConflict, "nothing_to_settle"
+	case errors.Is(err, keeperhubrail.ErrDispatchRejected):
+		// Certain: nothing ran. The legs are failed and the next release may
+		// send them, once whatever KeeperHub refused (a key, a disabled
+		// workflow, a PAYG block) is fixed.
+		slog.Warn("keeperhub dispatch rejected", "hackathon_id", hid, "error", err)
+		status, name = fiber.StatusBadGateway, "dispatch_rejected"
 	case errors.Is(err, keeperhubrail.ErrDispatchUnknown):
 		// Upstream trouble, and the legs are now unknown. Logged at error:
 		// money may be moving under a request we could not confirm.

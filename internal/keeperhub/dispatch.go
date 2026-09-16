@@ -104,28 +104,46 @@ func (c *Client) Dispatch(ctx context.Context, recipients []Recipient) (Dispatch
 	status, raw, _, err := c.postJSON(ctx, url, c.webhookKey, payload, map[string]string{
 		"Idempotency-Key": idempotencyKey,
 	})
+	failed := DispatchAck{IdempotencyKey: idempotencyKey}
 	if err != nil {
-		// The outcome is UNKNOWN, not failed: the request may have been
-		// received and the run may be executing. The caller must treat the
-		// legs as unknown and resolve them by reading, never by re-sending.
-		return DispatchAck{IdempotencyKey: idempotencyKey}, err
+		// No response. Rejected only if the failure provably happened before
+		// the request left (the name did not resolve, the connection was
+		// refused); otherwise KeeperHub may have received it and the run may be
+		// executing. See dispatch_error.go.
+		if status != 0 {
+			// A response arrived and its body could not be read.
+			return failed, &DispatchError{Class: DispatchIndeterminate, HTTPStatus: status, Err: err}
+		}
+		return failed, &DispatchError{Class: classifyTransport(err), Err: err}
 	}
 	if status < 200 || status >= 300 {
-		return DispatchAck{IdempotencyKey: idempotencyKey},
-			fmt.Errorf("%w: %s", ErrDispatchRefused, remoteError(status, raw))
+		code := remoteCode(raw)
+		de := &DispatchError{
+			Class:      classifyStatus(status, code),
+			HTTPStatus: status,
+			Code:       code,
+			// Recorded even on a rejection: a 402 returns the id of an
+			// execution it created and never started.
+			ExecutionID: remoteExecutionID(raw),
+			Err:         fmt.Errorf("%s", remoteError(status, raw)),
+		}
+		failed.ExecutionID = de.ExecutionID
+		return failed, de
 	}
 
 	var ack DispatchAck
 	if err := json.Unmarshal(raw, &ack); err != nil {
-		return DispatchAck{IdempotencyKey: idempotencyKey},
-			fmt.Errorf("keeperhub: decode dispatch response: %w", err)
+		// Accepted, then unreadable: the run may well be executing.
+		return failed, &DispatchError{Class: DispatchIndeterminate, HTTPStatus: status,
+			Err: fmt.Errorf("decode dispatch response: %w", err)}
 	}
 	if ack.ExecutionID == "" {
-		// A 200 with no execution id leaves nothing to poll, so the run cannot
-		// be followed even though it may be running. Reported rather than
-		// returned as a success with an empty id, which a caller would store.
-		return DispatchAck{IdempotencyKey: idempotencyKey},
-			fmt.Errorf("%w: accepted with no executionId, so the run cannot be followed", ErrDispatchRefused)
+		// A 2xx is ACCEPTANCE, so the run may be executing - but with no
+		// execution id there is nothing to poll it by. Indeterminate, not
+		// rejected: calling it a rejection would make legs resumable while an
+		// accepted run could be paying them.
+		return failed, &DispatchError{Class: DispatchIndeterminate, HTTPStatus: status,
+			Err: fmt.Errorf("accepted with no executionId, so the run cannot be followed")}
 	}
 	ack.IdempotencyKey = idempotencyKey
 	return ack, nil
