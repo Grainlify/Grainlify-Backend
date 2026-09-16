@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
-	"github.com/jagadeesh/grainlify/backend/internal/payoutaddr"
 )
 
 // Resolve joins each entitlement to its GitHub login and live payout address and
@@ -37,7 +36,8 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 	}
 
 	type joined struct {
-		login string
+		family string
+		login  string
 		addr  string
 		kyc   string
 	}
@@ -47,7 +47,8 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 		SELECT u.id,
 		       COALESCE(g.login, ''),
 		       COALESCE(a.address, ''),
-		       COALESCE(usr.kyc_status, '')
+		       COALESCE(usr.kyc_status, ''),
+		       COALESCE(a.chain_family, '')
 		FROM unnest($1::uuid[]) AS u(id)
 		LEFT JOIN users usr ON usr.id = u.id
 		LEFT JOIN github_accounts g ON g.user_id = u.id
@@ -61,7 +62,7 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 	for rows.Next() {
 		var id uuid.UUID
 		var j joined
-		if err := rows.Scan(&id, &j.login, &j.addr, &j.kyc); err != nil {
+		if err := rows.Scan(&id, &j.login, &j.addr, &j.kyc, &j.family); err != nil {
 			return nil, fmt.Errorf("payout.Resolve: scan: %w", err)
 		}
 		found[id] = j
@@ -88,8 +89,24 @@ func Resolve(ctx context.Context, pool db.DBPool, s Settlement) ([]Member, error
 		// Canonicalise here rather than trusting what is stored. The column has
 		// a format check, but a value read back is still a value crossing a
 		// boundary, and this is the last point before it is committed to a leaf.
+		//
+		// # The validator comes from the ROW, not from the chain id
+		//
+		// This used to call payoutaddr.Validate unconditionally, which was safe
+		// only for as long as every stored address was Aptos. Validate pads to
+		// 64 hex characters, so on an EVM chain it would turn a stored payout
+		// address into a DIFFERENT, valid Aptos address and commit that to a
+		// Merkle leaf - permanently, since a published root cannot be edited.
+		// See Grainlify-Backend#548.
+		//
+		// The family is read from contributor_addresses.chain_family rather
+		// than resolved from s.ChainID, because that column is the fact
+		// recorded when the address was verified, and it is the same value the
+		// table's own CHECK validated the address against. Deriving it here
+		// instead would be a second opinion that can disagree with the one the
+		// database enforced.
 		if j.addr != "" {
-			c, err := payoutaddr.Validate(j.addr)
+			c, err := validateStored(j.family, j.addr)
 			if err != nil {
 				// A stored address that no longer validates is not a reason to
 				// pay somebody at it. Treat it as absent and say so.

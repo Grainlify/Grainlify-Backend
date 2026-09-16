@@ -15,8 +15,8 @@ func ciFxChainPool(t *testing.T, pool db.DBPool, hackathonID uuid.UUID, chainID 
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
-INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations)
-VALUES ($1, true, '{"symbol":"USDC","decimals":6}'::jsonb, 1)
+INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations)
+VALUES ($1, 'aptos', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1)
 ON CONFLICT (chain_id) DO NOTHING`, chainID); err != nil {
 		t.Fatalf("chain_configs: %v", err)
 	}
