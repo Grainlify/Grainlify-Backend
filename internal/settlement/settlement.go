@@ -235,6 +235,13 @@ RETURNING id
 		RatToDecimalString(res.TotalEffective, 4),
 		RatToDecimalString(new(big.Rat).Quo(unitValue, big.NewRat(1_000_000, 1)), 8),
 	).Scan(&res.SettlementID); err != nil {
+		// The one-rail refusal is policy, not a fault, and is returned as the
+		// sentence that says so rather than wrapped in "insert settlement".
+		// Nothing was written: the settlement row is the first insert, and the
+		// lines below are never reached.
+		if rx := asRailExclusion(err, res, poolKind); rx != nil {
+			return rx
+		}
 		return fmt.Errorf("settlement.Persist: insert settlement: %w", err)
 	}
 
