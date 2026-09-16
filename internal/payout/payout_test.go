@@ -80,8 +80,8 @@ func fixture(t *testing.T, d *db.DB, chainID string, people []person) Settlement
 			// relying on something the system no longer permits.
 			a := addrFor(p.id)
 			if _, err := d.Pool.Exec(ctx, `
-				INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-				VALUES ($1,$2,$3,'nonce')`, p.id, chainID, a); err != nil {
+				INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce)
+				VALUES ($1,$2,'aptos',$3,'nonce')`, p.id, chainID, a); err != nil {
 				t.Fatalf("address %s: %v", a, err)
 			}
 			people[i].addr = a
@@ -277,8 +277,8 @@ func TestBuild_RefusesWhenInputsChanged(t *testing.T) {
 	}
 	// bob registers an address after the report was read.
 	if _, err := d.Pool.Exec(ctx, `
-		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,'aptos-testnet',$2,'n')`, bob, addrFor(bob)); err != nil {
+		INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce)
+		VALUES ($1,'aptos-testnet','aptos',$2,'n')`, bob, addrFor(bob)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = Build(ctx, d.Pool, saltKey(t), s, Acknowledgement{r.InputDigest, r.ExcludedTotalMinor})
@@ -680,8 +680,8 @@ func TestChainConfigFor_DistinguishesUnseededFromHalfSeeded(t *testing.T) {
 		t.Fatalf("unseeded chain: want ErrChainNotConfigured, got %v", err)
 	}
 
-	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations)
-		VALUES ('half-seeded', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1) ON CONFLICT DO NOTHING`)
+	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations)
+		VALUES ('half-seeded', 'aptos', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1) ON CONFLICT DO NOTHING`)
 	t.Cleanup(func() { d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='half-seeded'`) })
 
 	_, err := ChainConfigFor(ctx, d.Pool, "half-seeded")
@@ -703,9 +703,9 @@ func TestChainConfigFor_NeverReturnsAnEmptyFieldAlongsideNoError(t *testing.T) {
 	ctx := context.Background()
 	for _, null := range []string{"contract_address", "explorer_url_template", "network"} {
 		d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='probe'`)
-		d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations,
+		d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations,
 			contract_address, explorer_url_template, network)
-			VALUES ('probe', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')`)
+			VALUES ('probe', 'aptos', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')`)
 		d.Pool.Exec(ctx, `UPDATE chain_configs SET `+null+` = NULL WHERE chain_id='probe'`)
 
 		cc, err := ChainConfigFor(ctx, d.Pool, "probe")
@@ -730,9 +730,9 @@ func TestChainConfigFor_NeverReturnsAnEmptyFieldAlongsideNoError(t *testing.T) {
 func TestChainConfigFor_SymbolComesFromTheRowNotALiteral(t *testing.T) {
 	d := dbtest.DB(t)
 	ctx := context.Background()
-	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, enabled, asset, min_confirmations,
+	d.Pool.Exec(ctx, `INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations,
 		contract_address, explorer_url_template, network)
-		VALUES ('symbol-probe', true, '{"symbol":"ZZZ","decimals":9}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')
+		VALUES ('symbol-probe', 'aptos', true, '{"symbol":"ZZZ","decimals":9}'::jsonb, 1, '0xabc', 'https://x/%s', 'testnet')
 		ON CONFLICT (chain_id) DO NOTHING`)
 	t.Cleanup(func() { d.Pool.Exec(ctx, `DELETE FROM chain_configs WHERE chain_id='symbol-probe'`) })
 

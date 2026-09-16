@@ -11,6 +11,7 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/payout"
 	"github.com/jagadeesh/grainlify/backend/internal/payoutaddr"
 )
 
@@ -93,16 +94,26 @@ func (h *PayoutAddressHandler) PostChallenge(c *fiber.Ctx) error {
 	if strings.TrimSpace(body.ChainID) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "chain_id_required"})
 	}
+	// The chain decides which address shape is legal, so it is resolved before
+	// the address is looked at. Being non-empty is not a fact about a chain:
+	// until #548 that was the only check, which is how an Aptos address could be
+	// registered under chain_id 'base'.
+	family, err := payout.ChainFamilyFor(c.Context(), h.db.Pool, body.ChainID)
+	if err != nil {
+		return payoutChainError(c, body.ChainID, err)
+	}
 
 	// Canonicalise BEFORE issuing the challenge, so the message commits to the
-	// same 66-character form that will be stored. Challenging on "0x1b41" and
-	// storing "0x0000…1b41" signs one string and saves another.
-	addr, err := payoutaddr.Validate(body.Address)
+	// exact form that will be stored. Challenging on one spelling and storing
+	// another signs one string and saves a different one - true on both
+	// families, for different reasons: Aptos pads a short address, and EVM
+	// rewrites the input into its EIP-55 spelling.
+	addr, err := validateForFamily(family, body.Address)
 	if err != nil {
 		return addressError(c, err)
 	}
 
-	n, err := auth.CreateNonceForPurpose(c.Context(), h.db.Pool, payoutWalletType, addr,
+	n, err := auth.CreateNonceForPurpose(c.Context(), h.db.Pool, walletTypeForFamily(family), addr,
 		auth.PurposePayoutAddress, 10*time.Minute)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "nonce_failed"})
@@ -131,7 +142,14 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
 	}
-	addr, err := payoutaddr.Validate(body.Address)
+	if strings.TrimSpace(body.ChainID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "chain_id_required"})
+	}
+	family, err := payout.ChainFamilyFor(c.Context(), h.db.Pool, body.ChainID)
+	if err != nil {
+		return payoutChainError(c, body.ChainID, err)
+	}
+	addr, err := validateForFamily(family, body.Address)
 	if err != nil {
 		return addressError(c, err)
 	}
@@ -139,28 +157,13 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 	// Verify BEFORE consuming: a signature that fails should not burn the nonce,
 	// or a mistyped wallet costs the person a round trip for no reason.
 	msg := challengeMessage(body.ChainID, addr, body.Nonce)
-	derived, verr := auth.VerifyAptosSignature(addr, msg, body.Nonce, body.Signature, body.PublicKey)
-	switch {
-	case errors.Is(verr, auth.ErrAptosAddrMismatch):
-		// Never silently store `derived`. Redirecting somebody's money to an
-		// address they did not name is the worst available behaviour here.
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "signature_address_mismatch",
-			"claimed": addr,
-			"derived": derived,
-			"detail": "The signature is valid, but the key that produced it belongs to a different " +
-				"address. Nothing has been saved. Connect the wallet holding " + addr +
-				", or register " + derived + " instead.",
-		})
-	case errors.Is(verr, auth.ErrAptosBadPublicKey):
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unsupported_scheme", "detail": verr.Error()})
-	case errors.Is(verr, auth.ErrAptosBadSignature), errors.Is(verr, auth.ErrAptosBadSig):
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "signature_invalid"})
-	case verr != nil:
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "signature_invalid"})
+	// `handled`, not `err != nil`: a written fiber response returns a nil error,
+	// so the bool is what says the signature was refused. See verifyForFamily.
+	if handled, resp := verifyForFamily(c, family, addr, msg, body.Nonce, body.Signature, body.PublicKey); handled {
+		return resp
 	}
 
-	if err := auth.ConsumeNonceForPurpose(c.Context(), h.db.Pool, payoutWalletType, addr,
+	if err := auth.ConsumeNonceForPurpose(c.Context(), h.db.Pool, walletTypeForFamily(family), addr,
 		body.Nonce, auth.PurposePayoutAddress); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": nonceErrorName(err)})
 	}
@@ -185,10 +188,15 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 	// where the person is present and can act, and the claim screen is where
 	// they cannot - and there the account that gets the error is whichever one
 	// asks, usually the innocent one.
+	//
+	// Compared case-insensitively, matching the unique index. An EVM address is
+	// stored in its EIP-55 mixed-case spelling, so an exact `=` here would miss
+	// the same address written in lowercase and hand the person a constraint
+	// violation instead of the sentence below.
 	var otherUser uuid.UUID
 	err = tx.QueryRow(c.Context(), `
 		SELECT user_id FROM contributor_addresses
-		WHERE chain_id = $1 AND address = $2 AND superseded_at IS NULL AND user_id <> $3`,
+		WHERE chain_id = $1 AND lower(address) = lower($2) AND superseded_at IS NULL AND user_id <> $3`,
 		body.ChainID, addr, uid).Scan(&otherUser)
 	if err == nil {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
@@ -207,7 +215,10 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 	err = tx.QueryRow(c.Context(), `
 		SELECT address FROM contributor_addresses
 		WHERE user_id=$1 AND chain_id=$2 AND superseded_at IS NULL`, uid, body.ChainID).Scan(&prevAddr)
-	if err == nil && prevAddr == addr {
+	// EqualFold for the same reason the query above uses lower(): re-registering
+	// an EVM address in different case is the SAME address, and reporting it as
+	// a change would supersede a live row and write an identical one.
+	if err == nil && strings.EqualFold(prevAddr, addr) {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "address_unchanged", "address": addr})
 	}
 	if err == nil {
@@ -222,9 +233,9 @@ func (h *PayoutAddressHandler) PostAddress(c *fiber.Ctx) error {
 
 	var verifiedAt time.Time
 	if err := tx.QueryRow(c.Context(), `
-		INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce, public_key)
-		VALUES ($1,$2,$3,$4,$5) RETURNING verified_at`,
-		uid, body.ChainID, addr, body.Nonce, body.PublicKey).Scan(&verifiedAt); err != nil {
+		INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce, public_key)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING verified_at`,
+		uid, body.ChainID, family, addr, body.Nonce, body.PublicKey).Scan(&verifiedAt); err != nil {
 		// Two requests can pass the check above concurrently; only one can pass
 		// the index. The loser must still get the sentence rather than a 500,
 		// because from their side nothing distinguishes the two.
