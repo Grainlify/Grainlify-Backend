@@ -1,0 +1,2 @@
+DROP TRIGGER IF EXISTS trg_keeperhub_refuse_run_when_already_settled ON keeperhub_payout_runs;
+DROP FUNCTION IF EXISTS keeperhub_refuse_run_when_already_settled();
