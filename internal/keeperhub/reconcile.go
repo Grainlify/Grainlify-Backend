@@ -50,7 +50,10 @@ type LegOutcome struct {
 	AmountMinor    string
 	Status         LegStatus
 	TxHash         string
-	Error          string
+	// ChainID is the numeric chain the leg's transaction was reported on, 0
+	// when there is no transaction or none was reported.
+	ChainID int64
+	Error   string
 }
 
 var (
@@ -146,6 +149,13 @@ func Reconcile(dispatched []Recipient, ex Execution) ([]LegOutcome, error) {
 			AmountMinor:    d.AmountMinor,
 		}
 		o.Status, o.TxHash, o.Error = classify(steps)
+		// The chain comes from the step that reported THIS transaction, so it
+		// describes the broadcast rather than some other step in the iteration.
+		for _, st := range steps {
+			if o.TxHash != "" && st.TxHash == o.TxHash {
+				o.ChainID = st.ChainID
+			}
+		}
 		out = append(out, o)
 	}
 

@@ -18,11 +18,13 @@ type runRow struct {
 	ID          uuid.UUID
 	ChainID     string
 	PayoutRunID uuid.UUID
+	EVMChainID  int64
+	State       string
 }
 
 // loadRun returns the run for an event and pool, or nil.
 func loadRun(ctx context.Context, q pgx.Tx, hackathonID uuid.UUID, poolKind string, lock bool) (*runRow, error) {
-	sql := `SELECT id, chain_id, hackathon_payout_run_id FROM keeperhub_payout_runs
+	sql := `SELECT id, chain_id, hackathon_payout_run_id, evm_chain_id, state FROM keeperhub_payout_runs
 	        WHERE hackathon_id = $1 AND pool = $2`
 	if lock {
 		// Serialises concurrent releases of the same run: the second waits,
@@ -30,7 +32,7 @@ func loadRun(ctx context.Context, q pgx.Tx, hackathonID uuid.UUID, poolKind stri
 		sql += ` FOR UPDATE`
 	}
 	var r runRow
-	err := q.QueryRow(ctx, sql, hackathonID, poolKind).Scan(&r.ID, &r.ChainID, &r.PayoutRunID)
+	err := q.QueryRow(ctx, sql, hackathonID, poolKind).Scan(&r.ID, &r.ChainID, &r.PayoutRunID, &r.EVMChainID, &r.State)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -96,14 +98,23 @@ func (s *Service) planRun(ctx context.Context, tx pgx.Tx, req ReleaseRequest) (*
 		return nil, nil, err
 	}
 
+	// The numeric chain is frozen onto the run here, and every settled
+	// transaction is later checked against it. The chain_configs CHECK makes
+	// NULL impossible for an EVM row; a missing row fails the query.
+	var evmChainID int64
+	if err := tx.QueryRow(ctx, `SELECT evm_chain_id FROM chain_configs WHERE chain_id = $1 AND family = 'evm'`,
+		req.ChainID).Scan(&evmChainID); err != nil {
+		return nil, nil, fmt.Errorf("%w: no numeric chain id for %q: %v", ErrNotEVMChain, req.ChainID, err)
+	}
+
 	var run runRow
 	err = tx.QueryRow(ctx, `
 		INSERT INTO keeperhub_payout_runs
-		  (hackathon_id, pool, chain_id, pool_minor, hackathon_payout_run_id, released_by, state)
-		VALUES ($1, $2, $3, $4::numeric, $5, $6, 'planned')
-		RETURNING id, chain_id, hackathon_payout_run_id`,
-		req.HackathonID, req.Pool, req.ChainID, res.PoolMinor.String(), req.PayoutRunID, req.ActorID,
-	).Scan(&run.ID, &run.ChainID, &run.PayoutRunID)
+		  (hackathon_id, pool, chain_id, evm_chain_id, pool_minor, hackathon_payout_run_id, released_by, state)
+		VALUES ($1, $2, $3, $4, $5::numeric, $6, $7, 'planned')
+		RETURNING id, chain_id, hackathon_payout_run_id, evm_chain_id, state`,
+		req.HackathonID, req.Pool, req.ChainID, evmChainID, res.PoolMinor.String(), req.PayoutRunID, req.ActorID,
+	).Scan(&run.ID, &run.ChainID, &run.PayoutRunID, &run.EVMChainID, &run.State)
 	if err != nil {
 		// The database-side half of the rail exclusion (migration 090300).
 		if strings.Contains(err.Error(), "already has a settlement") {

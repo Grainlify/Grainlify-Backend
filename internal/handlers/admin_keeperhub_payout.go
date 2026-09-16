@@ -211,6 +211,11 @@ func keeperhubError(c *fiber.Ctx, err error, hid uuid.UUID) error {
 		status, name = fiber.StatusNotFound, "not_found"
 	case errors.Is(err, hackathon.ErrNothingToSettle):
 		status, name = fiber.StatusConflict, "nothing_to_settle"
+	case errors.Is(err, keeperhubrail.ErrChainMismatch):
+		slog.Error("keeperhub chain mismatch", "hackathon_id", hid, "error", err)
+		status, name = fiber.StatusConflict, "chain_mismatch"
+	case errors.Is(err, keeperhubrail.ErrRunFailed):
+		status, name = fiber.StatusConflict, "run_failed"
 	case errors.Is(err, keeperhubrail.ErrDispatchRejected):
 		// Certain: nothing ran. The legs are failed and the next release may
 		// send them, once whatever KeeperHub refused (a key, a disabled

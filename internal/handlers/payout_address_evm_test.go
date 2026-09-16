@@ -25,15 +25,22 @@ func evmChain(t *testing.T, d *db.DB, chainID string, enabled bool) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := d.Pool.Exec(ctx, `
-		INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations, network)
-		VALUES ($1,'evm',$2, jsonb_build_object('symbol','USDC','decimals',6), 1, 'testnet')
-		ON CONFLICT (chain_id) DO UPDATE SET family='evm', enabled=$2`, chainID, enabled); err != nil {
+		INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations, network, evm_chain_id)
+		VALUES ($1,'evm',$2, jsonb_build_object('symbol','USDC','decimals',6), 1, 'testnet', $3)
+		ON CONFLICT (chain_id) DO UPDATE SET family='evm', enabled=$2`,
+		chainID, enabled, testEVMChainID()); err != nil {
 		t.Fatalf("seed chain %s: %v", chainID, err)
 	}
 	t.Cleanup(func() {
 		d.Pool.Exec(context.Background(), `DELETE FROM chain_configs WHERE chain_id=$1`, chainID)
 	})
 }
+
+// testEVMChainID is a numeric chain id unique per call, far above any real
+// chain. Unique rather than fixed: the column is UNIQUE and this database is
+// never truncated, so a fixed value left behind by one interrupted run would
+// break every run after it.
+func testEVMChainID() int64 { return 900_000_000_000 + int64(uuid.New().ID()) }
 
 // registerEVM drives the real challenge/sign/register flow with a real secp256k1 key.
 func registerEVM(t *testing.T, d *db.DB, uid uuid.UUID, priv *ecdsa.PrivateKey, chainID, address string) (int, map[string]any) {
