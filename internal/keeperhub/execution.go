@@ -59,7 +59,17 @@ type Execution struct {
 	// Error is the run-level failure, if any.
 	Error string
 
-	// Legs are the per-iteration results of the For Each body.
+	// Input is the recipient list this execution was actually given, read back
+	// from the execution record. The For Each iterates it in order, so
+	// Input[iterationIndex] is the leg an iteration belongs to - and comparing it
+	// with what was dispatched is how a replayed or foreign execution is caught.
+	Input []Recipient
+
+	// Legs are the per-iteration results of the For Each body - every body node
+	// of every iteration that ran. Read from the per-iteration logs and NEVER
+	// from the post-loop Collect: when any iteration fails the For Each fails
+	// closed and Collect does not run, so the aggregate is absent in exactly the
+	// partial-failure case that matters.
 	Legs []LegResult
 }
 
@@ -71,6 +81,12 @@ type LegResult struct {
 	NodeName       string
 	Status         string
 	Error          string
+
+	// TxHash is output.transactionHash when the node reported one. Read
+	// separately from Output because it is the one field reconciliation needs
+	// regardless of which node paid: a broadcast transaction is evidence money
+	// may have moved, whatever the step's status says.
+	TxHash string
 
 	// Output is left raw. The shape depends on the node the workflow uses to
 	// pay, and guessing at it here would bake one workflow's node into the
@@ -127,6 +143,9 @@ func (c *Client) Execution(ctx context.Context, executionID string) (Execution, 
 				TriggeredByOrgAPIKeyID    *string `json:"triggeredByOrgApiKeyId"`
 				CredentialLabel           *string `json:"triggeredByCredentialLabel"`
 				Billable                  bool    `json:"billable"`
+				Input                     struct {
+					Recipients []Recipient `json:"recipients"`
+				} `json:"input"`
 			} `json:"execution"`
 			Logs []struct {
 				NodeID         string          `json:"nodeId"`
@@ -156,6 +175,7 @@ func (c *Client) Execution(ctx context.Context, executionID string) (Execution, 
 		CredentialLabel: deref(ex.CredentialLabel),
 		Billable:        ex.Billable,
 		Error:           deref(ex.Error),
+		Input:           ex.Input.Recipients,
 	}
 	if out.ID == "" {
 		out.ID = executionID
@@ -169,7 +189,12 @@ func (c *Client) Execution(ctx context.Context, executionID string) (Execution, 
 		if l.IterationIndex == nil {
 			continue
 		}
+		var tx struct {
+			TransactionHash string `json:"transactionHash"`
+		}
+		_ = json.Unmarshal(l.Output, &tx)
 		out.Legs = append(out.Legs, LegResult{
+			TxHash:         tx.TransactionHash,
 			IterationIndex: *l.IterationIndex,
 			ForEachNodeID:  deref(l.ForEachNodeID),
 			NodeID:         l.NodeID,
