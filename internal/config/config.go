@@ -124,6 +124,20 @@ type Config struct {
 	KeeperHubAPIKey     string
 	KeeperHubWebhookKey string
 
+	// KeeperHubWorkflowID is the workflow the webhook call fires.
+	//
+	// Not a credential, and it arrives here now rather than with the keys
+	// because this repository's rule is that configuration lands with the code
+	// that reads it - internal/keeperhub is that code. It was deliberately left
+	// out of the commit that bound the two keys, which had no consumer.
+	//
+	// Empty disables the rail exactly as an empty key does: keeperhub.New
+	// refuses to build a client without it, because a dispatcher that does not
+	// know which workflow to fire has nothing to fall back on. There is no
+	// default - guessing a workflow id would mean firing somebody else's
+	// workflow with our recipient list.
+	KeeperHubWorkflowID string
+
 	// No chain configuration is read here.
 	//
 	// Seven keys used to be: four SOROBAN_* including a signing secret, plus
@@ -211,6 +225,7 @@ func Load() Config {
 
 		KeeperHubAPIKey:     getEnv("KEEPERHUB_API_KEY", ""),
 		KeeperHubWebhookKey: getEnv("KEEPERHUB_WEBHOOK_KEY", ""),
+		KeeperHubWorkflowID: getEnv("KEEPERHUB_WORKFLOW_ID", ""),
 
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),
