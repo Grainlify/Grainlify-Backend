@@ -7,14 +7,21 @@ import (
 )
 
 func TestNonPooledConnConfig_StripsPoolerFromNeonHost(t *testing.T) {
-	cfg, err := pgx.ParseConfig("postgres://user:pass@ep-purple-lake-a4yl80xp-pooler.us-east-1.aws.neon.tech:5432/grainlify?sslmode=require")
+	// A deliberately FAKE host. The only part the code under test cares about is
+	// Neon's "-pooler." separator, which nonPooledConnConfig finds and strips by
+	// plain string replacement - nothing resolves the name - so everything else
+	// is a placeholder on the reserved .invalid domain. Never put a real
+	// endpoint here: this repository is public. No password either - the code
+	// under test never reads it, and a user:password URI is exactly what secret
+	// scanners look for.
+	cfg, err := pgx.ParseConfig("postgres://user@ep-fake-endpoint-000000-pooler.region.example.invalid:5432/grainlify?sslmode=require")
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
 
 	got := nonPooledConnConfig(cfg)
 
-	want := "ep-purple-lake-a4yl80xp.us-east-1.aws.neon.tech"
+	want := "ep-fake-endpoint-000000.region.example.invalid"
 	if got.Host != want {
 		t.Errorf("Host = %q, want %q", got.Host, want)
 	}
@@ -25,7 +32,7 @@ func TestNonPooledConnConfig_StripsPoolerFromNeonHost(t *testing.T) {
 }
 
 func TestNonPooledConnConfig_LeavesNonPooledHostUnchanged(t *testing.T) {
-	cfg, err := pgx.ParseConfig("postgres://user:pass@localhost:5432/grainlify_test?sslmode=disable")
+	cfg, err := pgx.ParseConfig("postgres://user@localhost:5432/grainlify_test?sslmode=disable")
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
@@ -43,7 +50,7 @@ func TestNonPooledConnConfig_LeavesNonPooledHostUnchanged(t *testing.T) {
 func TestNonPooledConnConfig_OnlyStripsPoolerHostSegment(t *testing.T) {
 	// A hostname that merely contains "pooler" without the exact
 	// "-pooler." separator (Neon's actual convention) must not be mangled.
-	cfg, err := pgx.ParseConfig("postgres://user:pass@my-pooler-db.example.com:5432/app?sslmode=disable")
+	cfg, err := pgx.ParseConfig("postgres://user@my-pooler-db.example.com:5432/app?sslmode=disable")
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}

@@ -123,7 +123,7 @@ openssl rand -hex 32
 
 **Example output:**
 ```
-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
+<64 hexadecimal characters - whatever the command above printed>
 ```
 
 **Save this value** - you'll need it for `GITHUB_WEBHOOK_SECRET` environment variable.

@@ -45,7 +45,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 2. **Copy the output** (it will look like):
    ```
-   a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
+   <64 hexadecimal characters - whatever the command above printed>
    ```
 
 3. **Add to GitHub App Settings:**
@@ -55,7 +55,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 4. **Add to Environment Variables:**
    ```bash
-   GITHUB_WEBHOOK_SECRET=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
+   GITHUB_WEBHOOK_SECRET=<paste-the-secret-you-generated>
    ```
 
 ## Important Notes

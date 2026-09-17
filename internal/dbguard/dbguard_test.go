@@ -2,7 +2,9 @@ package dbguard
 
 import "testing"
 
-const prodURL = "postgres://neondb_owner:npg_SUPERSECRET@ep-cool-name.eu-central-1.aws.neon.tech/neondb?sslmode=require"
+const remoteHost = "ep-fake-endpoint-000000.region.example.invalid"
+
+const prodURL = "postgres://fake_owner:NOT_A_REAL_PASSWORD@" + remoteHost + "/fake_db?sslmode=require"
 
 func TestCheckTarget_LocalNeedsNoConfirmation(t *testing.T) {
 	for _, u := range []string{
@@ -26,12 +28,12 @@ func TestCheckTarget_RemoteIsRefusedWithoutTheFlag(t *testing.T) {
 }
 
 func TestCheckTarget_RemoteProceedsWhenTheHostIsNamed(t *testing.T) {
-	args := []string{"--yes-run-against-remote-host=ep-cool-name.eu-central-1.aws.neon.tech"}
+	args := []string{"--yes-run-against-remote-host=" + remoteHost}
 	if err := Check("cmd/migrate", prodURL, args); err != nil {
 		t.Fatalf("a correctly confirmed run was refused: %v", err)
 	}
 	// The space-separated form has to work too, or the message we print is wrong.
-	if err := Check("cmd/migrate", prodURL, []string{"--yes-run-against-remote-host", "ep-cool-name.eu-central-1.aws.neon.tech"}); err != nil {
+	if err := Check("cmd/migrate", prodURL, []string{"--yes-run-against-remote-host", remoteHost}); err != nil {
 		t.Fatalf("space-separated confirmation was refused: %v", err)
 	}
 }
@@ -75,7 +77,7 @@ func TestCheckTarget_TheErrorNeverLeaksTheCredential(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected a refusal")
 		}
-		for _, secret := range []string{"npg_SUPERSECRET", "neondb_owner", prodURL} {
+		for _, secret := range []string{"NOT_A_REAL_PASSWORD", "fake_owner", prodURL} {
 			if contains(err.Error(), secret) {
 				t.Errorf("the refusal leaked %q:\n%s", secret, err.Error())
 			}
