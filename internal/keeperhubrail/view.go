@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/jagadeesh/grainlify/backend/internal/payoutaddr"
 )
 
 // RunView is what the payout admin screen reads for one event and pool.
@@ -30,6 +32,39 @@ type RunView struct {
 	Legs            []LegView       `json:"legs"`
 	Attempts        []AttemptView   `json:"attempts"`
 	Exclusions      []ExclusionView `json:"exclusions"`
+
+	PayoutWallet PayoutWalletView `json:"payout_wallet"`
+}
+
+// PayoutWalletView is the wallet the payout workflow sends from, as configured
+// on this server now.
+//
+// It is configuration, not a fact recorded with the run: if the wallet was
+// changed after an attempt was sent, this names the new one. Note says so in
+// the response itself.
+type PayoutWalletView struct {
+	// Address is EIP-55, or null when unset or not a valid EVM address.
+	Address *string `json:"address"`
+	Note    string  `json:"note"`
+}
+
+const payoutWalletNote = "The sending wallet configured on this server now (KEEPERHUB_PAYOUT_WALLET_ADDRESS), " +
+	"not a value recorded with each attempt. Null when it is not configured."
+
+// payoutWalletView validates the configured address. An invalid value is
+// reported as null, never shown: a wrong address in a reconciliation hint
+// sends an admin looking for a transfer that will never be there.
+func payoutWalletView(raw string) PayoutWalletView {
+	out := PayoutWalletView{Note: payoutWalletNote}
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	addr, err := payoutaddr.ValidateEVM(raw)
+	if err != nil {
+		return out
+	}
+	out.Address = &addr
+	return out
 }
 
 // RunHeader is the run row and the chain it pays on.
@@ -198,7 +233,10 @@ func (s *Service) RunView(ctx context.Context, hackathonID uuid.UUID, pool strin
 		return nil, fmt.Errorf("keeperhubrail: load run: %w", err)
 	}
 	h.ExplorerURLTemplate = explorer
-	v := &RunView{Run: h, Legs: []LegView{}, Attempts: []AttemptView{}, Exclusions: []ExclusionView{}}
+	v := &RunView{
+		Run: h, Legs: []LegView{}, Attempts: []AttemptView{}, Exclusions: []ExclusionView{},
+		PayoutWallet: payoutWalletView(s.PayoutWallet),
+	}
 
 	if err := s.loadLegs(ctx, v); err != nil {
 		return nil, err

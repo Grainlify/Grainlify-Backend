@@ -138,6 +138,17 @@ type Config struct {
 	// workflow with our recipient list.
 	KeeperHubWorkflowID string
 
+	// KeeperHubPayoutWallet is the address the payout workflow sends from - the
+	// KeeperHub org wallet. Display only: the admin screen puts it in the hint
+	// for reconciling a leg that may have paid, so the admin knows which
+	// sender to look for on the explorer.
+	//
+	// Nothing reads it to move money, and nothing can derive it: under gas
+	// sponsorship the transaction's sender is a relayer, and this backend never
+	// asks KeeperHub for its wallet. Empty means the screen says the address
+	// is not configured rather than showing a guess.
+	KeeperHubPayoutWallet string
+
 	// No chain configuration is read here.
 	//
 	// Seven keys used to be: four SOROBAN_* including a signing secret, plus
@@ -226,6 +237,8 @@ func Load() Config {
 		KeeperHubAPIKey:     getEnv("KEEPERHUB_API_KEY", ""),
 		KeeperHubWebhookKey: getEnv("KEEPERHUB_WEBHOOK_KEY", ""),
 		KeeperHubWorkflowID: getEnv("KEEPERHUB_WORKFLOW_ID", ""),
+
+		KeeperHubPayoutWallet: getEnv("KEEPERHUB_PAYOUT_WALLET_ADDRESS", ""),
 
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),

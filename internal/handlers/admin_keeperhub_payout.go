@@ -41,12 +41,12 @@ func NewAdminKeeperHubPayoutHandler(d *db.DB, cfg config.Config) *AdminKeeperHub
 	if d == nil || d.Pool == nil {
 		return &AdminKeeperHubPayoutHandler{configErr: errors.New("database not configured")}
 	}
-	reader := &keeperhubrail.Service{Pool: d.Pool}
+	reader := &keeperhubrail.Service{Pool: d.Pool, PayoutWallet: cfg.KeeperHubPayoutWallet}
 	c, err := keeperhub.New(cfg.KeeperHubWebhookKey, cfg.KeeperHubAPIKey, cfg.KeeperHubWorkflowID)
 	if err != nil {
 		return &AdminKeeperHubPayoutHandler{configErr: err, reader: reader}
 	}
-	return &AdminKeeperHubPayoutHandler{svc: &keeperhubrail.Service{Pool: d.Pool, Rail: c}, reader: reader}
+	return &AdminKeeperHubPayoutHandler{svc: &keeperhubrail.Service{Pool: d.Pool, Rail: c, PayoutWallet: cfg.KeeperHubPayoutWallet}, reader: reader}
 }
 
 // NewAdminKeeperHubPayoutHandlerWith injects a service, for tests.
