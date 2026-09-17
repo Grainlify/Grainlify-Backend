@@ -41,14 +41,14 @@ import (
 //   - TELEGRAM_TOPIC_* - absence falls back to General and is flagged per row.
 //   - SOROBAN_* and the contract IDs - no payout path has ever run. Required in
 //     principle, not required for a live feature.
-//   - KEEPERHUB_API_KEY and KEEPERHUB_WEBHOOK_KEY - same reason, and the gate's
-//     own test applies: this list is for configuration whose absence kills a
-//     LIVE feature. Nothing dispatches a KeeperHub payout run yet, so an empty
-//     value here disables a rail nobody is using rather than breaking one
-//     somebody is. Gating now would refuse every deploy of a backend that has
-//     no payout rail to lose. They belong in this gate on the day a release
-//     path can actually fire a run, and not before - moving them then is a
-//     one-line change plus a line in requiredForLiveFeatures.
+//   - KEEPERHUB_PAYOUT_WALLET_ADDRESS - display-only. It fills in the admin
+//     screen's reconciliation hint with the sender address to look for on
+//     Basescan; nothing reads it to move money and nothing else depends on it.
+//     An empty value degrades LOUDLY and per-request - the screen says the
+//     address is not configured, right where an admin would look for it - which
+//     is exactly the failure mode (TELEGRAM_TOPIC_*, CORS_ORIGINS) this gate
+//     does not exist for. The gate is for a live feature dying with nothing
+//     logged as wrong; this is not that.
 //   - CORS_ORIGINS - empty is correct. The allowlist is an explicit function in
 //     internal/api, and this is the one piece of security-relevant configuration
 //     that is not environment-only.
@@ -68,7 +68,7 @@ type RequiredVar struct {
 	value func(Config) string
 }
 
-// requiredForLiveFeatures is the gate list: 13 features, 17 variables.
+// requiredForLiveFeatures is the gate list: 15 features, 20 variables.
 func requiredForLiveFeatures() []RequiredVar {
 	return []RequiredVar{
 		{"DB_URL", "everything", "no data at all",
@@ -110,6 +110,21 @@ func requiredForLiveFeatures() []RequiredVar {
 			func(c Config) string { return c.TelegramBotToken }},
 		{"TELEGRAM_CHAT_ID", "all support delivery", "reports have nowhere to be posted",
 			func(c Config) string { return c.TelegramChatID }},
+
+		// KeeperHub payout dispatch. Excluded until #555's release endpoint
+		// landed on main, on the grounds that no payout path had ever run - see
+		// the "deliberately not here" note above for the history. That premise
+		// is gone: the release endpoint is live, so a deployment intending to
+		// run payouts must find out at boot that the rail is unusable, not
+		// discover it the first time a run tries to fire and silently does
+		// nothing. KEEPERHUB_PAYOUT_WALLET_ADDRESS is not here - see the
+		// "deliberately not here" note.
+		{"KEEPERHUB_API_KEY", "KeeperHub payout simulate and status polling", "a run's simulate step and execution-status polling both fail silently; keeperhub.New refuses to build a client",
+			func(c Config) string { return c.KeeperHubAPIKey }},
+		{"KEEPERHUB_WEBHOOK_KEY", "KeeperHub payout dispatch", "the webhook call that fires a payout run has no key to authenticate with; the rail is disabled with nothing logged at the call site",
+			func(c Config) string { return c.KeeperHubWebhookKey }},
+		{"KEEPERHUB_WORKFLOW_ID", "KeeperHub payout dispatch", "there is no workflow to fire; keeperhub.New refuses to build a client, exactly as an empty key does",
+			func(c Config) string { return c.KeeperHubWorkflowID }},
 	}
 }
 

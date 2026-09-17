@@ -27,6 +27,9 @@ func full() Config {
 		TelegramAdminUserID:     "123",
 		TelegramBotToken:        "bt",
 		TelegramChatID:          "cid",
+		KeeperHubAPIKey:         "kk",
+		KeeperHubWebhookKey:     "wfb_k",
+		KeeperHubWorkflowID:     "wfid",
 	}
 }
 
@@ -53,6 +56,7 @@ func TestRequiredForLiveFeatures_IsTheAgreedList(t *testing.T) {
 		"DIDIT_API_KEY", "DIDIT_WORKFLOW_ID", "DIDIT_WEBHOOK_SECRET",
 		"PUBLIC_BASE_URL", "FRONTEND_BASE_URL",
 		"TELEGRAM_ADMIN_USER_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+		"KEEPERHUB_API_KEY", "KEEPERHUB_WEBHOOK_KEY", "KEEPERHUB_WORKFLOW_ID",
 	}
 	got := requiredForLiveFeatures()
 	if len(got) != len(want) {
@@ -61,6 +65,19 @@ func TestRequiredForLiveFeatures_IsTheAgreedList(t *testing.T) {
 	for i, w := range want {
 		if got[i].Name != w {
 			t.Errorf("position %d = %s, want %s", i, got[i].Name, w)
+		}
+	}
+}
+
+// KEEPERHUB_PAYOUT_WALLET_ADDRESS is a deliberate exclusion, not an oversight:
+// it is display-only, and an empty value degrades loudly and per-request (the
+// admin screen says so) rather than killing a feature silently. Pinned here so
+// a future pass adding the rest of the KeeperHub block does not sweep it in by
+// habit.
+func TestRequiredForLiveFeatures_ExcludesThePayoutWalletAddress(t *testing.T) {
+	for _, r := range requiredForLiveFeatures() {
+		if r.Name == "KEEPERHUB_PAYOUT_WALLET_ADDRESS" {
+			t.Fatalf("KEEPERHUB_PAYOUT_WALLET_ADDRESS is gated; it is display-only and should not be")
 		}
 	}
 }
@@ -182,6 +199,12 @@ func blank(c *Config, name string) {
 		c.TelegramBotToken = ""
 	case "TELEGRAM_CHAT_ID":
 		c.TelegramChatID = ""
+	case "KEEPERHUB_API_KEY":
+		c.KeeperHubAPIKey = ""
+	case "KEEPERHUB_WEBHOOK_KEY":
+		c.KeeperHubWebhookKey = ""
+	case "KEEPERHUB_WORKFLOW_ID":
+		c.KeeperHubWorkflowID = ""
 	default:
 		panic("blank: unknown variable " + name + " - add it here when adding it to the gate")
 	}
