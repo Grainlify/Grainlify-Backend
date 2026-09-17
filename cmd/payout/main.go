@@ -242,6 +242,13 @@ func cmdPersist(ctx context.Context, d *db.DB, args []string) error {
 		return err
 	}
 	if err := settlement.Persist(ctx, d.Pool, res); err != nil {
+		// A deliberate refusal, not a failure: the event is being paid on the
+		// KeeperHub rail. Returned unwrapped so the operator reads the policy
+		// sentence rather than a database exception.
+		var rx *settlement.RailExclusionError
+		if errors.As(err, &rx) {
+			return rx
+		}
 		return err
 	}
 	fmt.Printf("SETTLEMENT PERSISTED\n  settlement_id  %s\n  pool           %s\n", res.SettlementID, res.Pool)
