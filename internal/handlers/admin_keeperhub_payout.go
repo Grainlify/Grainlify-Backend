@@ -24,6 +24,11 @@ import (
 type AdminKeeperHubPayoutHandler struct {
 	svc       *keeperhubrail.Service
 	configErr error
+
+	// reader serves the GET. It is always present, because reading state
+	// needs only this database: an unconfigured rail must not hide legs that
+	// still need reconciling.
+	reader *keeperhubrail.Service
 }
 
 // NewAdminKeeperHubPayoutHandler builds the client only when all three KeeperHub
@@ -31,16 +36,54 @@ type AdminKeeperHubPayoutHandler struct {
 // endpoint answers 503 naming what is missing, rather than failing at the moment
 // somebody tries to pay.
 func NewAdminKeeperHubPayoutHandler(d *db.DB, cfg config.Config) *AdminKeeperHubPayoutHandler {
+	// The API is wired without a database in some tests and tooling. Every
+	// route then answers 503 rather than dereferencing nothing at startup.
+	if d == nil || d.Pool == nil {
+		return &AdminKeeperHubPayoutHandler{configErr: errors.New("database not configured")}
+	}
+	reader := &keeperhubrail.Service{Pool: d.Pool}
 	c, err := keeperhub.New(cfg.KeeperHubWebhookKey, cfg.KeeperHubAPIKey, cfg.KeeperHubWorkflowID)
 	if err != nil {
-		return &AdminKeeperHubPayoutHandler{configErr: err}
+		return &AdminKeeperHubPayoutHandler{configErr: err, reader: reader}
 	}
-	return &AdminKeeperHubPayoutHandler{svc: &keeperhubrail.Service{Pool: d.Pool, Rail: c}}
+	return &AdminKeeperHubPayoutHandler{svc: &keeperhubrail.Service{Pool: d.Pool, Rail: c}, reader: reader}
 }
 
 // NewAdminKeeperHubPayoutHandlerWith injects a service, for tests.
 func NewAdminKeeperHubPayoutHandlerWith(svc *keeperhubrail.Service) *AdminKeeperHubPayoutHandler {
-	return &AdminKeeperHubPayoutHandler{svc: svc}
+	return &AdminKeeperHubPayoutHandler{svc: svc, reader: svc}
+}
+
+// Run handles GET /admin/hackathons/:id/keeperhub/run?pool=contributor
+//
+// Everything the payout admin screen shows for one event and pool: the run,
+// per-status figures derived from the legs, what a release would do now, every
+// leg, every dispatch attempt and every exclusion. 404 not_found when the event
+// has no run for the pool.
+//
+// # No 503 here, deliberately
+//
+// The write routes answer 503 when KeeperHub is not configured, because they
+// cannot act. This one calls nothing outside the database, and the state it
+// shows matters most exactly when the rail is down: legs that may have paid
+// still need reconciling. So it always reads, and the resume summary carries
+// keeperhub_not_configured as the reason nothing can be sent.
+func (h *AdminKeeperHubPayoutHandler) Run() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.reader == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "database_not_configured"})
+		}
+		hid, err := uuid.Parse(c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_hackathon_id"})
+		}
+		pool := c.Query("pool", keeperhubrail.PoolContributor)
+		view, err := h.reader.RunView(c.Context(), hid, pool, adminActor(c), h.configErr)
+		if err != nil {
+			return keeperhubError(c, err, hid)
+		}
+		return c.JSON(view)
+	}
 }
 
 func (h *AdminKeeperHubPayoutHandler) unavailable(c *fiber.Ctx) error {
