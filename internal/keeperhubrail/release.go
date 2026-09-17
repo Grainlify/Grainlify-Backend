@@ -35,10 +35,29 @@ type ReleaseResult struct {
 	// its acknowledgement returned, with nothing in the envelope saying so.
 	// Payment is established only by Intake.
 	AckStatus string `json:"ack_status"`
+
+	// Preflight is what SimulateTransfer established for every leg, in order,
+	// immediately before this release claimed and dispatched them. Always
+	// exactly as long as LegIDs and in the same order: a release that reaches
+	// Dispatch has, by construction, simulated everything it is about to send.
+	Preflight []LegPreflight `json:"preflight"`
 }
 
 // Release dispatches every unpaid leg of an event's run, planning the run first
 // if it does not exist yet.
+//
+// # The mandatory preflight sits between reading what would be sent and
+// claiming it
+//
+// previewRun computes the sendable set and commits (a freshly planned run is
+// real state worth keeping even if nothing about the required legs, see
+// previewRun); simulateLegs then checks every one of those legs against
+// KeeperHub before anything is claimed; only if every leg is safe does
+// claimPreviewedLegs mark them dispatched and hand them to Dispatch. A leg
+// this release is about to send is never claimed without having been
+// simulated first - see preflight.go for why that is mandatory rather than a
+// flag, and why an unreachable simulator refuses exactly as hard as a leg
+// that would revert.
 func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
 	// Every event-level precondition, in release's order. Shared with RunView
 	// so the admin screen and this function cannot disagree (see resume.go).
@@ -46,7 +65,20 @@ func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResu
 		return nil, err
 	}
 
-	attemptID, recipients, legIDs, run, planned, exclusions, err := s.claimUnpaidLegs(ctx, req)
+	runID, exclusions, planned, sendable, err := s.previewRun(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	preflight, err := s.simulateLegs(ctx, req.ChainID, sendable)
+	if err != nil {
+		// Nothing was claimed by previewRun - only planned, if it needed to be.
+		// A leg that would revert or a simulator that could not be reached both
+		// refuse here, before anything is marked dispatched.
+		return nil, err
+	}
+
+	attemptID, recipients, legIDs, err := s.claimPreviewedLegs(ctx, req, runID, sendable, preflight)
 	if err != nil {
 		return nil, err
 	}
@@ -76,22 +108,28 @@ func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResu
 	}
 
 	return &ReleaseResult{
-		RunID:       run,
+		RunID:       runID,
 		Planned:     planned,
 		AttemptID:   attemptID,
 		ExecutionID: ack.ExecutionID,
 		LegIDs:      legIDs,
 		Exclusions:  exclusions,
 		AckStatus:   ack.Status,
+		Preflight:   preflight,
 	}, nil
 }
 
-// claimUnpaidLegs plans the run if needed, refuses while anything is
-// unreconciled, and marks the unpaid legs dispatched under a new attempt - all
-// in one transaction.
-func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
-	attemptID uuid.UUID, recipients []keeperhub.Recipient, legIDs []uuid.UUID,
-	runID uuid.UUID, planned bool, exclusions []Exclusion, err error,
+// previewRun plans the run if it does not exist yet, and reads what a
+// dispatch would send right now - WITHOUT claiming anything. No leg is marked
+// dispatched and no attempt row exists after this returns; that only happens
+// in claimPreviewedLegs, after the mandatory preflight between the two.
+//
+// Committed either way, exactly as the single-transaction version used to be:
+// a freshly planned run is real state worth keeping even when nothing about
+// it is sendable (everyone may have been excluded), so a planned-with-nothing-
+// -sendable refusal still commits.
+func (s *Service) previewRun(ctx context.Context, req ReleaseRequest) (
+	runID uuid.UUID, exclusions []Exclusion, planned bool, sendable []sendableLeg, err error,
 ) {
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -127,10 +165,7 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 	if err != nil {
 		return
 	}
-	for _, l := range st.Sendable {
-		legIDs = append(legIDs, l.ID)
-		recipients = append(recipients, keeperhub.Recipient{Address: l.Address, AmountMinor: l.AmountMinor, LegID: l.ID.String()})
-	}
+	sendable = st.Sendable
 	if refusal := st.refusal(); refusal != nil {
 		// Commit anyway when the run was just planned and nothing is
 		// sendable: everyone may have been excluded, and those exclusions are
@@ -145,15 +180,92 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 		return
 	}
 
+	err = tx.Commit(ctx)
+	return
+}
+
+// claimPreviewedLegs re-verifies, under a fresh lock, that the legs
+// previewRun found sendable are EXACTLY the legs still sendable now, and only
+// then claims them: a new attempt row, the attempt's legs (each carrying the
+// preflight result simulateLegs already established for it), and every leg
+// marked dispatched.
+//
+// # Why the re-check, and why it refuses on any drift at all
+//
+// previewRun's read and simulateLegs' network calls both happen without
+// holding the run's row lock, so between them anything could change a leg's
+// eligibility: another release, an operator resolving a leg by hand. If the
+// sendable set drifted in ANY direction - a leg that dropped out, or a leg
+// that became newly sendable and was therefore never simulated - this refuses
+// the whole claim with ErrConcurrentRelease rather than either sending a
+// stale leg or sending one preflight never saw. The caller's answer is the
+// same one a concurrent release always gets: nothing was sent, retry, which
+// re-previews and re-simulates against current state.
+func (s *Service) claimPreviewedLegs(ctx context.Context, req ReleaseRequest, runID uuid.UUID,
+	previewed []sendableLeg, preflight []LegPreflight) (
+	attemptID uuid.UUID, recipients []keeperhub.Recipient, legIDs []uuid.UUID, err error,
+) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	run, err := loadRun(ctx, tx, req.HackathonID, req.Pool, true)
+	if err != nil {
+		return
+	}
+	if run == nil || run.ID != runID {
+		err = ErrConcurrentRelease
+		return
+	}
+
+	st, err := loadResumeState(ctx, tx, run.ID, run.State)
+	if err != nil {
+		return
+	}
+	if refusal := st.refusal(); refusal != nil {
+		err = refusal
+		return
+	}
+	if !sameLegSet(previewed, st.Sendable) {
+		err = ErrConcurrentRelease
+		return
+	}
+
+	preflightByLeg := make(map[uuid.UUID]LegPreflight, len(preflight))
+	for _, p := range preflight {
+		preflightByLeg[p.LegID] = p
+	}
+
+	for _, l := range st.Sendable {
+		legIDs = append(legIDs, l.ID)
+		recipients = append(recipients, keeperhub.Recipient{Address: l.Address, AmountMinor: l.AmountMinor, LegID: l.ID.String()})
+	}
+
 	if err = tx.QueryRow(ctx, `
 		INSERT INTO keeperhub_dispatch_attempts (run_id, actor_user_id, state)
 		VALUES ($1, $2, 'sending') RETURNING id`, run.ID, req.ActorID).Scan(&attemptID); err != nil {
 		return
 	}
 	for i, id := range legIDs {
+		p, ok := preflightByLeg[id]
+		if !ok {
+			// sameLegSet already proved the id sets match; this would mean a
+			// bug in simulateLegs or in the matching above, not a race. Refuse
+			// rather than dispatch a leg with no recorded check.
+			err = fmt.Errorf("keeperhubrail: leg %s has no preflight result recorded; refusing to dispatch it", id)
+			return
+		}
+		var raw any
+		if len(p.Raw) > 0 {
+			raw = p.Raw
+		}
 		if _, err = tx.Exec(ctx, `
-			INSERT INTO keeperhub_dispatch_attempt_legs (attempt_id, leg_id, position)
-			VALUES ($1, $2, $3)`, attemptID, id, i); err != nil {
+			INSERT INTO keeperhub_dispatch_attempt_legs
+			  (attempt_id, leg_id, position, preflight_would_revert, preflight_checked_at, preflight_raw)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			attemptID, id, i, p.WouldRevert, p.CheckedAt, raw); err != nil {
 			return
 		}
 	}
@@ -175,6 +287,26 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 	}
 	err = tx.Commit(ctx)
 	return
+}
+
+// sameLegSet reports whether a and b name exactly the same legs, ignoring
+// order (both are read with the same ORDER BY, so identical sets are also
+// identically ordered - this checks the set, which is the property that
+// actually matters for claimPreviewedLegs).
+func sameLegSet(a, b []sendableLeg) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ids := make(map[uuid.UUID]bool, len(a))
+	for _, l := range a {
+		ids[l.ID] = true
+	}
+	for _, l := range b {
+		if !ids[l.ID] {
+			return false
+		}
+	}
+	return true
 }
 
 // markRejected records a dispatch KeeperHub definitively did not run, and puts

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -25,6 +26,17 @@ type scripted struct {
 
 func (s *scripted) server(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Release now runs the mandatory preflight before it ever reaches the
+		// webhook dispatch endpoint these tests are about, so every MCP call
+		// (initialize, the notification, and execute_transfer) is answered
+		// separately here, always with a clean simulation. That keeps these
+		// tests exercising exactly what they say they exercise - the WEBHOOK
+		// dispatch path's status classification - rather than accidentally
+		// also depending on preflight passing through the same script.
+		if r.URL.Path == "/mcp" {
+			s.serveMCP(w, r)
+			return
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		i := len(s.keys)
@@ -37,6 +49,42 @@ func (s *scripted) server(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// serveMCP answers every MCP call the real client's preflight simulation
+// makes. Always a clean, safe simulation: these tests are about dispatch
+// status classification, and preflight is expected to pass every time here.
+func (s *scripted) serveMCP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	body, _ := io.ReadAll(r.Body)
+	_ = json.Unmarshal(body, &req)
+
+	if req.Method == "notifications/initialized" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var result any
+	switch {
+	case req.Method == "tools/call" && req.Params.Name == "execute_transfer":
+		sim, _ := json.Marshal(map[string]any{"success": true, "wouldRevert": false})
+		result = map[string]any{
+			"content": []map[string]string{{"type": "text", "text": string(sim)}},
+			"isError": false,
+		}
+	default: // "initialize"
+		result = map[string]any{}
+	}
+	resp, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
 }
 
 func realClient(t *testing.T, url string) *keeperhub.Client {
