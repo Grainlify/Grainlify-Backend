@@ -8,9 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/keeperhub"
-	"github.com/jagadeesh/grainlify/backend/internal/payout"
 )
 
 // ReleaseRequest is the explicit admin action that sends money.
@@ -42,47 +40,10 @@ type ReleaseResult struct {
 // Release dispatches every unpaid leg of an event's run, planning the run first
 // if it does not exist yet.
 func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
-	// FIRST, before anything is read or written: the single chokepoint every
-	// payout release must pass - explicit confirmation, an actor, not shadow
-	// mode, phase settled, appeal window closed.
-	if err := hackathon.GuardPayoutRelease(ctx, s.Pool, hackathon.PayoutReleaseRequest{
-		HackathonID: req.HackathonID,
-		PayoutRunID: req.PayoutRunID,
-		ActorID:     req.ActorID,
-		Confirm:     req.Confirm,
-	}); err != nil {
+	// Every event-level precondition, in release's order. Shared with RunView
+	// so the admin screen and this function cannot disagree (see resume.go).
+	if err := s.checkEvent(ctx, req); err != nil {
 		return nil, err
-	}
-
-	if req.Pool != PoolContributor {
-		return nil, fmt.Errorf("%w (got %q)", ErrUnsupportedPool, req.Pool)
-	}
-
-	// The guard confirms a payout run id was supplied, not that it is the one
-	// to pay. An upheld appeal recomputes into a NEW run, and paying the
-	// superseded one pays the pre-appeal unit value - correct for nobody.
-	var current uuid.UUID
-	if err := s.Pool.QueryRow(ctx, `
-		SELECT id FROM hackathon_payout_runs WHERE hackathon_id = $1
-		ORDER BY created_at DESC, id DESC LIMIT 1`, req.HackathonID).Scan(&current); err != nil {
-		return nil, fmt.Errorf("%w: no computed payout run: %v", ErrPayoutRunNotCurrent, err)
-	}
-	if current != req.PayoutRunID {
-		return nil, fmt.Errorf("%w: asked to pay %s, current is %s", ErrPayoutRunNotCurrent, req.PayoutRunID, current)
-	}
-
-	family, err := payout.ChainFamilyFor(ctx, s.Pool, req.ChainID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrNotEVMChain, err)
-	}
-	if family != payout.FamilyEVM {
-		return nil, fmt.Errorf("%w: %q is %s", ErrNotEVMChain, req.ChainID, family)
-	}
-
-	// The Go-side half of the rail exclusion; the trigger from migration 090300
-	// is the half that holds even for writers that skip this.
-	if id, _ := hackathon.ExistingSettlementID(ctx, s.Pool, req.HackathonID, req.Pool); id != nil {
-		return nil, fmt.Errorf("%w: settlement %s", ErrSettledOnAptos, id)
 	}
 
 	attemptID, recipients, legIDs, run, planned, exclusions, err := s.claimUnpaidLegs(ctx, req)
@@ -154,62 +115,33 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 				run.ID, run.ChainID, run.PayoutRunID)
 			return
 		}
-		// A failed run paid somewhere it should not have. Nothing more is sent
-		// under it until a person has dealt with that.
-		if run.State == "failed" {
-			err = fmt.Errorf("%w: run %s", ErrRunFailed, run.ID)
-			return
-		}
 		if exclusions, err = exclusionsFor(ctx, tx, run.ID); err != nil {
 			return
 		}
 	}
 	runID = run.ID
 
-	// THE RESUME GATE. A leg that is dispatched (sent, not yet read back) or
-	// unknown (may have paid) blocks everything. Re-sending it is the double
-	// payment this whole rail exists to prevent.
-	blocked, err := legIDsWhere(ctx, tx, run.ID, `status IN ('dispatched', 'unknown')`)
+	// THE RESUME GATE, from the same definition RunView reports (resume.go):
+	// a failed run, any dispatched or unknown leg, or nothing to send refuses.
+	st, err := loadResumeState(ctx, tx, run.ID, run.State)
 	if err != nil {
 		return
 	}
-	if len(blocked) > 0 {
-		err = &UnreconciledLegsError{LegIDs: blocked}
-		return
+	for _, l := range st.Sendable {
+		legIDs = append(legIDs, l.ID)
+		recipients = append(recipients, keeperhub.Recipient{Address: l.Address, AmountMinor: l.AmountMinor, LegID: l.ID.String()})
 	}
-
-	rows, err := tx.Query(ctx, `
-		SELECT id, address, amount_minor::text FROM keeperhub_payout_legs
-		WHERE run_id = $1 AND status IN ('pending', 'failed')
-		ORDER BY user_id`, run.ID)
-	if err != nil {
-		return
-	}
-	for rows.Next() {
-		var id uuid.UUID
-		var r keeperhub.Recipient
-		if err = rows.Scan(&id, &r.Address, &r.AmountMinor); err != nil {
-			rows.Close()
-			return
-		}
-		r.LegID = id.String()
-		legIDs = append(legIDs, id)
-		recipients = append(recipients, r)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return
-	}
-	if len(recipients) == 0 {
-		// Commit anyway when the run was just planned: everyone may have been
-		// excluded, and those exclusions are a record worth keeping.
-		if planned {
+	if refusal := st.refusal(); refusal != nil {
+		// Commit anyway when the run was just planned and nothing is
+		// sendable: everyone may have been excluded, and those exclusions are
+		// a record worth keeping.
+		if planned && errors.Is(refusal, ErrNothingUnpaid) {
 			if cerr := tx.Commit(ctx); cerr != nil {
 				err = cerr
 				return
 			}
 		}
-		err = ErrNothingUnpaid
+		err = refusal
 		return
 	}
 
@@ -229,7 +161,7 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 		UPDATE keeperhub_payout_legs
 		SET status = 'dispatched', last_attempt_id = $1, dispatched_at = now(),
 		    execution_id = NULL, last_error = NULL, updated_at = now()
-		WHERE id = ANY($2) AND status IN ('pending', 'failed')`, attemptID, legIDs)
+		WHERE id = ANY($2) AND status = ANY($3)`, attemptID, legIDs, sendableStatuses)
 	if err != nil {
 		return
 	}
@@ -243,23 +175,6 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 	}
 	err = tx.Commit(ctx)
 	return
-}
-
-func legIDsWhere(ctx context.Context, tx pgx.Tx, runID uuid.UUID, predicate string) ([]uuid.UUID, error) {
-	rows, err := tx.Query(ctx, `SELECT id FROM keeperhub_payout_legs WHERE run_id = $1 AND `+predicate+` ORDER BY id`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
 }
 
 // markRejected records a dispatch KeeperHub definitively did not run, and puts

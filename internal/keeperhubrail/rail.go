@@ -43,6 +43,10 @@ type Rail interface {
 type Service struct {
 	Pool db.DBPool
 	Rail Rail
+
+	// PayoutWallet is the configured sending wallet, reported by RunView for
+	// display. Never used to send.
+	PayoutWallet string
 }
 
 // Pool kinds this rail pays. Only the contributor pool is settled from
