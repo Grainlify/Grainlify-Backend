@@ -42,15 +42,16 @@ type IntakeResult struct {
 // from the post-loop Collect, which does not run when any leg fails.
 func (s *Service) Intake(ctx context.Context, hackathonID, attemptID uuid.UUID) (*IntakeResult, error) {
 	var (
-		state  string
-		execID *string
-		runID  uuid.UUID
+		state    string
+		execID   *string
+		runID    uuid.UUID
+		runChain int64
 	)
 	err := s.Pool.QueryRow(ctx, `
-		SELECT a.state, a.execution_id, a.run_id
+		SELECT a.state, a.execution_id, a.run_id, r.evm_chain_id
 		FROM keeperhub_dispatch_attempts a
 		JOIN keeperhub_payout_runs r ON r.id = a.run_id
-		WHERE a.id = $1 AND r.hackathon_id = $2`, attemptID, hackathonID).Scan(&state, &execID, &runID)
+		WHERE a.id = $1 AND r.hackathon_id = $2`, attemptID, hackathonID).Scan(&state, &execID, &runID, &runChain)
 	if isNotFound(err) {
 		return nil, ErrNotFound
 	}
@@ -111,6 +112,32 @@ func (s *Service) Intake(ctx context.Context, hackathonID, attemptID uuid.UUID) 
 	out.Outcomes = outcomes
 	if missing != nil {
 		out.Unknown = missing.LegIDs
+	}
+
+	// CHAIN IDENTITY. Every leg with a transaction is checked against the
+	// numeric chain frozen on the run, using the chainId KeeperHub reports for
+	// that transaction - what happened, not what was configured. One mismatch
+	// fails the whole run closed: a transfer on the wrong network is not a
+	// payment on this one, and the other legs of an execution that reached a
+	// different network cannot be trusted either.
+	var wrong []string
+	for _, o := range outcomes {
+		if o.TxHash != "" && o.ChainID != runChain {
+			wrong = append(wrong, fmt.Sprintf("%s: tx %s on chain %d", o.LegID, o.TxHash, o.ChainID))
+		}
+	}
+	if len(wrong) > 0 {
+		reason := fmt.Sprintf("chain mismatch: the run pays on chain %d, but %s", runChain, strings.Join(wrong, "; "))
+		var all []string
+		for _, d := range dispatched {
+			all = append(all, d.LegID)
+		}
+		out.Outcomes = nil
+		out.Unknown = all
+		if err := s.failRunOnChainMismatch(ctx, attemptID, runID, reason); err != nil {
+			return nil, err
+		}
+		return out, fmt.Errorf("%w: %s", ErrChainMismatch, reason)
 	}
 	if err := s.writeIntake(ctx, attemptID, runID, "reconciled", outcomes, out.Unknown,
 		"no result in execution "+out.ExecutionID); err != nil {
@@ -210,6 +237,31 @@ func (s *Service) writeIntake(ctx context.Context, attemptID, runID uuid.UUID, a
 	return tx.Commit(ctx)
 }
 
+// failRunOnChainMismatch records no leg as confirmed, marks every leg of the
+// attempt unknown, and fails the run so nothing more is sent under it.
+func (s *Service) failRunOnChainMismatch(ctx context.Context, attemptID, runID uuid.UUID, reason string) error {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_legs SET status = 'unknown', last_error = $2, updated_at = now()
+		WHERE last_attempt_id = $1 AND status = 'dispatched'`, attemptID, reason); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_dispatch_attempts SET state = 'mismatch', reconciled_at = now(), error = $2
+		WHERE id = $1`, attemptID, reason); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_runs SET state = 'failed', updated_at = now() WHERE id = $1`, runID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // setRunState marks a run complete only when EVERY leg is confirmed.
 func setRunState(ctx context.Context, tx pgx.Tx, runID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `
@@ -220,7 +272,11 @@ func setRunState(ctx context.Context, tx pgx.Tx, runID uuid.UUID) error {
 		                       WHERE l.run_id = r.id AND l.status <> 'confirmed')
 		      THEN 'complete' ELSE 'dispatching' END,
 		    updated_at = now()
-		WHERE r.id = $1`, runID)
+		WHERE r.id = $1
+		  -- A failed run stays failed. Recomputing its state from the legs would
+		  -- let resolving them quietly re-open a run that paid on the wrong
+		  -- chain; leaving 'failed' has to be a deliberate act, not a side effect.
+		  AND r.state <> 'failed'`, runID)
 	return err
 }
 

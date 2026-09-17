@@ -67,6 +67,8 @@ var (
 	ErrResolutionIncomplete = errors.New("keeperhubrail: a resolution needs a status, a note, and a tx hash when confirming")
 	ErrAmountOutOfRange     = errors.New("keeperhubrail: leg amount does not fit a leg record")
 	ErrAllocationMismatch   = errors.New("keeperhubrail: legs and exclusions do not sum to the pool")
+	ErrChainMismatch        = errors.New("keeperhubrail: a transaction was reported on a different chain than the run pays on")
+	ErrRunFailed            = errors.New("keeperhubrail: this run has failed and needs a person before anything more is sent")
 )
 
 // UnreconciledLegsError blocks a resume. errors.Is(err, ErrUnreconciled) matches.

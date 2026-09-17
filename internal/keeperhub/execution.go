@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,6 +88,12 @@ type LegResult struct {
 	// regardless of which node paid: a broadcast transaction is evidence money
 	// may have moved, whatever the step's status says.
 	TxHash string
+
+	// ChainID is output.chainId: the numeric chain KeeperHub reports the
+	// transaction was broadcast on. Zero when the step reported none. This is
+	// what a run's chain is verified against - what happened, not what was
+	// configured.
+	ChainID int64
 
 	// Output is left raw. The shape depends on the node the workflow uses to
 	// pay, and guessing at it here would bake one workflow's node into the
@@ -190,11 +197,13 @@ func (c *Client) Execution(ctx context.Context, executionID string) (Execution, 
 			continue
 		}
 		var tx struct {
-			TransactionHash string `json:"transactionHash"`
+			TransactionHash string          `json:"transactionHash"`
+			ChainID         json.RawMessage `json:"chainId"`
 		}
 		_ = json.Unmarshal(l.Output, &tx)
 		out.Legs = append(out.Legs, LegResult{
 			TxHash:         tx.TransactionHash,
+			ChainID:        parseChainID(tx.ChainID),
 			IterationIndex: *l.IterationIndex,
 			ForEachNodeID:  deref(l.ForEachNodeID),
 			NodeID:         l.NodeID,
@@ -205,6 +214,18 @@ func (c *Client) Execution(ctx context.Context, executionID string) (Execution, 
 		})
 	}
 	return out, nil
+}
+
+// parseChainID accepts the number KeeperHub sends (observed: "chainId": 84532)
+// or the same value as a string. Anything else is 0, which never matches a
+// run's chain and therefore fails closed.
+func parseChainID(raw json.RawMessage) int64 {
+	s := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 func deref(s *string) string {

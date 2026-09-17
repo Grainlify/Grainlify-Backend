@@ -154,6 +154,12 @@ func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
 				run.ID, run.ChainID, run.PayoutRunID)
 			return
 		}
+		// A failed run paid somewhere it should not have. Nothing more is sent
+		// under it until a person has dealt with that.
+		if run.State == "failed" {
+			err = fmt.Errorf("%w: run %s", ErrRunFailed, run.ID)
+			return
+		}
 		if exclusions, err = exclusionsFor(ctx, tx, run.ID); err != nil {
 			return
 		}

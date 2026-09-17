@@ -18,6 +18,9 @@ import (
 
 // fakeRail stands in for KeeperHub. It moves nothing.
 type fakeRail struct {
+	// chainID is stamped onto every transaction the fake reports without one,
+	// as KeeperHub reports the chain a transfer was broadcast on.
+	chainID     int64
 	calls       [][]keeperhub.Recipient
 	keys        []string
 	dispatchErr error
@@ -44,6 +47,11 @@ func (f *fakeRail) Execution(_ context.Context, id string) (keeperhub.Execution,
 		if fmt.Sprintf("exec-%d-%s", i+1, f.keys[i][:8]) == id {
 			ex := f.result(i, f.calls[i])
 			ex.ID = id
+			for j := range ex.Legs {
+				if ex.Legs[j].TxHash != "" && ex.Legs[j].ChainID == 0 {
+					ex.Legs[j].ChainID = f.chainID
+				}
+			}
 			return ex, nil
 		}
 	}
@@ -77,6 +85,9 @@ type fx struct {
 	payoutRun uuid.UUID
 	chain     string
 	actor     uuid.UUID
+	// evmChainID is unique per fixture: the column is UNIQUE and this database
+	// is never truncated.
+	evmChainID int64
 	// paid are the three verified people with an address, in user-id order,
 	// which is the order legs are dispatched in.
 	paid   []uuid.UUID
@@ -97,9 +108,10 @@ func fixture(t *testing.T) *fx {
 		}
 	}
 
-	f := &fx{d: d, chain: "khtest-evm-" + uuid.NewString()[:8], units: map[uuid.UUID]int{}}
-	must(`INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations)
-	      VALUES ($1, 'evm', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1)`, f.chain)
+	f := &fx{d: d, chain: "khtest-evm-" + uuid.NewString()[:8], units: map[uuid.UUID]int{},
+		evmChainID: 800_000_000_000 + int64(uuid.New().ID())}
+	must(`INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations, evm_chain_id)
+	      VALUES ($1, 'evm', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1, $2)`, f.chain, f.evmChainID)
 
 	var owner, project uuid.UUID
 	d.Pool.QueryRow(ctx, `INSERT INTO users DEFAULT VALUES RETURNING id`).Scan(&owner)
@@ -198,7 +210,7 @@ func (f *fx) count(t *testing.T, sql string) int {
 // nothing.
 func TestRelease_TheGuardComesFirst(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{}
+	rail := &fakeRail{chainID: f.evmChainID}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
 
 	unconfirmed := f.req()
@@ -223,7 +235,7 @@ func TestRelease_TheGuardComesFirst(t *testing.T) {
 
 func TestRelease_PlansFreezesAndSendsOnlyEligibleLegs(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{}
+	rail := &fakeRail{chainID: f.evmChainID}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
 
 	res, err := s.Release(context.Background(), f.req())
@@ -279,7 +291,7 @@ func TestRelease_PlansFreezesAndSendsOnlyEligibleLegs(t *testing.T) {
 func TestRelease_PartialFailureThenResume(t *testing.T) {
 	f := fixture(t)
 	ctx := context.Background()
-	rail := &fakeRail{}
+	rail := &fakeRail{chainID: f.evmChainID}
 	rail.result = func(i int, sent []keeperhub.Recipient) keeperhub.Execution {
 		if i == 0 {
 			// Leg 0 paid, leg 1 failed on balance, leg 2 has no result at all.
@@ -376,7 +388,7 @@ func TestRelease_PartialFailureThenResume(t *testing.T) {
 // pending, and they block the next release.
 func TestRelease_ADispatchErrorLeavesLegsUnknown(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{dispatchErr: errors.New("context deadline exceeded")}
+	rail := &fakeRail{chainID: f.evmChainID, dispatchErr: errors.New("context deadline exceeded")}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
 
 	if _, err := s.Release(context.Background(), f.req()); !errors.Is(err, ErrDispatchUnknown) {
@@ -406,7 +418,7 @@ func TestRelease_ADispatchErrorLeavesLegsUnknown(t *testing.T) {
 
 func TestIntake_ARunningExecutionWritesNothing(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
+	rail := &fakeRail{chainID: f.evmChainID, result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
 		return execOf("running", sent, leg(0, true, "0x1"))
 	}}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
@@ -428,7 +440,7 @@ func TestIntake_ARunningExecutionWritesNothing(t *testing.T) {
 // An execution whose input is not what we sent is somebody else's run.
 func TestIntake_AForeignExecutionMakesEveryLegUnknown(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
+	rail := &fakeRail{chainID: f.evmChainID, result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
 		return execOf("success", sent[:1], leg(0, true, "0x1"))
 	}}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
@@ -456,7 +468,7 @@ func TestRelease_RefusesAnEventAlreadySettledOnAptos(t *testing.T) {
 	f.d.Pool.Exec(context.Background(), `
 		INSERT INTO settlements (hackathon_id, pool, pool_usdc, total_weight, unit_value_usdc, pool_minor, asset_decimals)
 		VALUES ($1, 'contributor', 7, 7, 1, 7000000, 6)`, f.hid)
-	rail := &fakeRail{}
+	rail := &fakeRail{chainID: f.evmChainID}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
 	if _, err := s.Release(context.Background(), f.req()); !errors.Is(err, ErrSettledOnAptos) {
 		t.Fatalf("err = %v, want ErrSettledOnAptos", err)
@@ -471,7 +483,7 @@ func TestRelease_RefusesASupersededPayoutRun(t *testing.T) {
 	f.d.Pool.Exec(context.Background(), `
 		INSERT INTO hackathon_payout_runs (hackathon_id, contributor_prize_pool, total_units, unit_value, created_at)
 		VALUES ($1, 7, 7, 1, now() + interval '1 minute')`, f.hid)
-	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{}}
+	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{chainID: f.evmChainID}}
 	if _, err := s.Release(context.Background(), f.req()); !errors.Is(err, ErrPayoutRunNotCurrent) {
 		t.Fatalf("err = %v, want ErrPayoutRunNotCurrent - paying a pre-appeal computation pays the wrong amounts", err)
 	}
@@ -481,7 +493,7 @@ func TestRelease_RefusesANonEVMChain(t *testing.T) {
 	f := fixture(t)
 	req := f.req()
 	req.ChainID = "aptos-testnet"
-	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{}}
+	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{chainID: f.evmChainID}}
 	if _, err := s.Release(context.Background(), req); !errors.Is(err, ErrNotEVMChain) {
 		t.Fatalf("err = %v, want ErrNotEVMChain", err)
 	}
@@ -489,7 +501,7 @@ func TestRelease_RefusesANonEVMChain(t *testing.T) {
 
 func TestResolveLeg_AConfirmationNeedsItsTransaction(t *testing.T) {
 	f := fixture(t)
-	rail := &fakeRail{dispatchErr: errors.New("timeout")}
+	rail := &fakeRail{chainID: f.evmChainID, dispatchErr: errors.New("timeout")}
 	s := &Service{Pool: f.d.Pool, Rail: rail}
 	s.Release(context.Background(), f.req())
 	var legID uuid.UUID
@@ -506,5 +518,129 @@ func TestResolveLeg_AConfirmationNeedsItsTransaction(t *testing.T) {
 		ActorID: f.actor, Status: "failed", Note: "x"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-event resolve: err = %v, want ErrNotFound", err)
+	}
+}
+
+// The run records the numeric chain it pays on.
+func TestRelease_FreezesTheNumericChainOntoTheRun(t *testing.T) {
+	f := fixture(t)
+	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{chainID: f.evmChainID}}
+	res, err := s.Release(context.Background(), f.req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got int64
+	f.d.Pool.QueryRow(context.Background(), `SELECT evm_chain_id FROM keeperhub_payout_runs WHERE id = $1`, res.RunID).Scan(&got)
+	if got != f.evmChainID {
+		t.Fatalf("run evm_chain_id = %d, want %d", got, f.evmChainID)
+	}
+}
+
+// A transfer reported on a different network is not a payment on this one. The
+// run fails closed: nothing is confirmed, every leg is unknown, and nothing more
+// may be sent under it.
+func TestIntake_AWrongChainFailsTheRun(t *testing.T) {
+	f := fixture(t)
+	ctx := context.Background()
+	rail := &fakeRail{chainID: f.evmChainID, result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
+		steps := [][]keeperhub.LegResult{}
+		for j := range sent {
+			l := leg(j, true, fmt.Sprintf("0xccc%d", j))
+			if j == 1 {
+				l[1].ChainID = 8453 // mainnet, while the run pays on the fixture chain
+			}
+			steps = append(steps, l)
+		}
+		return execOf("success", sent, steps...)
+	}}
+	s := &Service{Pool: f.d.Pool, Rail: rail}
+	res, err := s.Release(ctx, f.req())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in, err := s.Intake(ctx, f.hid, res.AttemptID)
+	if !errors.Is(err, ErrChainMismatch) {
+		t.Fatalf("err = %v, want ErrChainMismatch", err)
+	}
+	if len(in.Outcomes) != 0 || len(in.Unknown) != 3 {
+		t.Errorf("outcomes=%d unknown=%d, want 0 and 3", len(in.Outcomes), len(in.Unknown))
+	}
+	for u, st := range f.legStatuses(t) {
+		if st != "unknown" {
+			t.Errorf("leg for %s is %q after a chain mismatch, want unknown - even the legs "+
+				"reported on the right chain belong to a run that reached the wrong one", u, st)
+		}
+	}
+	var runState string
+	f.d.Pool.QueryRow(ctx, `SELECT state FROM keeperhub_payout_runs WHERE id = $1`, res.RunID).Scan(&runState)
+	if runState != "failed" {
+		t.Errorf("run state = %q, want failed", runState)
+	}
+	// Resolving the legs is not enough to resume a failed run.
+	var ids []uuid.UUID
+	rows, _ := f.d.Pool.Query(ctx, `SELECT id FROM keeperhub_payout_legs WHERE run_id = $1`, res.RunID)
+	for rows.Next() {
+		var id uuid.UUID
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for _, id := range ids {
+		if err := s.ResolveLeg(ctx, ResolveRequest{HackathonID: f.hid, LegID: id, ActorID: f.actor,
+			Status: "failed", Note: "checked"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Release(ctx, f.req()); !errors.Is(err, ErrRunFailed) {
+		t.Fatalf("release after a chain mismatch: err = %v, want ErrRunFailed", err)
+	}
+	if len(rail.calls) != 1 {
+		t.Error("a failed run was dispatched again")
+	}
+}
+
+// A transaction reported with no chain at all fails closed the same way.
+func TestIntake_ATransactionWithNoChainFailsTheRun(t *testing.T) {
+	f := fixture(t)
+	rail := &fakeRail{chainID: -1, result: func(_ int, sent []keeperhub.Recipient) keeperhub.Execution {
+		var steps [][]keeperhub.LegResult
+		for j := range sent {
+			steps = append(steps, leg(j, true, fmt.Sprintf("0xddd%d", j)))
+		}
+		return execOf("success", sent, steps...)
+	}}
+	s := &Service{Pool: f.d.Pool, Rail: rail}
+	res, err := s.Release(context.Background(), f.req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Intake(context.Background(), f.hid, res.AttemptID); !errors.Is(err, ErrChainMismatch) {
+		t.Fatalf("err = %v, want ErrChainMismatch for a transaction with no reported chain", err)
+	}
+}
+
+// The chain rows the payout workflow depends on exist with the right ids.
+func TestChainConfigs_BaseSepoliaIsRegisteredAsItsOwnChain(t *testing.T) {
+	d := dbtest.DB(t)
+	rows, err := d.Pool.Query(context.Background(),
+		`SELECT chain_id, family, evm_chain_id, network FROM chain_configs WHERE chain_id IN ('base', 'base-sepolia') ORDER BY chain_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var id, fam, net string
+		var n int64
+		rows.Scan(&id, &fam, &n, &net)
+		got[id] = fmt.Sprintf("%s/%d/%s", fam, n, net)
+	}
+	if got["base-sepolia"] != "evm/84532/testnet" {
+		t.Errorf("base-sepolia = %q, want evm/84532/testnet", got["base-sepolia"])
+	}
+	if got["base"] != "evm/8453/mainnet" {
+		t.Errorf("base = %q, want evm/8453/mainnet - if this is empty, 20260916090100 was skipped "+
+			"(see the merge-order note in the migration)", got["base"])
 	}
 }
