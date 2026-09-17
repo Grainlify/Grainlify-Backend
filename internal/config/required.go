@@ -41,6 +41,14 @@ import (
 //   - TELEGRAM_TOPIC_* - absence falls back to General and is flagged per row.
 //   - SOROBAN_* and the contract IDs - no payout path has ever run. Required in
 //     principle, not required for a live feature.
+//   - KEEPERHUB_API_KEY and KEEPERHUB_WEBHOOK_KEY - same reason, and the gate's
+//     own test applies: this list is for configuration whose absence kills a
+//     LIVE feature. Nothing dispatches a KeeperHub payout run yet, so an empty
+//     value here disables a rail nobody is using rather than breaking one
+//     somebody is. Gating now would refuse every deploy of a backend that has
+//     no payout rail to lose. They belong in this gate on the day a release
+//     path can actually fire a run, and not before - moving them then is a
+//     one-line change plus a line in requiredForLiveFeatures.
 //   - CORS_ORIGINS - empty is correct. The allowlist is an explicit function in
 //     internal/api, and this is the one piece of security-relevant configuration
 //     that is not environment-only.

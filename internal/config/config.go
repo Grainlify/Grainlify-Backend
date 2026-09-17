@@ -99,6 +99,31 @@ type Config struct {
 	DiditWorkflowID    string
 	DiditWebhookSecret string
 
+	// KeeperHub, the Base USDC payout rail.
+	//
+	// Two credentials, and they are kept apart as CODE DISCIPLINE, not as a
+	// security boundary. Be precise about this, because the shape invites the
+	// wrong reading: both values are org-scoped secrets living in the same
+	// environment, read by the same process, and either one leaking is the
+	// same incident. Splitting them protects NOTHING and must not be described
+	// as if it does.
+	//
+	// What it does buy is that "fire a payout" and "look at a payout" are
+	// different values in the code, so a read path cannot accidentally acquire
+	// the ability to move money by reaching for the nearest credential in
+	// scope. The compiler enforces the separation the reviewer wants; it is a
+	// legibility property, not a containment one.
+	//
+	// KeeperHubWebhookKey authenticates the webhook call that FIRES a payout
+	// run. KeeperHubAPIKey is the org API key and is used ONLY for simulate and
+	// for polling execution status - it must never be what dispatches a run.
+	//
+	// Both empty by default. The client is constructed only when its key is
+	// non-empty, mirroring the Didit constructor, so an unset value disables
+	// the rail rather than half-enabling it.
+	KeeperHubAPIKey     string
+	KeeperHubWebhookKey string
+
 	// No chain configuration is read here.
 	//
 	// Seven keys used to be: four SOROBAN_* including a signing secret, plus
@@ -183,6 +208,9 @@ func Load() Config {
 		AnthropicAPIKey:    getEnv("ANTHROPIC_API_KEY", ""),
 		DiditWorkflowID:    getEnv("DIDIT_WORKFLOW_ID", ""),
 		DiditWebhookSecret: getEnv("DIDIT_WEBHOOK_SECRET", ""),
+
+		KeeperHubAPIKey:     getEnv("KEEPERHUB_API_KEY", ""),
+		KeeperHubWebhookKey: getEnv("KEEPERHUB_WEBHOOK_KEY", ""),
 
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),
