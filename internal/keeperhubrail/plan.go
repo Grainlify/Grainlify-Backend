@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -117,8 +116,8 @@ func (s *Service) planRun(ctx context.Context, tx pgx.Tx, req ReleaseRequest) (*
 	).Scan(&run.ID, &run.ChainID, &run.PayoutRunID, &run.EVMChainID, &run.State)
 	if err != nil {
 		// The database-side half of the rail exclusion (migration 090300).
-		if strings.Contains(err.Error(), "already has a settlement") {
-			return nil, nil, fmt.Errorf("%w: %v", ErrSettledOnAptos, err)
+		if rx := runRefusal(err, req.HackathonID.String(), req.Pool); rx != nil {
+			return nil, nil, rx
 		}
 		return nil, nil, fmt.Errorf("keeperhubrail: insert run: %w", err)
 	}
