@@ -124,8 +124,20 @@ const send = (method, params = {}, sessionId) =>
     pending.set(i, r);
     ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
-const evaluate = (expression) =>
-  send("Runtime.evaluate", { expression, awaitPromise: true }, sess);
+// A move that throws must not pass quietly. Runtime.evaluate reports the throw
+// in the result rather than rejecting, so an unchecked move leaves the page
+// exactly as it was and the take looks merely uneventful — the failure shows up
+// as a shot that does not do what the narration says it does.
+async function evaluate(expression, where = "move") {
+  const res = await send("Runtime.evaluate", { expression, awaitPromise: true }, sess);
+  const ex = res.result?.exceptionDetails;
+  if (ex) {
+    throw new Error(
+      `${where} threw: ${ex.exception?.description ?? ex.text}\n  in: ${expression.slice(0, 200)}`
+    );
+  }
+  return res;
+}
 
 const target = await send("Target.createTarget", { url: "about:blank", width: WIDTH, height: HEIGHT });
 sess = (await send("Target.attachToTarget", { targetId: target.result.targetId, flatten: true })).result.sessionId;
@@ -139,7 +151,7 @@ await send("Emulation.setEmulatedMedia",
 const navigatedAt = new Date().toISOString();
 await send("Page.navigate", { url: cfg.url }, sess);
 await sleep(cfg.wait ?? 7000);
-if (cfg.setup) await evaluate(cfg.setup);
+if (cfg.setup) await evaluate(cfg.setup, "setup");
 await sleep(600);
 
 await send("Page.startScreencast",
@@ -158,7 +170,7 @@ await evaluate("window.scrollBy(0,1);window.scrollBy(0,-1)");
 for (const m of cfg.moves ?? []) {
   const wait = m.at - (Date.now() - t0);
   if (wait > 0) await sleep(wait);
-  await evaluate(m.js);
+  await evaluate(m.js, `move at ${m.at}ms`);
 }
 const rest = cfg.duration - (Date.now() - t0);
 if (rest > 0) await sleep(rest);
