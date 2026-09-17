@@ -181,6 +181,15 @@ type AttemptView struct {
 type AttemptLegPosition struct {
 	Position int       `json:"position"`
 	LegID    uuid.UUID `json:"leg_id"`
+
+	// Preflight is the evidence that the mandatory pre-dispatch simulation
+	// actually ran for this leg under this attempt - see preflight.go.
+	// PreflightCheckedAt is nil only for an attempt row written before this
+	// feature existed; every attempt created after it carries one.
+	// PreflightWouldRevert is always false for a real attempt: a leg that
+	// would have reverted is never claimed, so it never reaches this table.
+	PreflightWouldRevert bool       `json:"preflight_would_revert"`
+	PreflightCheckedAt   *time.Time `json:"preflight_checked_at"`
 }
 
 // ExclusionView is somebody who earned an amount and was not made a leg.
@@ -387,7 +396,7 @@ func (s *Service) loadAttempts(ctx context.Context, v *RunView) error {
 	}
 
 	rows, err = s.Pool.Query(ctx, `
-		SELECT al.attempt_id, al.position, al.leg_id
+		SELECT al.attempt_id, al.position, al.leg_id, al.preflight_would_revert, al.preflight_checked_at
 		FROM keeperhub_dispatch_attempt_legs al
 		JOIN keeperhub_dispatch_attempts a ON a.id = al.attempt_id
 		WHERE a.run_id = $1
@@ -399,7 +408,7 @@ func (s *Service) loadAttempts(ctx context.Context, v *RunView) error {
 	for rows.Next() {
 		var attemptID uuid.UUID
 		var p AttemptLegPosition
-		if err := rows.Scan(&attemptID, &p.Position, &p.LegID); err != nil {
+		if err := rows.Scan(&attemptID, &p.Position, &p.LegID, &p.PreflightWouldRevert, &p.PreflightCheckedAt); err != nil {
 			return err
 		}
 		i, ok := index[attemptID]

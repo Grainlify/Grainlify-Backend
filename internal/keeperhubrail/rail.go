@@ -37,6 +37,11 @@ import (
 type Rail interface {
 	Dispatch(ctx context.Context, recipients []keeperhub.Recipient) (keeperhub.DispatchAck, error)
 	Execution(ctx context.Context, executionID string) (keeperhub.Execution, error)
+
+	// SimulateTransfer is the mandatory pre-dispatch check release.go runs on
+	// every leg before any leg of a release is claimed or sent. See
+	// preflight.go for why it is mandatory rather than a flag.
+	SimulateTransfer(ctx context.Context, chainID, toAddress, amount, tokenAddress string) (keeperhub.TransferSimulation, error)
 }
 
 // Service releases and reconciles KeeperHub payout runs.
@@ -73,6 +78,19 @@ var (
 	ErrAllocationMismatch   = errors.New("keeperhubrail: legs and exclusions do not sum to the pool")
 	ErrChainMismatch        = errors.New("keeperhubrail: a transaction was reported on a different chain than the run pays on")
 	ErrRunFailed            = errors.New("keeperhubrail: this run has failed and needs a person before anything more is sent")
+
+	// ErrPreflightUnavailable is simulation itself failing - the org key
+	// unset, a network error, an unreadable response, missing chain
+	// configuration. Kept distinct from ErrPreflightWouldRevert on purpose: an
+	// operator reading this fixes the rail's own tooling, not a leg. Both
+	// refuse identically - nothing claimed, nothing dispatched - so the
+	// distinction is diagnostic, never a reason to treat one as safer than the
+	// other.
+	ErrPreflightUnavailable = errors.New("keeperhubrail: preflight simulation unavailable; nothing was sent")
+	// ErrPreflightWouldRevert is simulation succeeding and reporting that a
+	// leg would not succeed - WouldRevert, or a non-empty Error, per
+	// TransferSimulation.Safe(). A fact about that leg, not about the rail.
+	ErrPreflightWouldRevert = errors.New("keeperhubrail: preflight simulation reports a leg would not succeed; nothing was sent")
 )
 
 // UnreconciledLegsError blocks a resume. errors.Is(err, ErrUnreconciled) matches.

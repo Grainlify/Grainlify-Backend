@@ -26,6 +26,32 @@ type fakeRail struct {
 	dispatchErr error
 	// result builds the execution read back for call i.
 	result func(i int, sent []keeperhub.Recipient) keeperhub.Execution
+
+	// simCalls records every SimulateTransfer call, in order. Every existing
+	// test that does not care about preflight gets the default: every leg
+	// simulates safe, so nothing here changes their behaviour.
+	simCalls []simCall
+	// simulateErr makes every SimulateTransfer call fail, as though the
+	// simulator itself were unreachable.
+	simulateErr error
+	// simulateUnsafe names destination addresses that should report
+	// WouldRevert rather than a clean simulation.
+	simulateUnsafe map[string]bool
+}
+
+type simCall struct {
+	chainID, toAddress, amount, tokenAddress string
+}
+
+func (f *fakeRail) SimulateTransfer(_ context.Context, chainID, toAddress, amount, tokenAddress string) (keeperhub.TransferSimulation, error) {
+	f.simCalls = append(f.simCalls, simCall{chainID, toAddress, amount, tokenAddress})
+	if f.simulateErr != nil {
+		return keeperhub.TransferSimulation{}, f.simulateErr
+	}
+	if f.simulateUnsafe[toAddress] {
+		return keeperhub.TransferSimulation{Success: true, WouldRevert: true, Error: "would revert (fake)"}, nil
+	}
+	return keeperhub.TransferSimulation{Success: true, WouldRevert: false}, nil
 }
 
 func (f *fakeRail) Dispatch(_ context.Context, r []keeperhub.Recipient) (keeperhub.DispatchAck, error) {
@@ -111,7 +137,9 @@ func fixture(t *testing.T) *fx {
 	f := &fx{d: d, chain: "khtest-evm-" + uuid.NewString()[:8], units: map[uuid.UUID]int{},
 		evmChainID: 800_000_000_000 + int64(uuid.New().ID())}
 	must(`INSERT INTO chain_configs (chain_id, family, enabled, asset, min_confirmations, evm_chain_id)
-	      VALUES ($1, 'evm', true, '{"symbol":"USDC","decimals":6}'::jsonb, 1, $2)`, f.chain, f.evmChainID)
+	      VALUES ($1, 'evm', true,
+	              '{"symbol":"USDC","decimals":6,"token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}'::jsonb,
+	              1, $2)`, f.chain, f.evmChainID)
 
 	var owner, project uuid.UUID
 	d.Pool.QueryRow(ctx, `INSERT INTO users DEFAULT VALUES RETURNING id`).Scan(&owner)

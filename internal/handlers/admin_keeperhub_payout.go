@@ -259,6 +259,21 @@ func keeperhubError(c *fiber.Ctx, err error, hid uuid.UUID) error {
 		status, name = fiber.StatusConflict, "chain_mismatch"
 	case errors.Is(err, keeperhubrail.ErrRunFailed):
 		status, name = fiber.StatusConflict, "run_failed"
+	case errors.Is(err, keeperhubrail.ErrPreflightWouldRevert):
+		// A fact about a specific leg, established before anything was
+		// claimed or sent: nothing ran, nothing to resolve on chain, and the
+		// next release re-simulates it fresh once whatever is wrong with the
+		// leg (its address, its amount, the settlement that produced it) is
+		// fixed.
+		slog.Warn("keeperhub preflight simulation refused a leg", "hackathon_id", hid, "error", err)
+		status, name = fiber.StatusConflict, "preflight_would_revert"
+	case errors.Is(err, keeperhubrail.ErrPreflightUnavailable):
+		// The rail's own tooling, not a leg: the org key, KeeperHub's
+		// endpoint, or chain configuration. Logged at error because this
+		// blocks every release until it is fixed, the same severity as a
+		// dispatch outcome we could not confirm.
+		slog.Error("keeperhub preflight simulation unavailable", "hackathon_id", hid, "error", err)
+		status, name = fiber.StatusBadGateway, "preflight_unavailable"
 	case errors.Is(err, keeperhubrail.ErrDispatchRejected):
 		// Certain: nothing ran. The legs are failed and the next release may
 		// send them, once whatever KeeperHub refused (a key, a disabled
