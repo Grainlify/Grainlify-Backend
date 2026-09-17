@@ -121,8 +121,8 @@ func seedClaim(t *testing.T, d *db.DB, uid uuid.UUID, login, addr string, amount
 	mustExec(t, d, `INSERT INTO users (id, role, kyc_status) VALUES ($1,'contributor','verified')`, uid)
 	mustExec(t, d, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
 		VALUES (gen_random_uuid(),$1,$2,$3,'\x00',now(),now())`, uid, int64(uuid.New().ID()), login)
-	mustExec(t, d, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,'aptos-testnet',$2,'n')`, uid, addr)
+	mustExec(t, d, `INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce)
+		VALUES ($1,'aptos-testnet','aptos',$2,'n')`, uid, addr)
 
 	s, err := payout.LoadSettlement(ctx, d.Pool, sid, "aptos-testnet")
 	if err != nil {
@@ -224,8 +224,8 @@ func TestClaims_CarriesTheFrozenAddressRegistrationDate(t *testing.T) {
 	// Supersede it, as registering a new address does.
 	replacement := addrB
 	d.Pool.Exec(ctx, `UPDATE contributor_addresses SET superseded_at=now() WHERE user_id=$1`, uid)
-	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-		VALUES ($1,'aptos-testnet',$2,'n2')`, uid, replacement)
+	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce)
+		VALUES ($1,'aptos-testnet','aptos',$2,'n2')`, uid, replacement)
 
 	_, body := getJSON(t, appFor(uid, d), "/me/claims")
 	cl := body["claims"].([]any)[0].(map[string]any)
@@ -301,8 +301,8 @@ func TestGetClaim_RefusesRatherThanReturningTheFirstOfSeveral(t *testing.T) {
 		d.Pool.Exec(ctx, `INSERT INTO users (id, role, kyc_status) VALUES ($1,'contributor','verified')`, u)
 		d.Pool.Exec(ctx, `INSERT INTO github_accounts (id,user_id,github_user_id,login,access_token,created_at,updated_at)
 			VALUES (gen_random_uuid(),$1,$2,$3,'\x00',now(),now())`, u, int64(uuid.New().ID()), fmt.Sprintf("u%d", i))
-		d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce)
-			VALUES ($1,'aptos-testnet',$2,'n')`, u, addr)
+		d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce)
+			VALUES ($1,'aptos-testnet','aptos',$2,'n')`, u, addr)
 		d.Pool.Exec(ctx, `INSERT INTO settlement_lines (id,settlement_id,user_id,raw_weight,multiplier,effective_weight,usdc_amount,amount_minor)
 			VALUES (gen_random_uuid(),$1,$2,1,1,1,0,$3)`, sid, u, 250000)
 	}
@@ -337,8 +337,8 @@ func TestGetClaim_RefusesRatherThanReturningTheFirstOfSeveral(t *testing.T) {
 	// The realistic route to two matches: the live-address index is unique per
 	// (user, chain), not per address, so two accounts can register one address.
 	// Recorded here as superseded so it does not collide with uid's live row.
-	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, address, verified_nonce, superseded_at)
-		VALUES ($1,'aptos-testnet',$2,'n2', now())`, uid, addrB)
+	d.Pool.Exec(ctx, `INSERT INTO contributor_addresses (user_id, chain_id, chain_family, address, verified_nonce, superseded_at)
+		VALUES ($1,'aptos-testnet','aptos',$2,'n2', now())`, uid, addrB)
 
 	code, body := getJSON(t, appFor(uid, d), "/me/claims/"+sid.String())
 	if code == 200 {
