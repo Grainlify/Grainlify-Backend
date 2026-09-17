@@ -195,11 +195,13 @@ func TestDispatch_RefusesAnEmptyList(t *testing.T) {
 	}
 }
 
-func TestDispatch_RefusesASuccessWithNothingToPoll(t *testing.T) {
+// A 2xx with no executionId is ACCEPTANCE with nothing to poll. Indeterminate,
+// never rejected: the accepted run may be paying.
+func TestDispatch_ASuccessWithNothingToPollIsIndeterminate(t *testing.T) {
 	c, _ := newServer(t, 200, `{"status":"running"}`, "")
-	if _, err := c.Dispatch(context.Background(), []Recipient{{Address: "0x1", AmountMinor: "1"}}); !errors.Is(err, ErrDispatchRefused) {
-		t.Fatalf("err = %v, want ErrDispatchRefused - a 200 with no executionId leaves "+
-			"a run that cannot be followed", err)
+	_, err := c.Dispatch(context.Background(), []Recipient{{Address: "0x1", AmountMinor: "1"}})
+	if !errors.Is(err, ErrDispatchIndeterminate) || IsRejected(err) {
+		t.Fatalf("err = %v, want indeterminate - a 200 means the run was accepted", err)
 	}
 }
 

@@ -60,6 +60,7 @@ var (
 	ErrNothingUnpaid        = errors.New("keeperhubrail: no pending or failed legs to dispatch")
 	ErrConcurrentRelease    = errors.New("keeperhubrail: another release changed these legs; nothing was sent")
 	ErrDispatchUnknown      = errors.New("keeperhubrail: dispatch outcome unknown; its legs are now unknown")
+	ErrDispatchRejected     = errors.New("keeperhubrail: KeeperHub rejected the dispatch and ran nothing; its legs are failed and resumable")
 	ErrNoExecutionToRead    = errors.New("keeperhubrail: attempt has no execution to read")
 	ErrNotFound             = errors.New("keeperhubrail: not found for this hackathon")
 	ErrLegNotResolvable     = errors.New("keeperhubrail: only an unknown leg can be resolved by hand")

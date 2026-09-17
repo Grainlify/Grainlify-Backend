@@ -95,8 +95,15 @@ func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResu
 	// dispatched rather than pending, so nothing can send them a second time.
 	ack, dispatchErr := s.Rail.Dispatch(ctx, recipients)
 	if dispatchErr != nil {
+		// Only a failure the client CLASSIFIED as a definitive rejection makes
+		// the legs resumable. Anything else - including an error the client
+		// did not produce - leaves them unknown.
+		if keeperhub.IsRejected(dispatchErr) {
+			s.markRejected(ctx, attemptID, ack, dispatchErr)
+			return nil, fmt.Errorf("%w: attempt %s: %w", ErrDispatchRejected, attemptID, dispatchErr)
+		}
 		s.markUnacknowledged(ctx, attemptID, ack.IdempotencyKey, dispatchErr)
-		return nil, fmt.Errorf("%w: attempt %s: %v", ErrDispatchUnknown, attemptID, dispatchErr)
+		return nil, fmt.Errorf("%w: attempt %s: %w", ErrDispatchUnknown, attemptID, dispatchErr)
 	}
 
 	if err := s.markSent(ctx, attemptID, ack); err != nil {
@@ -249,13 +256,53 @@ func legIDsWhere(ctx context.Context, tx pgx.Tx, runID uuid.UUID, predicate stri
 	return out, rows.Err()
 }
 
+// markRejected records a dispatch KeeperHub definitively did not run, and puts
+// its legs back to failed so the next release can send them.
+//
+// This is the whole reason dispatch failures are classified. Marking a 401 as
+// unknown strands every leg behind a manual chain check for a condition we
+// already know with certainty - nothing ran - and a safe path that expensive is
+// one people learn to route around.
+//
+// A 402 carries an execution id for a run that was created and never started;
+// it is recorded on the attempt for the audit trail, and does not make the
+// legs anything other than failed.
+func (s *Service) markRejected(ctx context.Context, attemptID uuid.UUID, ack keeperhub.DispatchAck, cause error) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return // legs stay dispatched, which blocks a resume: safe
+	}
+	defer tx.Rollback(ctx)
+	var keyArg, execArg any
+	if ack.IdempotencyKey != "" {
+		keyArg = ack.IdempotencyKey
+	}
+	if ack.ExecutionID != "" {
+		execArg = ack.ExecutionID
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_dispatch_attempts
+		SET state = 'rejected', idempotency_key = $2, execution_id = $3, error = $4
+		WHERE id = $1`, attemptID, keyArg, execArg, cause.Error()); err != nil {
+		return
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_legs
+		SET status = 'failed', last_error = $2, updated_at = now()
+		WHERE last_attempt_id = $1 AND status = 'dispatched'`, attemptID,
+		"dispatch rejected, nothing sent: "+cause.Error()); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
 // markUnacknowledged records a dispatch whose outcome is unknown.
 //
-// Every failure is treated as unknown, including a refusal that looks
-// definitive. The client cannot yet distinguish "never accepted" from
-// "accepted, then the response was lost", and guessing wrong in the permissive
-// direction is a double payment; guessing wrong in this direction costs a
-// person a chain read.
+// Used for everything the client did not classify as a definitive rejection:
+// timeouts, 5xx, 408, 409 (the first request under the key may still be
+// paying), an accepted request with no execution id, and anything unrecognised.
+// Guessing wrong in the permissive direction is a double payment; guessing wrong
+// in this direction costs a person a chain read.
 func (s *Service) markUnacknowledged(ctx context.Context, attemptID uuid.UUID, key string, cause error) {
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
