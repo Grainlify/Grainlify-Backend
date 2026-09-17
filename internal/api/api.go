@@ -571,6 +571,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// transition to `settled`.
 	adminGroup.Get("/hackathons/:id/settlement-preview", requireAdmin, adminHackathonSettlement.Preview())
 
+	// KeeperHub (Base USDC) release and result intake. The handler answers 503
+	// until all three KEEPERHUB_* values are set.
+	adminKeeperHub := handlers.NewAdminKeeperHubPayoutHandler(deps.DB, cfg)
+	adminGroup.Post("/hackathons/:id/keeperhub/release", requireAdmin, adminKeeperHub.Release())
+	adminGroup.Post("/hackathons/:id/keeperhub/attempts/:attempt_id/intake", requireAdmin, adminKeeperHub.Intake())
+	adminGroup.Post("/hackathons/:id/keeperhub/legs/:leg_id/resolve", requireAdmin, adminKeeperHub.Resolve())
+
 	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(cfg, deps.DB, notifSvc)
 	adminGroup.Get("/hackathons/:id/applications", requireAdmin, adminHackathonApps.ListAdmin())
 	adminGroup.Get("/hackathons/applications/:appId/signals", requireAdmin, adminHackathonApps.Signals())

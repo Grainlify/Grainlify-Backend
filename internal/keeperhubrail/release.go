@@ -1,0 +1,304 @@
+package keeperhubrail
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
+	"github.com/jagadeesh/grainlify/backend/internal/keeperhub"
+	"github.com/jagadeesh/grainlify/backend/internal/payout"
+)
+
+// ReleaseRequest is the explicit admin action that sends money.
+type ReleaseRequest struct {
+	HackathonID uuid.UUID
+	PayoutRunID uuid.UUID
+	ActorID     uuid.UUID
+	Pool        string
+	ChainID     string
+	Confirm     bool
+}
+
+// ReleaseResult describes what was SENT. It says nothing about what was paid.
+type ReleaseResult struct {
+	RunID       uuid.UUID   `json:"run_id"`
+	Planned     bool        `json:"planned"`
+	AttemptID   uuid.UUID   `json:"attempt_id"`
+	ExecutionID string      `json:"execution_id"`
+	LegIDs      []uuid.UUID `json:"dispatched_leg_ids"`
+	Exclusions  []Exclusion `json:"exclusions"`
+
+	// AckStatus is KeeperHub's acknowledgement, verbatim - normally
+	// "running". It is ACCEPTANCE, not payment: the probe run finished after
+	// its acknowledgement returned, with nothing in the envelope saying so.
+	// Payment is established only by Intake.
+	AckStatus string `json:"ack_status"`
+}
+
+// Release dispatches every unpaid leg of an event's run, planning the run first
+// if it does not exist yet.
+func (s *Service) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
+	// FIRST, before anything is read or written: the single chokepoint every
+	// payout release must pass - explicit confirmation, an actor, not shadow
+	// mode, phase settled, appeal window closed.
+	if err := hackathon.GuardPayoutRelease(ctx, s.Pool, hackathon.PayoutReleaseRequest{
+		HackathonID: req.HackathonID,
+		PayoutRunID: req.PayoutRunID,
+		ActorID:     req.ActorID,
+		Confirm:     req.Confirm,
+	}); err != nil {
+		return nil, err
+	}
+
+	if req.Pool != PoolContributor {
+		return nil, fmt.Errorf("%w (got %q)", ErrUnsupportedPool, req.Pool)
+	}
+
+	// The guard confirms a payout run id was supplied, not that it is the one
+	// to pay. An upheld appeal recomputes into a NEW run, and paying the
+	// superseded one pays the pre-appeal unit value - correct for nobody.
+	var current uuid.UUID
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT id FROM hackathon_payout_runs WHERE hackathon_id = $1
+		ORDER BY created_at DESC, id DESC LIMIT 1`, req.HackathonID).Scan(&current); err != nil {
+		return nil, fmt.Errorf("%w: no computed payout run: %v", ErrPayoutRunNotCurrent, err)
+	}
+	if current != req.PayoutRunID {
+		return nil, fmt.Errorf("%w: asked to pay %s, current is %s", ErrPayoutRunNotCurrent, req.PayoutRunID, current)
+	}
+
+	family, err := payout.ChainFamilyFor(ctx, s.Pool, req.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrNotEVMChain, err)
+	}
+	if family != payout.FamilyEVM {
+		return nil, fmt.Errorf("%w: %q is %s", ErrNotEVMChain, req.ChainID, family)
+	}
+
+	// The Go-side half of the rail exclusion; the trigger from migration 090300
+	// is the half that holds even for writers that skip this.
+	if id, _ := hackathon.ExistingSettlementID(ctx, s.Pool, req.HackathonID, req.Pool); id != nil {
+		return nil, fmt.Errorf("%w: settlement %s", ErrSettledOnAptos, id)
+	}
+
+	attemptID, recipients, legIDs, run, planned, exclusions, err := s.claimUnpaidLegs(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// The legs are ALREADY recorded as dispatched, in a committed transaction,
+	// before this call. If the process dies mid-request they read as
+	// dispatched rather than pending, so nothing can send them a second time.
+	ack, dispatchErr := s.Rail.Dispatch(ctx, recipients)
+	if dispatchErr != nil {
+		s.markUnacknowledged(ctx, attemptID, ack.IdempotencyKey, dispatchErr)
+		return nil, fmt.Errorf("%w: attempt %s: %v", ErrDispatchUnknown, attemptID, dispatchErr)
+	}
+
+	if err := s.markSent(ctx, attemptID, ack); err != nil {
+		// Money may be moving and we failed to write down which execution is
+		// doing it. Say so loudly: the attempt is left "sending", its legs are
+		// dispatched and therefore blocked, and the execution id is here.
+		return nil, fmt.Errorf("keeperhubrail: dispatched as execution %s (key %s) but could not record it: %w",
+			ack.ExecutionID, ack.IdempotencyKey, err)
+	}
+
+	return &ReleaseResult{
+		RunID:       run,
+		Planned:     planned,
+		AttemptID:   attemptID,
+		ExecutionID: ack.ExecutionID,
+		LegIDs:      legIDs,
+		Exclusions:  exclusions,
+		AckStatus:   ack.Status,
+	}, nil
+}
+
+// claimUnpaidLegs plans the run if needed, refuses while anything is
+// unreconciled, and marks the unpaid legs dispatched under a new attempt - all
+// in one transaction.
+func (s *Service) claimUnpaidLegs(ctx context.Context, req ReleaseRequest) (
+	attemptID uuid.UUID, recipients []keeperhub.Recipient, legIDs []uuid.UUID,
+	runID uuid.UUID, planned bool, exclusions []Exclusion, err error,
+) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	run, err := loadRun(ctx, tx, req.HackathonID, req.Pool, true)
+	if err != nil {
+		return
+	}
+	if run == nil {
+		run, exclusions, err = s.planRun(ctx, tx, req)
+		if err != nil {
+			return
+		}
+		planned = true
+	} else {
+		if run.ChainID != req.ChainID || run.PayoutRunID != req.PayoutRunID {
+			err = fmt.Errorf("%w: run %s pays chain %q from computation %s", ErrRunMismatch,
+				run.ID, run.ChainID, run.PayoutRunID)
+			return
+		}
+		if exclusions, err = exclusionsFor(ctx, tx, run.ID); err != nil {
+			return
+		}
+	}
+	runID = run.ID
+
+	// THE RESUME GATE. A leg that is dispatched (sent, not yet read back) or
+	// unknown (may have paid) blocks everything. Re-sending it is the double
+	// payment this whole rail exists to prevent.
+	blocked, err := legIDsWhere(ctx, tx, run.ID, `status IN ('dispatched', 'unknown')`)
+	if err != nil {
+		return
+	}
+	if len(blocked) > 0 {
+		err = &UnreconciledLegsError{LegIDs: blocked}
+		return
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, address, amount_minor::text FROM keeperhub_payout_legs
+		WHERE run_id = $1 AND status IN ('pending', 'failed')
+		ORDER BY user_id`, run.ID)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var r keeperhub.Recipient
+		if err = rows.Scan(&id, &r.Address, &r.AmountMinor); err != nil {
+			rows.Close()
+			return
+		}
+		r.LegID = id.String()
+		legIDs = append(legIDs, id)
+		recipients = append(recipients, r)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return
+	}
+	if len(recipients) == 0 {
+		// Commit anyway when the run was just planned: everyone may have been
+		// excluded, and those exclusions are a record worth keeping.
+		if planned {
+			if cerr := tx.Commit(ctx); cerr != nil {
+				err = cerr
+				return
+			}
+		}
+		err = ErrNothingUnpaid
+		return
+	}
+
+	if err = tx.QueryRow(ctx, `
+		INSERT INTO keeperhub_dispatch_attempts (run_id, actor_user_id, state)
+		VALUES ($1, $2, 'sending') RETURNING id`, run.ID, req.ActorID).Scan(&attemptID); err != nil {
+		return
+	}
+	for i, id := range legIDs {
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO keeperhub_dispatch_attempt_legs (attempt_id, leg_id, position)
+			VALUES ($1, $2, $3)`, attemptID, id, i); err != nil {
+			return
+		}
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_legs
+		SET status = 'dispatched', last_attempt_id = $1, dispatched_at = now(),
+		    execution_id = NULL, last_error = NULL, updated_at = now()
+		WHERE id = ANY($2) AND status IN ('pending', 'failed')`, attemptID, legIDs)
+	if err != nil {
+		return
+	}
+	if int(tag.RowsAffected()) != len(legIDs) {
+		err = ErrConcurrentRelease
+		return
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE keeperhub_payout_runs SET state = 'dispatching', updated_at = now() WHERE id = $1`, run.ID); err != nil {
+		return
+	}
+	err = tx.Commit(ctx)
+	return
+}
+
+func legIDsWhere(ctx context.Context, tx pgx.Tx, runID uuid.UUID, predicate string) ([]uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `SELECT id FROM keeperhub_payout_legs WHERE run_id = $1 AND `+predicate+` ORDER BY id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// markUnacknowledged records a dispatch whose outcome is unknown.
+//
+// Every failure is treated as unknown, including a refusal that looks
+// definitive. The client cannot yet distinguish "never accepted" from
+// "accepted, then the response was lost", and guessing wrong in the permissive
+// direction is a double payment; guessing wrong in this direction costs a
+// person a chain read.
+func (s *Service) markUnacknowledged(ctx context.Context, attemptID uuid.UUID, key string, cause error) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+	var keyArg any
+	if key != "" {
+		keyArg = key
+	}
+	_, _ = tx.Exec(ctx, `
+		UPDATE keeperhub_dispatch_attempts
+		SET state = 'unacknowledged', idempotency_key = $2, error = $3
+		WHERE id = $1`, attemptID, keyArg, cause.Error())
+	_, _ = tx.Exec(ctx, `
+		UPDATE keeperhub_payout_legs
+		SET status = 'unknown', last_error = $2, updated_at = now()
+		WHERE last_attempt_id = $1 AND status = 'dispatched'`, attemptID,
+		"dispatch outcome unknown: "+cause.Error())
+	_ = tx.Commit(ctx)
+}
+
+func (s *Service) markSent(ctx context.Context, attemptID uuid.UUID, ack keeperhub.DispatchAck) error {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_dispatch_attempts
+		SET state = 'sent', execution_id = $2, idempotency_key = $3
+		WHERE id = $1`, attemptID, ack.ExecutionID, ack.IdempotencyKey); err != nil {
+		return err
+	}
+	// The execution id is recorded on the legs; their status stays dispatched.
+	// An acknowledgement is not a payment.
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_legs SET execution_id = $2, updated_at = now()
+		WHERE last_attempt_id = $1 AND status = 'dispatched'`, attemptID, ack.ExecutionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// isNotFound is a small helper for scans scoped to a hackathon.
+func isNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
