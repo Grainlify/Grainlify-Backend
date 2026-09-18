@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
+	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
 )
@@ -46,10 +47,18 @@ func (f *fakeGitHub) RoundTrip(r *http.Request) (*http.Response, error) {
 		Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 }
 
-// A merged PR that closes a GrainHack issue must become a verdict when the
-// project's PRs are synced. It never did: syncPRs returned on the first empty
-// page, before the judging intake at the end of the function.
-func TestSyncPRs_TurnsAMergedGrainHackPRIntoAVerdict(t *testing.T) {
+// seededEvent is a live GrainHack event with one published issue, assigned
+// through Grainlify to the author of a merged PR that closes it.
+type seededEvent struct {
+	d                               *db.DB
+	projectID, hackathonID, issueID uuid.UUID
+	fullName                        string
+	gh                              *fakeGitHub
+	w                               *Worker
+}
+
+func seedMergedPREvent(t *testing.T) seededEvent {
+	t.Helper()
 	d := dbtest.DB(t)
 	ctx := context.Background()
 
@@ -107,6 +116,25 @@ VALUES ($1, $2, $3, 1, $4, $5, 'octo', 'active')`, hackathonID, issueID, project
 		gh:       &github.Client{HTTP: &http.Client{Transport: gh}, UserAgent: "test"},
 		workerID: "test",
 	}
+	return seededEvent{d: d, projectID: projectID, hackathonID: hackathonID, issueID: issueID, fullName: fullName, gh: gh, w: w}
+}
+
+func assignmentStatus(t *testing.T, e seededEvent) string {
+	t.Helper()
+	var st string
+	if err := e.d.Pool.QueryRow(context.Background(),
+		`SELECT status FROM hackathon_assignments WHERE hackathon_issue_id = $1`, e.issueID).Scan(&st); err != nil {
+		t.Fatalf("read assignment: %v", err)
+	}
+	return st
+}
+
+// A merged PR that closes a GrainHack issue must become a verdict when the
+// project's PRs are synced. It never did: syncPRs returned on the first empty
+// page, before the judging intake at the end of the function.
+func TestSyncPRs_TurnsAMergedGrainHackPRIntoAVerdict(t *testing.T) {
+	e := seedMergedPREvent(t)
+	d, ctx, projectID, hackathonID, fullName, gh, w := e.d, context.Background(), e.projectID, e.hackathonID, e.fullName, e.gh, e.w
 	if err := w.syncPRs(ctx, projectID, fullName, "test-token"); err != nil {
 		t.Fatalf("syncPRs: %v (calls: %v)", err, gh.calls)
 	}
@@ -127,5 +155,55 @@ WHERE hackathon_id = $1 AND project_id = $2 AND pr_number = 7`, hackathonID, pro
 	}
 	if strings.HasPrefix(status, "rejected") {
 		t.Errorf("verdict prefilter_status = %q; this PR meets every qualification, so a rejection means the fixture or the intake is wrong", status)
+	}
+}
+
+// The assigned contributor's merged PR completes their assignment. Nothing
+// called RecordMerge, so it stayed 'active', and closing the event then
+// released it as abandoned and removed the issue.
+func TestSyncPRs_CompletesTheAssignmentOfAMergedGrainHackPR(t *testing.T) {
+	e := seedMergedPREvent(t)
+	if st := assignmentStatus(t, e); st != "active" {
+		t.Fatalf("before the sync the assignment is %q, want active", st)
+	}
+	if err := e.w.syncPRs(context.Background(), e.projectID, e.fullName, "test-token"); err != nil {
+		t.Fatalf("syncPRs: %v", err)
+	}
+	if st := assignmentStatus(t, e); st != "completed" {
+		t.Errorf("after the merged PR synced the assignment is %q, want completed", st)
+	}
+	// A second sync is a no-op, not an error.
+	if err := e.w.syncPRs(context.Background(), e.projectID, e.fullName, "test-token"); err != nil {
+		t.Fatalf("second syncPRs: %v", err)
+	}
+	if st := assignmentStatus(t, e); st != "completed" {
+		t.Errorf("after a second sync the assignment is %q, want completed", st)
+	}
+}
+
+// The case the first live event was in: a human overrode the verdict before
+// the assignment was completed. The verdict step skips overridden rows, and
+// the assignment must still complete.
+func TestSyncPRs_CompletesTheAssignmentEvenWhenTheVerdictWasOverridden(t *testing.T) {
+	e := seedMergedPREvent(t)
+	ctx := context.Background()
+	if _, err := e.d.Pool.Exec(ctx, `
+INSERT INTO hackathon_verdicts
+  (hackathon_id, hackathon_issue_id, project_id, pr_number, github_login, prefilter_status,
+   final_bucket, final_source, override_reason, overridden_at)
+VALUES ($1, $2, $3, 7, 'someone', 'passed', 'accepted', 'human_override', 'judged by hand', now())`,
+		e.hackathonID, e.issueID, e.projectID); err != nil {
+		t.Fatalf("insert overridden verdict: %v", err)
+	}
+	if err := e.w.syncPRs(ctx, e.projectID, e.fullName, "test-token"); err != nil {
+		t.Fatalf("syncPRs: %v", err)
+	}
+	if st := assignmentStatus(t, e); st != "completed" {
+		t.Errorf("assignment is %q, want completed: an overridden verdict must not stop the merge being recorded", st)
+	}
+	var bucket string
+	e.d.Pool.QueryRow(ctx, `SELECT final_bucket FROM hackathon_verdicts WHERE hackathon_id = $1 AND pr_number = 7`, e.hackathonID).Scan(&bucket)
+	if bucket != "accepted" {
+		t.Errorf("the human's verdict was changed to %q", bucket)
 	}
 }

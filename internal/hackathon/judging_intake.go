@@ -92,6 +92,19 @@ func SyncVerdicts(
 	}
 
 	for _, c := range candidates {
+		// §4.6 "PR merged -> enters judging pool": the assigned contributor's
+		// merged PR completes their assignment. Nothing else ever called
+		// RecordMerge, so an assignment stayed 'active' after its PR merged,
+		// and closing the event then released it as abandoned and removed the
+		// issue. Done here, before syncOneVerdict, because that returns early
+		// for a verdict a human has already overridden - and the assignment
+		// still has to complete. Idempotent: an assignment already completed
+		// is ErrNoActiveAssignment, which is not an error here.
+		if qualificationFailure(c) == "" {
+			if err := RecordMerge(ctx, pool, c.HackathonID, projectID, c.IssueNumber, c.AuthorLogin); err != nil && !errors.Is(err, ErrNoActiveAssignment) {
+				return fmt.Errorf("record merge for PR #%d: %w", c.PRNumber, err)
+			}
+		}
 		if err := syncOneVerdict(ctx, pool, gh, accessToken, projectID, fullName, c, admins); err != nil {
 			// One bad PR must not stop the rest of the project's PRs.
 			return fmt.Errorf("verdict for PR #%d: %w", c.PRNumber, err)
