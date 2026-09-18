@@ -620,7 +620,11 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 				"repo", fullName,
 				"total_prs", totalPRs,
 			)
-			return nil
+			// break, not return: the GrainHack judging intake below must run
+			// after the PR rows are written. A return here skipped it for
+			// every repo with fewer than fifty pages of PRs - which is every
+			// repo - so no merged PR ever became a verdict through a sync.
+			break
 		}
 
 		for _, it := range items {
