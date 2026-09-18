@@ -13,9 +13,19 @@ browser pointed at a real URL. That is the point: these videos are used as
 evidence, and a rendered mock of a page is not evidence of anything.
 
 ```
-node record.mjs scene.json          # once per scene
-python3 assemble.py scenes.json     # once for the whole video
+node record.mjs scene.json             # once per scene
+python3 assemble.py scenes.json        # once for the whole video
+python3 assemble.py scenes.json --silent   # a preview, before the narration exists
 ```
+
+`--silent` builds the cut with silence in place of narration, writing
+`<output>.SILENT.mp4`. It exists so a preview goes through this pipeline rather
+than an ad-hoc ffmpeg line: the per-scene mp4s are written either way, so
+`verify-final.py` can confirm the 1.00 guarantee on the preview instead of
+waiting for the audio. Every shot runs at 1.0 in silent mode, including tour
+shots, because there is no narration to scale them against — so a silent preview
+is longer than the final cut will be. The `.SILENT` suffix is applied by the
+assembler, not by the author, so a preview cannot be handed over as the cut.
 
 ## The two rules
 

@@ -125,10 +125,19 @@ def timestamp(t):
 
 
 def main():
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "scenes.json"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    # A cut built before the narration exists. It runs the real pipeline rather
+    # than an ad-hoc ffmpeg line, so the per-scene mp4s exist and verify-final.py
+    # can check the 1.00 guarantee on a preview instead of only on the final cut.
+    silent = "--silent" in sys.argv
+    cfg_path = args[0] if args else "scenes.json"
     cfg = json.load(open(cfg_path))
     base = os.path.dirname(os.path.abspath(cfg_path))
     output = os.path.join(base, cfg.get("output", "demo.mp4"))
+    if silent:
+        stem, ext = os.path.splitext(output)
+        # Named so a silent preview can never be handed over as the finished cut.
+        output = f"{stem}.SILENT{ext}"
 
     parts_v, parts_a, srt, clock = [], [], [], 0.0
 
@@ -166,8 +175,8 @@ def main():
         # about.
         wants_label = bool(scene.get("speed_label"))
 
-        audio_path = find_audio(base, key, scene.get("audio"))
-        narration = duration(audio_path)
+        audio_path = None if silent else find_audio(base, key, scene.get("audio"))
+        narration = 0.0 if silent else duration(audio_path)
 
         window = scene.get("window")
 
@@ -205,6 +214,12 @@ def main():
                     f"Cut about {needed - span:.2f}s of narration from {os.path.basename(audio_path)}, "
                     f"or use a longer take. Do not set speed_label to paper over this: "
                     f"that burns a speed badge onto footage that is already real-time.")
+        elif silent:
+            # A tour shot is normally scaled to fill its narration. With no
+            # narration there is nothing to fill, so it runs at 1.0 and the
+            # preview is longer than the final cut will be.
+            target = span
+            speed = 1.0
         else:
             target = PRE + narration + POST
             speed = span / target
@@ -249,10 +264,16 @@ def main():
         subprocess.run(cmd, check=True)
 
         scene_wav = os.path.join(base, f"{key}.wav.norm.wav")
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", audio_path,
-             "-af", f"adelay={int(PRE * 1000)}:all=1,apad",
-             "-t", f"{target:.3f}", "-ar", "48000", "-ac", "2", scene_wav], check=True)
+        if silent:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                 "-i", "anullsrc=r=48000:cl=stereo",
+                 "-t", f"{target:.3f}", "-ar", "48000", "-ac", "2", scene_wav], check=True)
+        else:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", audio_path,
+                 "-af", f"adelay={int(PRE * 1000)}:all=1,apad",
+                 "-t", f"{target:.3f}", "-ar", "48000", "-ac", "2", scene_wav], check=True)
 
         parts_v.append(scene_mp4)
         parts_a.append(scene_wav)
@@ -263,8 +284,11 @@ def main():
             sents = [x.strip() for x in text.replace("? ", "?|").replace(". ", ".|").split("|") if x.strip()]
             total = sum(len(x) for x in sents) or 1
             t = clock + PRE
+            # With no narration the subtitles spread across the shot instead of
+            # collapsing to zero length, so the preview stays readable.
+            spread = max(target - PRE - POST, 0.0) if silent else narration
             for x in sents:
-                d = narration * len(x) / total
+                d = spread * len(x) / total
                 srt.append((t, t + d, x))
                 t += d
 
