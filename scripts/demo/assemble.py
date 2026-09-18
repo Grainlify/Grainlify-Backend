@@ -16,12 +16,20 @@ footage, never the other way round.
 
 The flag lives in the capture metadata that record.mjs writes next to the
 frames, not in this file's config, so re-editing the assembly cannot quietly
-un-flag a shot. If an evidence scene genuinely must be time-shifted to be
-watchable — a long confirmation wait, say — the author has to set
-"speed_label": true, and a badge is burned into the frame. The badge is a
-boolean opt-in rather than a caption, because its number is computed from the
-speed actually applied: a scene cannot claim 8x while running at 6.5x. A viewer
-should never have to take our word for the timing of a clip we use as proof.
+un-flag a shot. An evidence scene is never time-shifted, labelled, animated or
+composited on: a speed badge, a plate entry or a "designed" flag on one is
+refused. If a wait is too long to watch, cut away from it to a designed card and
+back; do not speed it up. "speed_label" remains for tour footage only, where its
+number is computed from the speed actually applied.
+
+Designed cards and tour plates
+------------------------------
+"designed": true marks an HTML/CSS card recorded by record.mjs. It plays at 1.0
+and is lengthened only by holding its final frame, never retimed, so its easing
+is never stretched. "entry": "plate" on a tour capture slides and fades the whole
+unmodified frame in over the ground and out again. Captured and designed frames
+never share a frame: scenes hard-cut into one another, and all motion lives
+inside the designed scenes.
 """
 
 import json
@@ -54,6 +62,42 @@ def find_audio(base, key, explicit):
     raise SystemExit(
         f"{key}: no narration audio found. Expected one of "
         f"{', '.join(key + e for e in AUDIO_EXTS)} in {base}")
+
+
+# The letterbox and the ground behind a tour plate. Flat, one colour, no
+# texture or gradient: the edge of an evidence frame has to be unambiguous, so
+# nothing designed may sit against it but a plain field. It is the landing
+# page's warm dark ground, where the old value (0x0a0d14) was a blue-black left
+# over from before the design system existed.
+GROUND = "0x1a1512"
+
+# Rigid-plate entry for tour captures: the whole unmodified frame slides and
+# fades in over the ground, and out again. Never offered to evidence.
+PLATE_SECONDS = 0.3
+PLATE_SLIDE_PX = 48
+
+
+def plate_in(scene_mp4, duration):
+    """Slide and fade a tour capture in over the ground, and out again.
+
+    The frame moves as one rigid block - nothing is drawn on it, and its pixels
+    are not resampled, only positioned and faded as a whole. Tour captures only:
+    main() refuses this on any evidence scene.
+    """
+    T, P, Y = duration, PLATE_SECONDS, PLATE_SLIDE_PX
+    y = (f"if(lt(t,{P}),{Y}*pow(1-t/{P},2),"
+         f"if(gt(t,{T - P:.3f}),{Y}*pow((t-{T - P:.3f})/{P},2),0))")
+    tmp = scene_mp4 + ".plate.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"color=c={GROUND}:s=1920x1080:r=30:d={T:.3f}",
+         "-i", scene_mp4, "-filter_complex",
+         f"[1:v]format=yuva420p,fade=t=in:st=0:d={P}:alpha=1,"
+         f"fade=t=out:st={T - P:.3f}:d={P}:alpha=1[p];"
+         f"[0:v][p]overlay=x=0:y='{y}':shortest=1,format=yuv420p[out]",
+         "-map", "[out]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", tmp],
+        check=True)
+    os.replace(tmp, scene_mp4)
 
 
 def speed_label_png(base, key, text):
@@ -174,6 +218,24 @@ def main():
         # its own small fabrication, on the very shot we are labelling to be honest
         # about.
         wants_label = bool(scene.get("speed_label"))
+        is_designed = bool(scene.get("designed"))
+        entry = scene.get("entry")
+
+        # The boundary between designed frames and evidence, enforced here so it
+        # does not depend on anyone remembering it. An evidence frame is shown
+        # as captured, at 1.00, with nothing composited on it: no speed badge,
+        # no plate animation, and it can never be a designed card.
+        if is_evidence:
+            for flag, on in (("speed_label", wants_label), ("entry", bool(entry)), ("designed", is_designed)):
+                if on:
+                    raise SystemExit(
+                        f"{key}: evidence scene with {flag!r} set. Evidence plays as captured, "
+                        f"at 1.00, with nothing on or over it - titles, labels and motion "
+                        f"belong on the designed cards around it, never on the shot.")
+        if is_designed and (wants_label or entry):
+            raise SystemExit(f"{key}: a designed card animates itself; speed_label and entry do not apply.")
+        if entry not in (None, "plate"):
+            raise SystemExit(f"{key}: unknown entry {entry!r}; the only entry is \"plate\".")
 
         audio_path = None if silent else find_audio(base, key, scene.get("audio"))
         narration = 0.0 if silent else duration(audio_path)
@@ -212,8 +274,14 @@ def main():
                     f"  narration  {narration:.2f}s (+{PRE}s lead-in +{POST}s tail = {needed:.2f}s)\n"
                     f"  over by    {needed - span:.2f}s\n"
                     f"Cut about {needed - span:.2f}s of narration from {os.path.basename(audio_path)}, "
-                    f"or use a longer take. Do not set speed_label to paper over this: "
-                    f"that burns a speed badge onto footage that is already real-time.")
+                    f"or use a longer take. An evidence scene cannot carry a speed badge.")
+        elif is_designed:
+            # A designed card is an eased animation. Retiming it would stretch
+            # the easing, so it plays at 1.0 and is lengthened only by holding
+            # its final, settled frame. It is never shortened either: if the
+            # narration is shorter, the card plays out and the audio pads.
+            target = max(span, 0.0 if silent else PRE + narration + POST)
+            speed = 1.0
         elif silent:
             # A tour shot is normally scaled to fill its narration. With no
             # narration there is nothing to fill, so it runs at 1.0 and the
@@ -231,7 +299,9 @@ def main():
             print(f"  {key}: non-evidence shot scaled x{speed:.2f} to fit narration")
 
         vf = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-              "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x0a0d14,fps=30,format=yuv420p")
+              f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color={GROUND},fps=30,format=yuv420p")
+        if is_designed and target > span + 0.001:
+            vf += f",tpad=stop_mode=clone:stop_duration={target - span:.3f}"
         scene_mp4 = os.path.join(base, f"{key}.mp4")
 
         if clip_path:
@@ -263,6 +333,9 @@ def main():
                 "-crf", "20", scene_mp4]
         subprocess.run(cmd, check=True)
 
+        if entry == "plate":
+            plate_in(scene_mp4, target)
+
         scene_wav = os.path.join(base, f"{key}.wav.norm.wav")
         if silent:
             subprocess.run(
@@ -292,7 +365,7 @@ def main():
                 srt.append((t, t + d, x))
                 t += d
 
-        flag = "evidence" if is_evidence else "tour"
+        flag = "evidence" if is_evidence else "designed" if is_designed else "tour"
         source = f"clip {os.path.basename(clip_path)}" if clip_path else f"{len(frames)} frames"
         print(f"{key}: {flag}, narration {narration:.1f}s, scene {target:.1f}s, "
               f"speed x{speed:.2f}, {source}")

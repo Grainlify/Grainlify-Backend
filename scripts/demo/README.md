@@ -46,12 +46,26 @@ The flag is written by `record.mjs` into `index.json` next to the frames, and
 edit to `scenes.json` therefore cannot quietly un-flag a shot — the footage
 carries its own status.
 
-If an evidence shot genuinely must be time-shifted to stay watchable, set
-`"speed_label": true` on the scene. A badge is burned into the frame. The badge
-is a boolean opt-in rather than a caption you write, because the number on it is
-computed from the speed actually applied — a scene cannot claim `8x` while
-running at `6.5x`. A viewer should never have to take our word for the timing of
-a clip we are using as proof.
+An evidence shot is never time-shifted, labelled, animated or composited on.
+`assemble.py` refuses `speed_label`, `entry` or `designed` on one. If a wait is
+too long to watch, cut away to a designed card and back rather than speeding the
+footage up. `"speed_label": true` survives for tour footage only, and its number
+is computed from the speed actually applied — a scene cannot claim `8x` while
+running at `6.5x`.
+
+### Designed cards, tour plates and the ground
+
+- `"designed": true` marks a title or section card: HTML/CSS recorded with
+  `record.mjs` (`"evidence": false`). It plays at 1.0 and is padded to its
+  narration **only by holding its final frame** — never retimed, so its easing is
+  never stretched, and never shortened.
+- `"entry": "plate"` on a tour capture slides and fades the whole, unmodified
+  frame in over the ground (300 ms, 48 px) and out again. Nothing is drawn on it.
+- Captured and designed frames never share a frame. Scenes hard-cut into one
+  another; all motion lives inside the designed scenes.
+- The letterbox and the plate's ground is one flat colour, `#1a1512` — the
+  landing page's warm dark ground. Flat on purpose: the edge of an evidence frame
+  has to be unambiguous.
 
 ### 2. Moves may scroll, outline and focus — never change a value
 
@@ -183,17 +197,30 @@ enough to read along with, not a real forced alignment.
 python3 verify-final.py bounty.mp4
 ```
 
-Four things before a cut is called done: every shot at 1.0 unless it carries a
-badge, the badge naming the speed actually applied, no frame carrying a
-credential or an IP, and every on-screen value present in `SOURCES.md`.
+Five things before a cut is called done: every evidence shot at 1.0, every
+evidence shot unretouched, every designed card held and never cut short, no frame
+carrying a credential or an IP, and every on-screen value present in `SOURCES.md`.
 
-The script decides the first two from the scene configs and the built files. It
-does **not** decide the last two, and says so: there is no OCR here, and a script
-that claimed to have read every frame without one would be the same unearned
-assurance the rest of this pipeline avoids. Instead it finds every visually
-distinct screen in the cut and writes each out at full resolution — a short set,
-since a recording of a mostly-static page holds still for most of its length —
-and a person reads them.
+**Unretouched** is checked against the capture each evidence scene was built
+from. The source is put through the assembler's own scale-and-letterbox chain,
+so the only remaining difference is the encoder's, and then compared every
+0.5 s — not as a whole frame, whose average hides a small edit, but on an 8×8
+grid of tiles. A tile passes if it matches the source at some instant within
+0.1 s (so a moving cursor or a scroll is matched frame to frame; screen
+recordings are variable-frame-rate, so the candidates are the source's real
+frames, including the one still on screen). The letterbox must be a flat field.
+Calibrated on the four bounty scenes: the worst clean tile is 35.3 dB; the floor
+is 33 dB. Planted on copies, a speed badge scored 12.1 dB, a small "5 USDC" in
+the page's own text colour 23.7 dB (its whole frame still 38.7 dB), and a
+400×10 bar in the letterbox left every tile passing but failed the letterbox.
+**Its limit:** text drawn in almost the colour of the ground under it can pass.
+
+The script does **not** decide the last two, and says so: there is no OCR here,
+and a script that claimed to have read every frame without one would be the same
+unearned assurance the rest of this pipeline avoids. Instead it finds every
+visually distinct screen in the cut and writes each out at full resolution — a
+short set, since a recording of a mostly-static page holds still for most of its
+length — and a person reads them.
 
 ## Gotchas
 
