@@ -3,7 +3,9 @@ package keeperhub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 // Simulation, and an honest account of what it does and does not cover.
@@ -89,6 +91,21 @@ func (c *Client) SimulateTransfer(ctx context.Context, chainID, toAddress, amoun
 
 	raw, err := c.mcpCall(ctx, "execute_transfer", args)
 	if err != nil {
+		// KeeperHub reports a transfer that WOULD REVERT as a tool error - an
+		// HTTP 400 with isError set - even though its own text says "this 400
+		// describes the transaction, not your request". Treated as a plain
+		// error, the one answer this call exists to give was discarded: the
+		// preflight filed the leg as "unavailable", the release answered 502
+		// as though KeeperHub were down, and ErrPreflightWouldRevert was
+		// unreachable for any real revert.
+		//
+		// Recovered only when the payload is unmistakably a simulation result.
+		// Anything else - an auth failure, a malformed call, a body that does
+		// not parse - stays an error, so this can only ever turn an error into
+		// a refusal, never into permission to send.
+		if sim, ok := simulationFromToolError(err); ok {
+			return sim, nil
+		}
 		return TransferSimulation{}, err
 	}
 	var out TransferSimulation
@@ -98,4 +115,39 @@ func (c *Client) SimulateTransfer(ctx context.Context, chainID, toAddress, amoun
 	}
 	out.Raw = raw
 	return out, nil
+}
+
+// simulationFromToolError recovers a simulation result from an isError payload.
+//
+// The text is "API call failed: 400 Bad Request - {json}" followed by prose, so
+// the JSON is decoded as the first complete value after the first brace. It is
+// accepted only with status "simulated" and wouldRevert true: a refusal is the
+// only answer worth recovering, and requiring it means no reading of an error
+// can ever produce a Safe() simulation.
+func simulationFromToolError(err error) (TransferSimulation, bool) {
+	var te *ToolError
+	if !errors.As(err, &te) {
+		return TransferSimulation{}, false
+	}
+	i := strings.IndexByte(te.Text, '{')
+	if i < 0 {
+		return TransferSimulation{}, false
+	}
+	var raw json.RawMessage
+	if json.NewDecoder(strings.NewReader(te.Text[i:])).Decode(&raw) != nil {
+		return TransferSimulation{}, false
+	}
+	var probe struct {
+		Status      string `json:"status"`
+		WouldRevert bool   `json:"wouldRevert"`
+	}
+	if json.Unmarshal(raw, &probe) != nil || probe.Status != "simulated" || !probe.WouldRevert {
+		return TransferSimulation{}, false
+	}
+	var sim TransferSimulation
+	if json.Unmarshal(raw, &sim) != nil {
+		return TransferSimulation{}, false
+	}
+	sim.Raw = raw
+	return sim, true
 }

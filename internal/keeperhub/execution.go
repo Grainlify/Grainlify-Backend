@@ -279,7 +279,7 @@ func (c *Client) mcpCall(ctx context.Context, tool string, args map[string]any) 
 		return nil, fmt.Errorf("%w: %s returned no content", ErrRemote, tool)
 	}
 	if wrapper.IsError {
-		return nil, fmt.Errorf("%w: %s: %s", ErrRemote, tool, wrapper.Content[0].Text)
+		return nil, &ToolError{Tool: tool, Text: wrapper.Content[0].Text}
 	}
 	return []byte(wrapper.Content[0].Text), nil
 }
@@ -366,3 +366,20 @@ func sseData(raw []byte) []byte {
 	}
 	return nil
 }
+
+// ToolError is a tools/call result KeeperHub flagged isError. It carries the
+// tool's own text so a caller that knows the tool's shape can read it, and it
+// unwraps to ErrRemote so every errors.Is(err, ErrRemote) check still holds.
+//
+// The message is byte-for-byte what fmt.Errorf("%w: %s: %s", ...) produced
+// before this type existed, so logs and alerts keyed on it are unchanged.
+type ToolError struct {
+	Tool string
+	Text string
+}
+
+func (e *ToolError) Error() string {
+	return fmt.Sprintf("%s: %s: %s", ErrRemote.Error(), e.Tool, e.Text)
+}
+
+func (e *ToolError) Unwrap() error { return ErrRemote }

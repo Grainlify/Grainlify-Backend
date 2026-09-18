@@ -1,0 +1,10 @@
+API call failed: 400 Bad Request - {"success":false,"status":"simulated","from":"0xe6e5e247ce27a43f724675dd679dc7a4a1896ca6","to":"0x036CbD53842c5426634e7929541eC2318f3dCF7e","value":"0","failureKind":"revert","wouldRevert":true,"revertReason":"Error(ERC20: transfer amount exceeds balance)","error":"Error(ERC20: transfer amount exceeds balance)","originalError":"execution reverted: \"ERC20: transfer amount exceeds balance\" (action=\"call\", data=\"0x08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002645524332303a207472616e7366657220616d6f756e7420657863656564732062616c616e63650000000000000000000000000000000000000000000000000000\", reason=\"ERC20: transfer amount exceeds balance\", transaction={ \"data\": \"0xa9059cbb000000000000000000000000b472ccf4aed6ca8ed2fc023f584946d5a8170c7300000000000000000000000000000000000000000000000000000000000f4240\", \"from\": \"0xE6e5e247ce27A43F724675DD679DC7a4a1896CA6\", \"to\": \"0x036CbD53842c5426634e7929541eC2318f3dCF7e\" }, invocation=null, revert={ \"args\": [ \"ERC20: transfer amount exceeds balance\" ], \"name\": \"Error\", \"signature\": \"Error(string)\" }, code=CALL_EXCEPTION, version=6.17.0)"}
+
+Simulation reverted. Nothing was signed or broadcast.
+Stage: simulation — this 400 describes the transaction, not your request.
+Reason: Error(ERC20: transfer amount exceeds balance)
+Simulated sender: 0xe6e5e247ce27a43f724675dd679dc7a4a1896ca6
+Simulated call target: 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+Next step:
+  - The dry run resolves the sender to the organization wallet. If your org routes writes through a Safe, the broadcast spends from the Safe, so the sender above is not the account that pays — resolve the signer mode before acting on the reason.
+  - Fix the cause, then re-run the same arguments with simulate: true. Broadcast only once the dry run returns success: true and wouldRevert: false.
