@@ -113,6 +113,32 @@ And the assembly side:
 }
 ```
 
+## Pages behind a login
+
+Some shots live inside the app's admin screens. A scene can seed `localStorage`
+before the page loads:
+
+```jsonc
+{
+  "storage":        { "dashboardTab": "grainhack" },
+  "storageFromEnv": { "patchwork_jwt": "GRAINLIFY_ADMIN_JWT" }
+}
+```
+
+`storage` takes plain values. `storageFromEnv` maps a key to the **name** of an
+environment variable holding the value, so a session token is read at capture
+time and never written into a scene config — configs are committed precisely so
+anyone can audit what was run against the page, and a token in a committed file
+defeats that twice over. A missing variable fails the capture with a clear
+message, and the seeding expression is never echoed, not even in an error, since
+a token in a terminal transcript is a token in a screen recording.
+
+```
+GRAINLIFY_ADMIN_JWT='…' node record.mjs scene.json
+```
+
+**Review the frames.** A signed-in screen can show anything that screen shows.
+
 ## Narration
 
 Narration is a plain audio file named after the scene key — `s1.wav`, `s1.aiff`,

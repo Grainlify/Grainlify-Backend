@@ -128,12 +128,17 @@ const send = (method, params = {}, sessionId) =>
 // in the result rather than rejecting, so an unchecked move leaves the page
 // exactly as it was and the take looks merely uneventful — the failure shows up
 // as a shot that does not do what the narration says it does.
-async function evaluate(expression, where = "move") {
+// `secret` suppresses echoing the expression, which is how a seeded session
+// token would otherwise reach a terminal transcript or a screen recording.
+async function evaluate(expression, where = "move", secret = false) {
   const res = await send("Runtime.evaluate", { expression, awaitPromise: true }, sess);
   const ex = res.result?.exceptionDetails;
   if (ex) {
+    const detail = ex.exception?.description ?? ex.text;
     throw new Error(
-      `${where} threw: ${ex.exception?.description ?? ex.text}\n  in: ${expression.slice(0, 200)}`
+      secret
+        ? `${where} threw: ${detail}\n  (expression withheld — it carries a secret)`
+        : `${where} threw: ${detail}\n  in: ${expression.slice(0, 200)}`
     );
   }
   return res;
@@ -150,6 +155,40 @@ await send("Emulation.setEmulatedMedia",
 
 const navigatedAt = new Date().toISOString();
 await send("Page.navigate", { url: cfg.url }, sess);
+
+// Seeding localStorage, for pages behind a login. `storage` holds plain values
+// (which tab is open, a dismissed banner). `storageFromEnv` maps a key to the
+// NAME of an environment variable holding the value — a session token is read
+// from the environment at capture time and never written into a scene config,
+// because scene configs are committed so that anyone can audit what was run
+// against the page.
+//
+// Nothing here is logged: a token in a terminal transcript is a token in a
+// screen recording. Capturing a signed-in screen means the frames may contain
+// anything that screen shows, so review them before use.
+const storage = { ...(cfg.storage ?? {}) };
+for (const [key, envName] of Object.entries(cfg.storageFromEnv ?? {})) {
+  const value = process.env[envName];
+  if (!value) {
+    ws.close(); chrome.kill();
+    throw new Error(
+      `${process.argv[2]}: storageFromEnv wants ${envName} for localStorage["${key}"], ` +
+        `but that environment variable is empty.\nExport it for this command only, ` +
+        `e.g.  ${envName}='…' node record.mjs ${process.argv[2]}`
+    );
+  }
+  storage[key] = value;
+}
+if (Object.keys(storage).length) {
+  await sleep(1500);
+  await evaluate(
+    `(()=>{const s=${JSON.stringify(storage)};for(const k in s)localStorage.setItem(k,s[k])})()`,
+    "storage seed",
+    Object.keys(cfg.storageFromEnv ?? {}).length > 0
+  );
+  await send("Page.navigate", { url: cfg.url }, sess);
+}
+
 await sleep(cfg.wait ?? 7000);
 if (cfg.setup) await evaluate(cfg.setup, "setup");
 await sleep(600);
