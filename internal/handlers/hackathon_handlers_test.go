@@ -252,6 +252,69 @@ VALUES ($1, $2, $3, $4, 'applied')
 	}
 }
 
+// An issue whose draw has run must say so, or the page goes on promising a
+// draw that already happened. Every assignment status is covered: held and
+// completed assignments mark the issue assigned; released ones free it.
+func TestHackathonPublic_IssuesForHackathon_ReportsAssignedWithoutTheAssignee(t *testing.T) {
+	cases := []struct {
+		status string // "" = no assignment at all
+		want   bool
+	}{
+		{"", false},
+		{"active", true},
+		{"pr_submitted", true},
+		{"completed", true},
+		{"released_stale", false},
+		{"released_voluntary", false},
+		{"released_event_end", false},
+	}
+	for _, tc := range cases {
+		name := tc.status
+		if name == "" {
+			name = "none"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := testDB(t)
+			app := hackathonSuiteApp(d)
+			hackathonID := hackathonSuiteInsertHackathon(t, d, "live")
+			ownerID := adminSuiteInsertUser(t, d, "contributor")
+			projectID := hackathonSuiteInsertProject(t, d, ownerID)
+			issueID := hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 1, "published", "Drawn issue")
+
+			winnerID := adminSuiteInsertUser(t, d, "contributor")
+			winnerLogin := "winner-" + uuid.NewString()[:8]
+			if tc.status != "" {
+				if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO hackathon_assignments
+  (hackathon_id, hackathon_issue_id, project_id, issue_number, user_id, github_login, org_login, status)
+VALUES ($1, $2, $3, 1, $4, $5, 'hackathon-suite-org', $6)
+`, hackathonID, issueID, projectID, winnerID, winnerLogin, tc.status); err != nil {
+					t.Fatalf("insert assignment: %v", err)
+				}
+			}
+
+			resp, body := notifSuiteDo(t, app, "GET", "/hackathons/"+hackathonID.String()+"/issues", "", nil)
+			if resp.StatusCode != fiber.StatusOK {
+				t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+			}
+			want := `"assigned":false`
+			if tc.want {
+				want = `"assigned":true`
+			}
+			if !strings.Contains(string(body), want) {
+				t.Errorf("assignment status %q: want %s in %s", tc.status, want, body)
+			}
+			// Whoever won stays off the public page: neither their login nor
+			// their id, at any key.
+			for _, leak := range []string{winnerLogin, winnerID.String(), "github_login", "assignee"} {
+				if strings.Contains(string(body), leak) {
+					t.Errorf("response discloses the assignee (%q): %s", leak, body)
+				}
+			}
+		})
+	}
+}
+
 // --- Public routes: draft hackathons never appear ---
 
 func TestHackathonPublic_List_ExcludesDraft(t *testing.T) {

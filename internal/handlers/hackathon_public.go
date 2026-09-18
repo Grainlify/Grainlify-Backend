@@ -141,6 +141,13 @@ type publicHackathonIssueDTO struct {
 	Reserved                  bool       `json:"reserved"`
 	ApplicationWindowOpensAt  *time.Time `json:"application_window_opens_at"`
 	ApplicationWindowClosesAt *time.Time `json:"application_window_closes_at"`
+	// Assigned is true once the issue's draw has produced an assignment that
+	// is still held or was completed - so a page can stop saying "the draw
+	// runs shortly" after it has run. Deliberately a bare boolean: never who
+	// holds it. Naming the winner on a public page gives everyone who lost
+	// the draw a worse experience than a status word, and nothing needs it.
+	// A released assignment frees the issue again, so it does not count.
+	Assigned bool `json:"assigned"`
 }
 
 // IssuesForHackathon handles GET /hackathons/:id/issues - every published
@@ -183,7 +190,12 @@ SELECT EXISTS(SELECT 1 FROM hackathons WHERE id = $1 AND phase != 'draft')
 		rows, err := h.db.Pool.Query(c.Context(), `
 SELECT hi.id, hi.project_id, p.github_full_name, hi.issue_number,
        COALESCE(gi.title, ''), COALESCE(hi.difficulty_tier, ''), COALESCE(hi.acceptance_criteria, ''),
-       COALESCE(hi.reserved, false), hi.application_window_opens_at, hi.application_window_closes_at
+       COALESCE(hi.reserved, false), hi.application_window_opens_at, hi.application_window_closes_at,
+       EXISTS (
+         SELECT 1 FROM hackathon_assignments a
+         WHERE a.hackathon_issue_id = hi.id
+           AND a.status IN ('active', 'pr_submitted', 'completed')
+       )
 FROM hackathon_issues hi
 JOIN projects p ON p.id = hi.project_id
 LEFT JOIN github_issues gi ON gi.project_id = hi.project_id AND gi.number = hi.issue_number
@@ -200,7 +212,7 @@ ORDER BY hi.published_at ASC
 			var d publicHackathonIssueDTO
 			if err := rows.Scan(&d.ID, &d.ProjectID, &d.RepoFullName, &d.IssueNumber,
 				&d.IssueTitle, &d.DifficultyTier, &d.AcceptanceCriteria,
-				&d.Reserved, &d.ApplicationWindowOpensAt, &d.ApplicationWindowClosesAt); err != nil {
+				&d.Reserved, &d.ApplicationWindowOpensAt, &d.ApplicationWindowClosesAt, &d.Assigned); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_scan_failed"})
 			}
 			out = append(out, d)
