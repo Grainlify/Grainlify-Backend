@@ -117,3 +117,94 @@ FROM hackathons WHERE id = $1 AND phase != 'draft'
 		return c.Status(fiber.StatusOK).JSON(hd)
 	}
 }
+
+// publicHackathonIssueDTO is the contributor-facing shape of one published
+// issue: enough to decide whether to apply, and nothing that lets someone
+// compare how contested it is against any other issue.
+//
+// Deliberately narrower than both admin's hackathonIssueDTO (ListForHackathon)
+// and the owner-or-admin-gated ListForProject: no applicant_count or
+// applicant_bucket (a list of buckets is a sortable comparison a single-issue
+// view is not, and the draw's weighting exists specifically to make that
+// comparison worthless - see the design note this endpoint was built from),
+// no flagged_for_admin/flagged_reason/org_login/synced_at (moderation and
+// sync bookkeeping with no contributor-facing purpose), and nothing from
+// hackathon_issue_applications at all - not even a count of it.
+type publicHackathonIssueDTO struct {
+	ID                        uuid.UUID  `json:"id"`
+	ProjectID                 uuid.UUID  `json:"project_id"`
+	RepoFullName              string     `json:"repo_full_name"`
+	IssueNumber               int        `json:"issue_number"`
+	IssueTitle                string     `json:"issue_title"`
+	DifficultyTier            string     `json:"difficulty_tier"`
+	AcceptanceCriteria        string     `json:"acceptance_criteria"`
+	Reserved                  bool       `json:"reserved"`
+	ApplicationWindowOpensAt  *time.Time `json:"application_window_opens_at"`
+	ApplicationWindowClosesAt *time.Time `json:"application_window_closes_at"`
+}
+
+// IssuesForHackathon handles GET /hackathons/:id/issues - every published
+// issue across every project in this hackathon. Public in the same sense
+// GetByID is: no RequireAuth, and a draft hackathon's issues do not exist
+// publicly either, checked the same way (rather than trusting the id alone
+// and letting a join produce rows for a hackathon nobody should be able to
+// see yet).
+//
+// This is the endpoint GET /projects/:id/hackathon-issues could not be: that
+// route is owner-or-admin gated per project, so a contributor who owns none
+// of a hackathon's projects gets 403 from it for every one of them. Nothing
+// before this endpoint let a contributor list an event's issues at all.
+//
+// Ordered by published_at ascending - publication order, which carries no
+// information about how contested an issue is. Deliberately not ordered by
+// anything that could (difficulty, acceptance-criteria length, an inferred
+// popularity), since an ordering can leak the same signal a missing field
+// was built to withhold.
+func (h *HackathonPublicHandler) IssuesForHackathon() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if h.db == nil || h.db.Pool == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "db_not_configured"})
+		}
+		id, err := uuid.Parse(c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_hackathon_id"})
+		}
+
+		var exists bool
+		if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT EXISTS(SELECT 1 FROM hackathons WHERE id = $1 AND phase != 'draft')
+`, id).Scan(&exists); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "hackathon_lookup_failed"})
+		}
+		if !exists {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "hackathon_not_found"})
+		}
+
+		rows, err := h.db.Pool.Query(c.Context(), `
+SELECT hi.id, hi.project_id, p.github_full_name, hi.issue_number,
+       COALESCE(gi.title, ''), COALESCE(hi.difficulty_tier, ''), COALESCE(hi.acceptance_criteria, ''),
+       COALESCE(hi.reserved, false), hi.application_window_opens_at, hi.application_window_closes_at
+FROM hackathon_issues hi
+JOIN projects p ON p.id = hi.project_id
+LEFT JOIN github_issues gi ON gi.project_id = hi.project_id AND gi.number = hi.issue_number
+WHERE hi.hackathon_id = $1 AND hi.status = 'published'
+ORDER BY hi.published_at ASC
+`, id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_list_failed"})
+		}
+		defer rows.Close()
+
+		out := []publicHackathonIssueDTO{}
+		for rows.Next() {
+			var d publicHackathonIssueDTO
+			if err := rows.Scan(&d.ID, &d.ProjectID, &d.RepoFullName, &d.IssueNumber,
+				&d.IssueTitle, &d.DifficultyTier, &d.AcceptanceCriteria,
+				&d.Reserved, &d.ApplicationWindowOpensAt, &d.ApplicationWindowClosesAt); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "issues_scan_failed"})
+			}
+			out = append(out, d)
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"issues": out})
+	}
+}

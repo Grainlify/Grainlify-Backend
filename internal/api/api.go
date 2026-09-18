@@ -465,6 +465,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	app.Get("/hackathons", hackathonPublic.List())
 	app.Get("/hackathons/:id", hackathonPublic.GetByID())
+	app.Get("/hackathons/:id/issues", hackathonPublic.IssuesForHackathon())
 
 	hackathonApps := handlers.NewHackathonApplicationsHandler(deps.DB)
 	app.Post("/hackathons/:id/applications", auth.RequireAuth(cfg.JWTSecret), hackathonApps.Apply())
