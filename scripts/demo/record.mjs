@@ -100,13 +100,32 @@ await new Promise((r) => (ws.onopen = r));
 let id = 0, sess = null, n = 0, recording = false;
 const pending = new Map();
 const frames = [];
+let frameSize = null;
+
+// The pixel size of a JPEG, read from its start-of-frame marker. The screencast
+// delivers frames at CSS-pixel size whatever deviceScaleFactor says, so a
+// 1280x720 viewport at scale 1.5 yields 1280x720 frames, not 1920x1080 - and
+// the assembler then resamples them 1.5x. Recording the size actually written
+// keeps the metadata from claiming a resolution the frames do not have.
+function jpegSize(buf) {
+  for (let i = 2; i + 9 < buf.length;) {
+    if (buf[i] !== 0xff) return null;
+    const marker = buf[i + 1], len = buf.readUInt16BE(i + 2);
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker))
+      return [buf.readUInt16BE(i + 7), buf.readUInt16BE(i + 5)];
+    i += 2 + len;
+  }
+  return null;
+}
 
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data);
   if (m.method === "Page.screencastFrame") {
     if (recording) {
       const f = `f${String(n).padStart(5, "0")}.jpg`;
-      writeFileSync(join(cfg.dir, f), Buffer.from(m.params.data, "base64"));
+      const buf = Buffer.from(m.params.data, "base64");
+      writeFileSync(join(cfg.dir, f), buf);
+      if (!frameSize) frameSize = jpegSize(buf);
       frames.push([f, m.params.metadata.timestamp]);
       n++;
     }
@@ -243,7 +262,10 @@ writeFileSync(join(cfg.dir, "index.json"), JSON.stringify({
     evidence: cfg.evidence === true,
     capturedAt: navigatedAt,
     browser: version.Browser,
+    // viewport.scale is what was asked of the emulator; frameSize is what the
+    // frames on disk actually are. Only frameSize says what reaches the cut.
     viewport: { width: WIDTH, height: HEIGHT, scale: cfg.scale ?? 1.5 },
+    frameSize,
     frameCount: n,
     startedAtEpoch: t0 / 1000,
     wallClockSeconds: Number(wallClock.toFixed(3)),
@@ -251,7 +273,12 @@ writeFileSync(join(cfg.dir, "index.json"), JSON.stringify({
   frames,
 }, null, 2));
 
-console.log(`${cfg.dir.split("/").pop()}  frames ${n}  recorded ${wallClock.toFixed(1)}s` +
+if (cfg.evidence === true && frameSize && (frameSize[0] !== 1920 || frameSize[1] !== 1080)) {
+  console.warn(`WARNING: evidence frames are ${frameSize.join("x")}, not 1920x1080 - the assembler ` +
+    `will resample them x${(Math.min(1920 / frameSize[0], 1080 / frameSize[1])).toFixed(3)}. ` +
+    `Set "width": 1920, "height": 1080, "scale": 1 to capture at native size.`);
+}
+console.log(`${cfg.dir.split("/").pop()}  frames ${n}  ${frameSize ? frameSize.join("x") : "?"}  recorded ${wallClock.toFixed(1)}s` +
   (cfg.evidence === true ? "  [evidence: will not be time-warped]" : ""));
 
 ws.close();
