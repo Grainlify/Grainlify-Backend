@@ -245,7 +245,10 @@ func (r *AssignmentRunner) onAssigned(ctx context.Context, d dueIssue, res *Draw
 	}
 
 	if r.gh != nil && r.installationToken != nil {
-		if tok, err := r.installationToken(ctx, d.projectID); err == nil {
+		tok, err := r.installationToken(ctx, d.projectID)
+		if err != nil {
+			slog.Warn("hackathon: mint installation token for assignment", "project_id", d.projectID, "repo", fullName, "issue", d.issueNumber, "error", err)
+		} else {
 			if err := r.gh.AddIssueAssignees(ctx, tok, fullName, d.issueNumber, []string{res.WinnerLogin}); err != nil {
 				slog.Warn("hackathon: set github assignee", "repo", fullName, "issue", d.issueNumber, "error", err)
 			}
@@ -357,6 +360,7 @@ func (r *AssignmentRunner) unassignOnGitHub(ctx context.Context, rel ReleasedAss
 	}
 	tok, err := r.installationToken(ctx, rel.ProjectID)
 	if err != nil {
+		slog.Warn("hackathon: mint installation token for unassign", "project_id", rel.ProjectID, "repo", fullName, "issue", rel.IssueNumber, "error", err)
 		return
 	}
 	_ = r.gh.RemoveIssueAssignees(ctx, tok, fullName, rel.IssueNumber, []string{rel.GitHubLogin})
