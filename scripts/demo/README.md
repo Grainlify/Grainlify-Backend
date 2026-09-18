@@ -167,6 +167,24 @@ real duration and times the visuals to it rather than to an estimate.
 timing is apportioned by sentence length, which is an approximation — good
 enough to read along with, not a real forced alignment.
 
+## Checking a finished cut
+
+```
+python3 verify-final.py bounty.mp4
+```
+
+Four things before a cut is called done: every shot at 1.0 unless it carries a
+badge, the badge naming the speed actually applied, no frame carrying a
+credential or an IP, and every on-screen value present in `SOURCES.md`.
+
+The script decides the first two from the scene configs and the built files. It
+does **not** decide the last two, and says so: there is no OCR here, and a script
+that claimed to have read every frame without one would be the same unearned
+assurance the rest of this pipeline avoids. Instead it finds every visually
+distinct screen in the cut and writes each out at full resolution — a short set,
+since a recording of a mostly-static page holds still for most of its length —
+and a person reads them.
+
 ## Gotchas
 
 - **Recording zero frames is an error, not an empty result.** Chrome emits a
