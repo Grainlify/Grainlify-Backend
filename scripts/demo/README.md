@@ -78,9 +78,26 @@ There is a second reason to shoot explorer pages manually: CDP screencast
 captures the viewport only, with no browser chrome. Where the URL is itself the
 evidence, you want the address bar in frame, and that means a screen recording.
 
-To fold a hand-captured clip in, drop the file in as a scene's video and give it
-the same narration treatment as any other scene, or concatenate it at the
-`vlist.txt` stage.
+To fold a hand-captured clip in, give the scene a `clip` instead of `frames`:
+
+```jsonc
+{ "key": "s1", "clip": "s1a-doublepay.mov", "narration": "s1.txt" }
+```
+
+**A clip defaults to evidence.** A frames capture carries its own flag in the
+metadata beside the frames; a `.mov` has nowhere to carry one, so the default
+fails closed — you must write `"evidence": false` out loud to let a hand-recorded
+clip be time-warped.
+
+**HDR is handled, because it has to be.** macOS screen recording on an HDR
+display writes PQ / BT.2020 10-bit. Dropped into an SDR timeline it renders
+washed out and grey — a white page comes out around half the brightness it should
+be, sitting next to `record.mjs` frames that are already correct. It reads as a
+bad recording rather than a colour-space mismatch, which is why it is worth
+catching automatically. This ffmpeg has neither `libzimg` nor `libplacebo` and
+cannot linearise PQ (`colorspace` refuses `smpte2084` outright), so the
+conversion goes to macOS `avconvert`, once per clip, cached as
+`<name>.sdr.mov`.
 
 ## Scene config
 

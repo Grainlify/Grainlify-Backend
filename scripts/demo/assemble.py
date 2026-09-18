@@ -26,6 +26,7 @@ should never have to take our word for the timing of a clip we use as proof.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -72,6 +73,52 @@ def speed_label_png(base, key, text):
     return out
 
 
+def sdr_clip(path, key):
+    """Tone-map a hand-recorded HDR clip down to SDR, once, and cache it.
+
+    macOS screen recording on an HDR display writes PQ / BT.2020 10-bit. Dropped
+    straight into an SDR timeline that renders washed out and grey — a white page
+    comes out at about half the brightness it should be, next to SDR frames
+    captured by record.mjs that are already correct. It looks like a bad camera
+    rather than a colour-space mismatch, which is why it is worth catching here.
+
+    This ffmpeg is built without libzimg and libplacebo, so it cannot linearise
+    PQ; `colorspace` refuses smpte2084 outright and a plain format conversion
+    leaves the picture dim. macOS ships AVFoundation, which does it properly, so
+    the work goes to `avconvert` when a clip is actually HDR. An SDR clip is
+    passed through untouched.
+    """
+    if not os.path.exists(path):
+        raise SystemExit(f"{key}: clip not found: {path}")
+    trc = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=color_transfer", "-of", "default=nw=1:nk=1", path]).decode().strip()
+    # csv=p=0 returns "smpte2084," with a trailing comma, which silently failed an
+    # equality test here and let HDR through as if it were SDR. Guard the unknown
+    # case too: not being able to read the transfer is not evidence of SDR.
+    if not trc or trc == "unknown":
+        raise SystemExit(
+            f"{key}: cannot read the colour transfer of {os.path.basename(path)}.\n"
+            f"Refusing to guess — an HDR clip treated as SDR renders washed out and grey,\n"
+            f"and the failure looks like a bad recording rather than a conversion bug.")
+    if trc not in ("smpte2084", "arib-std-b67"):
+        return path
+
+    out = os.path.splitext(path)[0] + ".sdr.mov"
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(path):
+        return out
+    if not shutil.which("avconvert"):
+        raise SystemExit(
+            f"{key}: {os.path.basename(path)} is HDR ({trc}) and this ffmpeg cannot tone-map it\n"
+            f"(no libzimg, no libplacebo). avconvert is missing too, so there is no way to\n"
+            f"convert it here. Re-record with HDR off, or convert the clip on a machine that can.")
+    print(f"  {key}: {os.path.basename(path)} is HDR ({trc}) — tone-mapping to SDR once")
+    subprocess.run(["avconvert", "--source", path, "--output", out,
+                    "--preset", "Preset1920x1080", "--replace"],
+                   check=True, stdout=subprocess.DEVNULL)
+    return out
+
+
 def timestamp(t):
     h, m, s = int(t // 3600), int(t % 3600 // 60), t % 60
     return f"{h:02}:{m:02}:{s:06.3f}".replace(".", ",")
@@ -87,18 +134,31 @@ def main():
 
     for scene in cfg["scenes"]:
         key = scene["key"]
-        frames_dir = os.path.join(base, scene["frames"])
-        index = json.load(open(os.path.join(frames_dir, "index.json")))
+        clip = scene.get("clip")
 
-        # Older captures were a bare list; current ones carry meta.
-        if isinstance(index, list):
-            meta, frame_list = {}, index
+        if clip:
+            # A hand-recorded take: the explorer shots Cloudflare blocks, and
+            # terminal runs. It is real footage, just not footage this pipeline
+            # captured, so it defaults to evidence. A frames capture carries its
+            # own flag in its metadata; a .mov has nowhere to carry one, so the
+            # default here fails closed — you must say "evidence": false out loud
+            # to let a hand-recorded clip be time-warped.
+            clip_path = sdr_clip(os.path.join(base, clip), key)
+            meta, frame_list, frames_dir = {}, None, None
+            is_evidence = scene.get("evidence", True)
         else:
-            meta, frame_list = index.get("meta", {}), index["frames"]
-        if not frame_list:
-            raise SystemExit(f"{key}: no frames in {frames_dir}")
+            frames_dir = os.path.join(base, scene["frames"])
+            index = json.load(open(os.path.join(frames_dir, "index.json")))
 
-        is_evidence = bool(meta.get("evidence"))
+            # Older captures were a bare list; current ones carry meta.
+            if isinstance(index, list):
+                meta, frame_list = {}, index
+            else:
+                meta, frame_list = index.get("meta", {}), index["frames"]
+            if not frame_list:
+                raise SystemExit(f"{key}: no frames in {frames_dir}")
+            clip_path = None
+            is_evidence = bool(meta.get("evidence"))
         # speed_label is a boolean opt-in, never author-supplied text. The number
         # on the badge is computed from the speed actually applied, so a scene
         # cannot claim "8x" while running at 6.5x — a mislabelled badge would be
@@ -109,18 +169,26 @@ def main():
         audio_path = find_audio(base, key, scene.get("audio"))
         narration = duration(audio_path)
 
-        # Offsets are measured from when recording started, not from the first
-        # painted frame, so seconds in which the page was simply still are kept.
-        t0 = meta.get("startedAtEpoch", frame_list[0][1])
-        frames = [(os.path.join(frames_dir, f), t - t0) for f, t in frame_list]
-
         window = scene.get("window")
-        if window:
-            start, end = window
-            frames = [(f, t - start) for f, t in frames if start <= t <= end] or frames[:1]
-            span = end - start
+
+        if clip_path:
+            frames = None
+            span = duration(clip_path)
+            if window:
+                start, end = window
+                span = end - start
         else:
-            span = max(frames[-1][1] + 0.1, meta.get("wallClockSeconds", 0))
+            # Offsets are measured from when recording started, not from the first
+            # painted frame, so seconds in which the page was simply still are kept.
+            t0 = meta.get("startedAtEpoch", frame_list[0][1])
+            frames = [(os.path.join(frames_dir, f), t - t0) for f, t in frame_list]
+
+            if window:
+                start, end = window
+                frames = [(f, t - start) for f, t in frames if start <= t <= end] or frames[:1]
+                span = end - start
+            else:
+                span = max(frames[-1][1] + 0.1, meta.get("wallClockSeconds", 0))
 
         if is_evidence and not wants_label:
             # Footage dictates length. Narration must fit inside it.
@@ -135,7 +203,7 @@ def main():
                     f"  narration  {narration:.2f}s (+{PRE}s lead-in +{POST}s tail = {needed:.2f}s)\n"
                     f"  over by    {needed - span:.2f}s\n"
                     f"Cut about {needed - span:.2f}s of narration from {os.path.basename(audio_path)}, "
-                    f"or re-capture a longer take. Do not set speed_label to paper over this: "
+                    f"or use a longer take. Do not set speed_label to paper over this: "
                     f"that burns a speed badge onto footage that is already real-time.")
         else:
             target = PRE + narration + POST
@@ -147,20 +215,28 @@ def main():
         elif not is_evidence and abs(speed - 1.0) > 0.01:
             print(f"  {key}: non-evidence shot scaled x{speed:.2f} to fit narration")
 
-        # concat demuxer list, per-frame durations from the real timestamps
-        lines = []
-        for i, (path, t) in enumerate(frames):
-            nxt = frames[i + 1][1] if i + 1 < len(frames) else span
-            d = max(nxt - max(t, 0), 0.001) / speed
-            lines.append(f"file '{path}'\nduration {d:.4f}")
-        lines.append(f"file '{frames[-1][0]}'")
-        list_path = os.path.join(base, f"{key}.list")
-        open(list_path, "w").write("\n".join(lines) + "\n")
-
         vf = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
               "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x0a0d14,fps=30,format=yuv420p")
         scene_mp4 = os.path.join(base, f"{key}.mp4")
-        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list_path]
+
+        if clip_path:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+            if window:
+                cmd += ["-ss", f"{window[0]:.3f}"]
+            cmd += ["-i", clip_path]
+            if abs(speed - 1.0) > 0.001:
+                vf = f"setpts=PTS/{speed:.6f}," + vf
+        else:
+            # concat demuxer list, per-frame durations from the real timestamps
+            lines = []
+            for i, (path, t) in enumerate(frames):
+                nxt = frames[i + 1][1] if i + 1 < len(frames) else span
+                d = max(nxt - max(t, 0), 0.001) / speed
+                lines.append(f"file '{path}'\nduration {d:.4f}")
+            lines.append(f"file '{frames[-1][0]}'")
+            list_path = os.path.join(base, f"{key}.list")
+            open(list_path, "w").write("\n".join(lines) + "\n")
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list_path]
         if label:
             png = speed_label_png(base, key, label)
             cmd += ["-i", png, "-filter_complex",
@@ -193,8 +269,9 @@ def main():
                 t += d
 
         flag = "evidence" if is_evidence else "tour"
+        source = f"clip {os.path.basename(clip_path)}" if clip_path else f"{len(frames)} frames"
         print(f"{key}: {flag}, narration {narration:.1f}s, scene {target:.1f}s, "
-              f"speed x{speed:.2f}, frames {len(frames)}")
+              f"speed x{speed:.2f}, {source}")
         clock += target
 
     vlist = os.path.join(base, "vlist.txt")
