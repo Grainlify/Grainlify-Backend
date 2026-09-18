@@ -26,6 +26,7 @@ func hackathonSuiteApp(d *db.DB) *fiber.App {
 	hackathonPublic := handlers.NewHackathonPublicHandler(d)
 	app.Get("/hackathons", hackathonPublic.List())
 	app.Get("/hackathons/:id", hackathonPublic.GetByID())
+	app.Get("/hackathons/:id/issues", hackathonPublic.IssuesForHackathon())
 
 	hackathonApps := handlers.NewHackathonApplicationsHandler(d)
 	app.Post("/hackathons/:id/applications", auth.RequireAuth(hackathonSuiteJWTSecret), hackathonApps.Apply())
@@ -96,6 +97,159 @@ RETURNING id
 		t.Fatalf("insert application: %v", err)
 	}
 	return id
+}
+
+func hackathonSuiteInsertProject(t *testing.T, d *db.DB, ownerID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	err := d.Pool.QueryRow(context.Background(), `
+INSERT INTO projects (owner_user_id, github_full_name, status)
+VALUES ($1, $2, 'verified')
+RETURNING id
+`, ownerID, "hackathon-suite-"+uuid.NewString()).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	return id
+}
+
+// hackathonSuiteInsertIssue seeds a hackathon_issues row, optionally with a
+// matching github_issues row so IssuesForHackathon's title join has
+// something real to read.
+func hackathonSuiteInsertIssue(
+	t *testing.T, d *db.DB, hackathonID, projectID uuid.UUID, number int, status string, title string,
+) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	var publishedAt any
+	if status == "published" {
+		publishedAt = time.Now()
+	}
+	err := d.Pool.QueryRow(context.Background(), `
+INSERT INTO hackathon_issues
+  (hackathon_id, project_id, issue_number, org_login, status, difficulty_tier, acceptance_criteria, published_at)
+VALUES ($1, $2, $3, 'hackathon-suite-org', $4, 'easy', 'Ship a test proving the fix', $5)
+RETURNING id
+`, hackathonID, projectID, number, status, publishedAt).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert hackathon_issues: %v", err)
+	}
+	if title != "" {
+		if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO github_issues (project_id, github_issue_id, number, title)
+VALUES ($1, $2, $3, $4)
+`, projectID, int64(number)+1_000_000_000, number, title); err != nil {
+			t.Fatalf("insert github_issues: %v", err)
+		}
+	}
+	return id
+}
+
+// --- Public routes: contributor-facing published issues ---
+
+// The specific gap this endpoint fills: GET /projects/:id/hackathon-issues
+// is owner-or-admin gated, so a contributor who owns none of a hackathon's
+// projects could not list its issues at all. This is that same contributor,
+// calling the new endpoint instead, with no auth header at all.
+func TestHackathonPublic_IssuesForHackathon_ReachableByNonOwner(t *testing.T) {
+	d := testDB(t)
+	app := hackathonSuiteApp(d)
+	hackathonID := hackathonSuiteInsertHackathon(t, d, "issue_prep")
+	maintainerID := adminSuiteInsertUser(t, d, "contributor")
+	projectID := hackathonSuiteInsertProject(t, d, maintainerID)
+	hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 1, "published", "Fix the flaky retry loop")
+
+	// Confirm the gap first: the project-owned route refuses a stranger - a
+	// real registered user, just not this project's owner or an admin.
+	strangerID := adminSuiteInsertUser(t, d, "contributor")
+	strangerToken := hackathonSuiteToken(t, strangerID, "contributor")
+	resp, _ := notifSuiteDo(t, app, "GET", "/projects/"+projectID.String()+"/hackathon-issues", strangerToken, nil)
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("owner-gated route status = %d, want 403 for a non-owner (the gap this endpoint fills)", resp.StatusCode)
+	}
+
+	// The new endpoint, called with no auth at all - not even a bearer token
+	// for a stranger, since it is public the same way GetByID is.
+	resp, body := notifSuiteDo(t, app, "GET", "/hackathons/"+hackathonID.String()+"/issues", "", nil)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "Fix the flaky retry loop") {
+		t.Errorf("expected the published issue's title in the response: %s", body)
+	}
+	if !strings.Contains(string(body), `"repo_full_name"`) {
+		t.Errorf("expected repo_full_name in the response: %s", body)
+	}
+}
+
+func TestHackathonPublic_IssuesForHackathon_OnlyPublished(t *testing.T) {
+	d := testDB(t)
+	app := hackathonSuiteApp(d)
+	hackathonID := hackathonSuiteInsertHackathon(t, d, "issue_prep")
+	projectOwnerID := adminSuiteInsertUser(t, d, "contributor")
+	projectID := hackathonSuiteInsertProject(t, d, projectOwnerID)
+	hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 1, "published", "Published issue")
+	hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 2, "pending", "Pending issue")
+	hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 3, "removed", "Removed issue")
+
+	resp, body := notifSuiteDo(t, app, "GET", "/hackathons/"+hackathonID.String()+"/issues", "", nil)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "Published issue") {
+		t.Errorf("missing the published issue: %s", body)
+	}
+	if strings.Contains(string(body), "Pending issue") || strings.Contains(string(body), "Removed issue") {
+		t.Errorf("a pending or removed issue leaked into the public list: %s", body)
+	}
+}
+
+func TestHackathonPublic_IssuesForHackathon_404sForDraft(t *testing.T) {
+	d := testDB(t)
+	app := hackathonSuiteApp(d)
+	draftID := hackathonSuiteInsertHackathon(t, d, "draft")
+
+	resp, _ := notifSuiteDo(t, app, "GET", "/hackathons/"+draftID.String()+"/issues", "", nil)
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a draft hackathon's issues", resp.StatusCode)
+	}
+}
+
+// The whole point of this endpoint's design: no field, at any key, that
+// discloses how contested an issue is. A raw string search rather than a
+// json.Unmarshal into a known struct on purpose - unmarshalling into this
+// package's own DTO would trivially "pass" by construction; a field added
+// to the handler but not the test struct would leak silently.
+func TestHackathonPublic_IssuesForHackathon_NoApplicantSignal(t *testing.T) {
+	d := testDB(t)
+	app := hackathonSuiteApp(d)
+	hackathonID := hackathonSuiteInsertHackathon(t, d, "issue_prep")
+	projectOwnerID := adminSuiteInsertUser(t, d, "contributor")
+	projectID := hackathonSuiteInsertProject(t, d, projectOwnerID)
+	issueID := hackathonSuiteInsertIssue(t, d, hackathonID, projectID, 1, "published", "Contested issue")
+	for i := 0; i < 3; i++ {
+		applicantID := adminSuiteInsertUser(t, d, "contributor")
+		if _, err := d.Pool.Exec(context.Background(), `
+INSERT INTO hackathon_issue_applications (hackathon_id, hackathon_issue_id, user_id, github_login, status)
+VALUES ($1, $2, $3, $4, 'applied')
+`, hackathonID, issueID, applicantID, "applicant-"+uuid.NewString()); err != nil {
+			t.Fatalf("insert application: %v", err)
+		}
+	}
+
+	resp, body := notifSuiteDo(t, app, "GET", "/hackathons/"+hackathonID.String()+"/issues", "", nil)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	forbidden := []string{
+		"applicant_count", "applicant_bucket", "applicant",
+		"flagged_for_admin", "flagged_reason", "org_login", "synced_at",
+	}
+	for _, key := range forbidden {
+		if strings.Contains(string(body), key) {
+			t.Errorf("response leaks %q, which discloses contention or internal bookkeeping: %s", key, body)
+		}
+	}
 }
 
 // --- Public routes: draft hackathons never appear ---
