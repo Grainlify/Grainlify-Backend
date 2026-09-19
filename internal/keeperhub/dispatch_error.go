@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"syscall"
 )
 
@@ -40,7 +41,12 @@ const (
 
 // ErrDispatchIndeterminate is the sentinel for a dispatch whose outcome is
 // unknown. ErrDispatchRefused is the sentinel for a definitive rejection.
-var ErrDispatchIndeterminate = errors.New("keeperhub: dispatch outcome indeterminate")
+// ErrWorkflowDisabled is the sentinel when the workflow is disabled (HTTP 410).
+var (
+	ErrDispatchIndeterminate = errors.New("keeperhub: dispatch outcome indeterminate")
+	ErrDispatchRefused       = errors.New("keeperhub: dispatch rejected by upstream")
+	ErrWorkflowDisabled      = errors.New("keeperhub: workflow is disabled")
+)
 
 // DispatchError is every failure Dispatch returns after the request was built.
 type DispatchError struct {
@@ -78,7 +84,11 @@ func (e *DispatchError) Unwrap() []error {
 	if e.Class == DispatchRejected {
 		sentinel = ErrDispatchRefused
 	}
-	return []error{sentinel, e.Err}
+	errs := []error{sentinel, e.Err}
+	if e.HTTPStatus == 410 || (e.Err != nil && strings.Contains(strings.ToLower(e.Err.Error()), "workflow is disabled")) {
+		errs = append(errs, ErrWorkflowDisabled)
+	}
+	return errs
 }
 
 // IsRejected reports whether err is a dispatch KeeperHub definitively did not
