@@ -120,7 +120,11 @@ def unretouched(base, scene, scene_mp4, floor_db):
         timed = [(os.path.join(fdir, f), ts - t0) for f, ts in flist]
         if scene.get("window"):
             a0, a1 = scene["window"]
-            timed = [(f, ts - a0) for f, ts in timed if a0 <= ts <= a1] or timed[:1]
+            # Same rule as the assembler: the last frame painted at or before
+            # the window opens is on screen at t=0.
+            before = [(f, ts) for f, ts in timed if ts <= a0]
+            inside = [(f, ts - a0) for f, ts in timed if a0 < ts <= a1]
+            timed = ([(before[-1][0], 0.0)] if before else []) + inside or timed[:1]
             span = a1 - a0
         else:
             span = max(timed[-1][1] + 0.1, meta.get("wallClockSeconds", 0))

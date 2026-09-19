@@ -256,7 +256,15 @@ def main():
 
             if window:
                 start, end = window
-                frames = [(f, t - start) for f, t in frames if start <= t <= end] or frames[:1]
+                # The frame on screen when the window opens is the last one
+                # painted at or before its start, carried in at t=0. Chrome
+                # only emits a frame when something changes, so a still page
+                # can have no frame inside the window at all - and falling
+                # back to the recording's FIRST frame put a loading spinner
+                # where a fully rendered page should have been.
+                before = [(f, t) for f, t in frames if t <= start]
+                inside = [(f, t - start) for f, t in frames if start < t <= end]
+                frames = ([(before[-1][0], 0.0)] if before else []) + inside or frames[:1]
                 span = end - start
             else:
                 span = max(frames[-1][1] + 0.1, meta.get("wallClockSeconds", 0))
