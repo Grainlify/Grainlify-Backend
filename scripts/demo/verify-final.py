@@ -228,6 +228,11 @@ def main():
                 meta = idx.get("meta", {}) if isinstance(idx, dict) else {}
                 span = meta.get("wallClockSeconds", 0.0)
                 evidence = bool(meta.get("evidence"))
+            # A window trims the source before it is played, exactly as the
+            # assembler does, so speed is measured against the trimmed span -
+            # otherwise a trimmed tour at 1.00 reads as sped up.
+            if scene.get("window"):
+                span = scene["window"][1] - scene["window"][0]
             scene_mp4 = os.path.join(base, f"{key}.mp4")
             if os.path.exists(scene_mp4):
                 built = float(probe(scene_mp4, "duration")[0])
