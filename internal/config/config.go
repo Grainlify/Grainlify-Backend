@@ -169,6 +169,12 @@ type Config struct {
 	MailerCloudAPIKey string
 	EmailFromAddress  string
 	EmailFromName     string
+
+	// Grainlify Bounties: base64 of a 32-byte ed25519 seed used ONLY to
+	// countersign Solana wallet links (POST /me/bounty-wallet/challenge). The
+	// bounty agent holds the public half. Empty turns that endpoint off (503);
+	// nothing else reads it.
+	BountyLinkSigningKey string
 }
 
 func Load() Config {
@@ -243,6 +249,8 @@ func Load() Config {
 		MailerCloudAPIKey: getEnv("MAILERCLOUD_API_KEY", ""),
 		EmailFromAddress:  getEnv("EMAIL_FROM_ADDRESS", ""),
 		EmailFromName:     getEnv("EMAIL_FROM_NAME", "Grainlify"),
+
+		BountyLinkSigningKey: getEnv("BOUNTY_LINK_SIGNING_KEY", ""),
 	}
 }
 

@@ -1,0 +1,169 @@
+package handlers
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"math/rand"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"github.com/jagadeesh/grainlify/backend/internal/auth"
+	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+)
+
+// A real Solana address (the SPL Token program) and the system program, whose
+// address is 32 zero bytes and so starts with a run of '1's.
+const (
+	solAddr     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+	solSystem   = "11111111111111111111111111111111"
+	testSeedB64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=" // bytes 0..31
+)
+
+func bountyWalletApp(uid *uuid.UUID, d *db.DB, keyB64 string, now time.Time) *fiber.App {
+	app := fiber.New()
+	h := NewBountyWalletHandler(d, keyB64)
+	h.now = func() time.Time { return now }
+	inject := func(c *fiber.Ctx) error {
+		if uid != nil {
+			c.Locals(auth.LocalUserID, uid.String())
+		}
+		return c.Next()
+	}
+	app.Post("/me/bounty-wallet/challenge", inject, h.PostChallenge)
+	return app
+}
+
+func testPub(t *testing.T) ed25519.PublicKey {
+	t.Helper()
+	seed, _ := base64.StdEncoding.DecodeString(testSeedB64)
+	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+}
+
+func TestBountyWallet_UnconfiguredKeyAnswers503(t *testing.T) {
+	uid := uuid.New()
+	for _, key := range []string{"", "not base64!", base64.StdEncoding.EncodeToString(make([]byte, 31))} {
+		code, out := postJSON(t, bountyWalletApp(&uid, nil, key, time.Now()), "/me/bounty-wallet/challenge", map[string]any{"wallet": solAddr})
+		if code != 503 || out["error"] != "bounty_wallet_link_unconfigured" {
+			t.Fatalf("key %q: got %d %v, want 503 unconfigured", key, code, out)
+		}
+	}
+}
+
+func TestBountyWallet_RequiresSignedInUser(t *testing.T) {
+	code, _ := postJSON(t, bountyWalletApp(nil, nil, testSeedB64, time.Now()), "/me/bounty-wallet/challenge", map[string]any{"wallet": solAddr})
+	if code != 401 {
+		t.Fatalf("got %d, want 401", code)
+	}
+}
+
+func TestBountyWallet_RefusesWhatIsNotASolanaAddress(t *testing.T) {
+	uid := uuid.New()
+	app := bountyWalletApp(&uid, nil, testSeedB64, time.Now())
+	for _, w := range []string{"", "0x52908400098527886E0F7030069857D2E4169EE7", solAddr + "1", solAddr[:len(solAddr)-1], "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5D0", strings.Repeat("1", 33)} {
+		code, out := postJSON(t, app, "/me/bounty-wallet/challenge", map[string]any{"wallet": w})
+		if code != 400 || out["error"] != "invalid_solana_address" {
+			t.Fatalf("wallet %q: got %d %v, want 400 invalid_solana_address", w, code, out)
+		}
+	}
+}
+
+func TestIsSolanaAddress(t *testing.T) {
+	for _, ok := range []string{solAddr, solSystem, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"} {
+		if !isSolanaAddress(ok) {
+			t.Errorf("%s should be valid", ok)
+		}
+	}
+}
+
+// The agent parses this text back; its shape is a contract.
+func TestBountyLinkMessage_Shape(t *testing.T) {
+	issued := time.Date(2026, 9, 19, 14, 2, 11, 0, time.UTC)
+	got := BountyLinkMessage("Octocat", 583231, solAddr, "3f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
+	want := "Grainlify: link this wallet to my GitHub account\n" +
+		"GitHub: Octocat (id 583231)\n" +
+		"Wallet: " + solAddr + "\n" +
+		"Nonce: 3f9c1a0be27d4c85\n" +
+		"Issued: 2026-09-19T14:02:11Z\n" +
+		"Expires: 2026-09-19T14:12:11Z"
+	if got != want {
+		t.Fatalf("message changed:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func linkGitHub(t *testing.T, d *db.DB, uid uuid.UUID, login string) int64 {
+	t.Helper()
+	ghID := 900000000 + rand.Int63n(99999999)
+	if _, err := d.Pool.Exec(context.Background(),
+		`INSERT INTO github_accounts (user_id, github_user_id, login, access_token) VALUES ($1,$2,$3,'\x00')`, uid, ghID, login); err != nil {
+		t.Fatal(err)
+	}
+	return ghID
+}
+
+func TestBountyWallet_NoGitHubAccountIs409(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	code, out := postJSON(t, bountyWalletApp(&uid, d, testSeedB64, time.Now()), "/me/bounty-wallet/challenge", map[string]any{"wallet": solAddr})
+	if code != 409 || out["error"] != "github_not_linked" {
+		t.Fatalf("got %d %v, want 409 github_not_linked", code, out)
+	}
+}
+
+func TestBountyWallet_CountersignsTheSessionsOwnGitHubAccount(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	ghID := linkGitHub(t, d, uid, "Octocat")
+	now := time.Date(2026, 9, 19, 14, 2, 11, 500, time.UTC)
+	app := bountyWalletApp(&uid, d, testSeedB64, now)
+
+	code, out := postJSON(t, app, "/me/bounty-wallet/challenge", map[string]any{"wallet": solAddr})
+	if code != 200 {
+		t.Fatalf("got %d %v", code, out)
+	}
+	msg, _ := out["message"].(string)
+	nonce := regexp.MustCompile(`(?m)^Nonce: ([0-9a-f]{32})$`).FindStringSubmatch(msg)
+	if nonce == nil {
+		t.Fatalf("no 128-bit hex nonce in:\n%s", msg)
+	}
+	want := BountyLinkMessage("Octocat", ghID, solAddr, nonce[1], now.Truncate(time.Second), now.Truncate(time.Second).Add(10*time.Minute))
+	if msg != want {
+		t.Fatalf("message:\n%s\nwant:\n%s", msg, want)
+	}
+
+	sig, err := base64.StdEncoding.DecodeString(out["countersignature"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(testPub(t), []byte(bountyLinkDomain+msg), sig) {
+		t.Fatal("countersignature does not verify over domain + message")
+	}
+	// Without the domain prefix it must NOT verify: the key's signatures mean
+	// only this one thing.
+	if ed25519.Verify(testPub(t), []byte(msg), sig) {
+		t.Fatal("countersignature verifies without the domain prefix")
+	}
+
+	// A body naming some other account changes nothing: identity is the session's.
+	_, out2 := postJSON(t, app, "/me/bounty-wallet/challenge", map[string]any{"wallet": solAddr, "login": "someone-else", "github_user_id": 1})
+	msg2, _ := out2["message"].(string)
+	if !strings.Contains(msg2, "GitHub: Octocat (id ") || strings.Contains(msg2, "someone-else") {
+		t.Fatalf("identity taken from the request body:\n%s", msg2)
+	}
+	if msg2 == msg {
+		t.Fatal("two challenges carried the same nonce")
+	}
+
+	// Writes nothing.
+	var n int
+	d.Pool.QueryRow(context.Background(), `SELECT count(*) FROM contributor_addresses WHERE user_id=$1`, uid).Scan(&n)
+	if n != 0 {
+		t.Fatalf("challenge wrote %d payout-address rows", n)
+	}
+}

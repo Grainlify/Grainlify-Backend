@@ -236,6 +236,12 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.PostAddress)
 	app.Get("/me/payout-address", auth.RequireAuth(cfg.JWTSecret), payoutAddr.GetAddress)
 
+	// Grainlify Bounties: countersigns a Solana wallet link for the bounty
+	// agent, which verifies it and stores the link. Separate from the payout
+	// address above - a different programme, and nothing is written here.
+	bountyWallet := handlers.NewBountyWalletHandler(deps.DB, cfg.BountyLinkSigningKey)
+	app.Post("/me/bounty-wallet/challenge", auth.RequireAuth(cfg.JWTSecret), bountyWallet.PostChallenge)
+
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money
 	// and understands why we might need to reach them. PUT with an empty string
