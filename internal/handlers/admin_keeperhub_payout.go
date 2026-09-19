@@ -274,6 +274,12 @@ func keeperhubError(c *fiber.Ctx, err error, hid uuid.UUID) error {
 		// dispatch outcome we could not confirm.
 		slog.Error("keeperhub preflight simulation unavailable", "hackathon_id", hid, "error", err)
 		status, name = fiber.StatusBadGateway, "preflight_unavailable"
+	case errors.Is(err, keeperhub.ErrWorkflowDisabled):
+		slog.Warn("keeperhub workflow disabled", "hackathon_id", hid, "error", err)
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":  "keeperhub_workflow_disabled",
+			"detail": "Enable the payout workflow in KeeperHub, then release again; nothing was sent",
+		})
 	case errors.Is(err, keeperhubrail.ErrDispatchRejected):
 		// Certain: nothing ran. The legs are failed and the next release may
 		// send them, once whatever KeeperHub refused (a key, a disabled
