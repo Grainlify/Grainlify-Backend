@@ -208,6 +208,7 @@ const (
 	ReasonRunFailed           = "run_failed"
 	ReasonUnreconciledLegs    = "unreconciled_legs"
 	ReasonNothingUnpaid       = "nothing_unpaid"
+	ReasonWorkflowDisabled    = "keeperhub_workflow_disabled"
 	ReasonUnclassifiedRefusal = "refused"
 )
 
@@ -233,6 +234,8 @@ func RefusalReason(err error) string {
 		return ReasonUnreconciledLegs
 	case errors.Is(err, ErrNothingUnpaid):
 		return ReasonNothingUnpaid
+	case errors.Is(err, keeperhub.ErrWorkflowDisabled):
+		return ReasonWorkflowDisabled
 	default:
 		return ReasonUnclassifiedRefusal
 	}
