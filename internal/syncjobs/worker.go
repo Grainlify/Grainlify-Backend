@@ -693,6 +693,14 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 		}
 	}
 
+	// GrainHack PR submission intake (AI-specs.md §4.6). Moves active
+	// assignments to pr_submitted and stops the stale timer when the assigned
+	// contributor opens a PR linking the issue.
+	if err := hackathon.SyncQualifyingPRs(ctx, w.pool, projectID); err != nil {
+		slog.Warn("hackathon: qualifying PR intake failed",
+			"project_id", projectID, "repo", fullName, "error", err)
+	}
+
 	// GrainHack judging intake (AI-specs.md §5). Reuses this sync path
 	// rather than adding a webhook parser, same as §2.2's issue intake.
 	// Runs after the PR rows are written, since it reads them back to find
