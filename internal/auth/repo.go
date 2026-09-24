@@ -41,10 +41,13 @@ func CreateNonce(ctx context.Context, pool db.DBPool, walletType WalletType, add
 	nonce := randomNonce(32)
 	expiresAt := time.Now().UTC().Add(ttl)
 
+	// The purpose is written explicitly rather than left to the column default.
+	// A sign-in nonce must never be usable at the payout-address endpoint, and
+	// that guarantee should not depend on what the default happens to be.
 	_, err := pool.Exec(ctx, `
-INSERT INTO auth_nonces (wallet_type, address, nonce, expires_at)
-VALUES ($1, $2, $3, $4)
-`, string(walletType), address, nonce, expiresAt)
+INSERT INTO auth_nonces (wallet_type, address, nonce, purpose, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+`, string(walletType), address, nonce, string(PurposeSignIn), expiresAt)
 	if err != nil {
 		return Nonce{}, err
 	}
@@ -68,6 +71,12 @@ func ConsumeNonceAndUpsertUser(ctx context.Context, pool db.DBPool, walletType W
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Scoped to the sign-in purpose. Without this a nonce issued for payout-address
+	// verification would be redeemable here; today the two challenge texts differ,
+	// so no signature carries across, but that is one accident away from being the
+	// only thing standing between the two flows. A nonce issued for another purpose
+	// is not consumed by the attempt -- the row is never reached, so it stays usable
+	// for the flow it was meant for.
 	var nonceID uuid.UUID
 	err = tx.QueryRow(ctx, `
 SELECT id
@@ -75,10 +84,11 @@ FROM auth_nonces
 WHERE wallet_type = $1
   AND address = $2
   AND nonce = $3
+  AND purpose = $4
   AND used_at IS NULL
   AND expires_at > now()
 FOR UPDATE
-`, string(walletType), address, nonce).Scan(&nonceID)
+`, string(walletType), address, nonce, string(PurposeSignIn)).Scan(&nonceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return VerifyResult{}, fmt.Errorf("invalid_or_expired_nonce")
 	}

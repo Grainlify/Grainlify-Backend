@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -203,5 +204,88 @@ func TestConsumeNonceAndUpsertUser_NilPool(t *testing.T) {
 	_, err := ConsumeNonceAndUpsertUser(context.Background(), nil, WalletTypeEVM, "0xabc", "nonce", "")
 	if err == nil {
 		t.Fatal("expected error for nil pool, got nil")
+	}
+}
+
+// A nonce issued for payout-address verification must not be redeemable at the
+// sign-in endpoint. Today the two challenge texts differ, so a signature made
+// for one will not verify for the other -- but that is a single accidental
+// overlap away from being the only separation between the two flows, and the
+// nonce table has carried a `purpose` column since migration 000080 precisely
+// so the separation does not rest on message wording.
+func TestConsumeNonceAndUpsertUser_RefusesNonceIssuedForAnotherPurpose(t *testing.T) {
+	pool := authTestDB(t)
+	ctx := context.Background()
+	address := repoTestUniqueAddress()
+
+	n, err := CreateNonceForPurpose(ctx, pool, WalletTypeEVM, address, PurposePayoutAddress, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("CreateNonceForPurpose: %v", err)
+	}
+
+	_, err = ConsumeNonceAndUpsertUser(ctx, pool, WalletTypeEVM, address, n.Nonce, "")
+	if err == nil {
+		t.Fatal("sign-in consumed a payout-address nonce; want invalid_or_expired_nonce")
+	}
+	// Deliberately the same error a wholly unknown nonce gets: the sign-in
+	// endpoint should not tell a caller that some other flow issued this one.
+	if err.Error() != "invalid_or_expired_nonce" {
+		t.Fatalf("err = %q, want %q", err.Error(), "invalid_or_expired_nonce")
+	}
+
+	// The refused attempt must not burn the nonce. It still belongs to the
+	// payout flow, and the person who asked for it has not used it yet.
+	if err := ConsumeNonceForPurpose(ctx, pool, WalletTypeEVM, address, n.Nonce, PurposePayoutAddress); err != nil {
+		t.Fatalf("payout nonce unusable after a refused sign-in: %v", err)
+	}
+}
+
+// CreateNonce writes the purpose explicitly rather than relying on the column
+// default, so that changing the default cannot silently widen what a sign-in
+// nonce is accepted for.
+func TestCreateNonce_RecordsSignInPurpose(t *testing.T) {
+	pool := authTestDB(t)
+	ctx := context.Background()
+	address := repoTestUniqueAddress()
+
+	n, err := CreateNonce(ctx, pool, WalletTypeEVM, address, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("CreateNonce: %v", err)
+	}
+
+	var purpose string
+	err = pool.QueryRow(ctx, `
+SELECT purpose FROM auth_nonces
+WHERE wallet_type = $1 AND address = $2 AND nonce = $3
+`, string(WalletTypeEVM), address, n.Nonce).Scan(&purpose)
+	if err != nil {
+		t.Fatalf("reading purpose back: %v", err)
+	}
+	if purpose != string(PurposeSignIn) {
+		t.Errorf("purpose = %q, want %q", purpose, string(PurposeSignIn))
+	}
+}
+
+// The mirror of the refusal above: a sign-in nonce is not redeemable at the
+// payout-address endpoint either. That direction was already scoped; this
+// pins it so both halves of the separation are covered by tests.
+func TestConsumeNonceForPurpose_RefusesSignInNonceForPayout(t *testing.T) {
+	pool := authTestDB(t)
+	ctx := context.Background()
+	address := repoTestUniqueAddress()
+
+	n, err := CreateNonce(ctx, pool, WalletTypeEVM, address, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("CreateNonce: %v", err)
+	}
+
+	err = ConsumeNonceForPurpose(ctx, pool, WalletTypeEVM, address, n.Nonce, PurposePayoutAddress)
+	if !errors.Is(err, ErrNonceWrongPurpose) {
+		t.Fatalf("err = %v, want ErrNonceWrongPurpose", err)
+	}
+
+	// Still usable for the flow that issued it.
+	if _, err := ConsumeNonceAndUpsertUser(ctx, pool, WalletTypeEVM, address, n.Nonce, ""); err != nil {
+		t.Fatalf("sign-in nonce unusable after a refused payout consume: %v", err)
 	}
 }
