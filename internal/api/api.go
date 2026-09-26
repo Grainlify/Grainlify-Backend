@@ -248,6 +248,12 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/me/bounty-wallet/link", auth.RequireAuth(cfg.JWTSecret), bountyWallet.GetLink)
 	app.Post("/me/bounty-wallet/link", auth.RequireAuth(cfg.JWTSecret), bountyWallet.PostLink)
 
+	// Applying for a bounty, and the draw controls behind it. Same trust model
+	// as the wallet link: we sign a message naming who is asking, the agent
+	// verifies it. The browser never talks to the agent.
+	bountyDraw := handlers.NewBountyDrawHandler(deps.DB, cfg.BountyLinkSigningKey, cfg.BountyAgentURL)
+	app.Post("/bounties/:bountyId/apply", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostApply)
+
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money
 	// and understands why we might need to reach them. PUT with an empty string
@@ -522,6 +528,15 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	adminGroup := app.Group("/admin", auth.RequireAuth(cfg.JWTSecret))
 	adminGroup.Get("/users", requireAdmin, admin.ListUsers())
+
+	// The bounty draw. requireAdmin decides WHETHER; the countersignature the
+	// handler makes proves WHO to the agent, which has no user table of its
+	// own and should not grow one.
+	adminGroup.Get("/bounty-draw/settings", requireAdmin, bountyDraw.GetSettings)
+	adminGroup.Post("/bounty-draw/settings", requireAdmin, bountyDraw.PostSetting)
+	adminGroup.Post("/bounty-draw/settings/reset", requireAdmin, bountyDraw.PostSettingReset)
+	adminGroup.Get("/bounty-draw/:bountyId/state", requireAdmin, bountyDraw.GetBountyState)
+	adminGroup.Post("/bounty-draw/:bountyId/run", requireAdmin, bountyDraw.PostRunDraw)
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
 
 	// Admin KYC reset. Contributors can now retry a *refused* verification
