@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -31,7 +33,7 @@ const (
 
 func bountyWalletApp(uid *uuid.UUID, d *db.DB, keyB64 string, now time.Time) *fiber.App {
 	app := fiber.New()
-	h := NewBountyWalletHandler(d, keyB64)
+	h := NewBountyWalletHandler(d, keyB64, "http://127.0.0.1:1")
 	h.now = func() time.Time { return now }
 	inject := func(c *fiber.Ctx) error {
 		if uid != nil {
@@ -248,7 +250,7 @@ func TestBountyWallet_ReadChallengeRequiresSignedInUser(t *testing.T) {
 // published, and it must be the verifying half -- never the seed.
 func TestBountyWallet_CountersignKeyIsThePublicHalf(t *testing.T) {
 	app := bountyWalletApp(nil, nil, testSeedB64, time.Now())
-	app.Get("/bounty-wallet/countersign-key", NewBountyWalletHandler(nil, testSeedB64).GetCountersignKey)
+	app.Get("/bounty-wallet/countersign-key", NewBountyWalletHandler(nil, testSeedB64, "http://127.0.0.1:1").GetCountersignKey)
 	res, err := app.Test(httptest.NewRequest("GET", "/bounty-wallet/countersign-key", nil), -1)
 	if err != nil {
 		t.Fatal(err)
@@ -273,5 +275,123 @@ func TestBountyWallet_CountersignKeyIsThePublicHalf(t *testing.T) {
 	// The seed must never appear.
 	if strings.Contains(body.PublicKey, testSeedB64) {
 		t.Fatal("the response leaked the signing seed")
+	}
+}
+
+// The browser makes ONE call, to an origin it already trusts, and this service
+// does the signed hop. The point is that no wallet extension sits in the
+// middle of the second request.
+func TestBountyWallet_GetLink_AsksTheAgentItself(t *testing.T) {
+	var gotBody []byte
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"linked":true,"wallet":"HKMMpctYvofRCSF2uGnqfEGWcmMhD8A86xFqgmWTvcq9","linkedAt":"2026-09-26T09:00:00Z"}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	ghID := linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyWalletHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Get("/me/bounty-wallet/link", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetLink)
+
+	res, err := app.Test(httptest.NewRequest("GET", "/me/bounty-wallet/link", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var out struct {
+		Linked bool    `json:"linked"`
+		Wallet *string `json:"wallet"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Linked || out.Wallet == nil {
+		t.Fatalf("expected a linked wallet, got %+v", out)
+	}
+
+	// What we sent the agent must be a properly countersigned read challenge
+	// naming this session's own GitHub account.
+	var sent struct {
+		Message          string `json:"message"`
+		Countersignature string `json:"countersignature"`
+	}
+	if err := json.Unmarshal(gotBody, &sent); err != nil {
+		t.Fatalf("the agent received something that is not JSON: %q", string(gotBody))
+	}
+	if !strings.Contains(sent.Message, fmt.Sprintf("GitHub: Octocat (id %d)", ghID)) {
+		t.Fatalf("challenge does not name the session's account: %q", sent.Message)
+	}
+	sig, err := base64.StdEncoding.DecodeString(sent.Countersignature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(testPub(t), []byte(bountyReadDomain+sent.Message), sig) {
+		t.Fatal("the challenge we sent the agent does not verify under the read domain")
+	}
+}
+
+func TestBountyWallet_GetLink_AgentDownIsNotNoWallet(t *testing.T) {
+	// "We could not reach the agent" and "you have no wallet" are different
+	// claims. Conflating them is what made the page tell people to link a
+	// wallet they had already linked.
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyWalletHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Get("/me/bounty-wallet/link", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetLink)
+	res, _ := app.Test(httptest.NewRequest("GET", "/me/bounty-wallet/link", nil), -1)
+	if res.StatusCode != 502 {
+		t.Fatalf("status = %d, want 502 for an unreachable agent", res.StatusCode)
+	}
+}
+
+func TestBountyWallet_PostLink_RelaysTheAgentsAnswerVerbatim(t *testing.T) {
+	// A relay, not an authority: the agent re-verifies both signatures and its
+	// refusals are written for the person who asked, so they pass through
+	// unchanged rather than being reworded here.
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in["walletSignature"] != "wallet-sig" {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"bad_wallet_signature"}`))
+			return
+		}
+		w.WriteHeader(409)
+		_, _ = w.Write([]byte(`{"error":"wallet_linked_to_another_account","detail":"that wallet is already linked"}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	h := NewBountyWalletHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Post("/me/bounty-wallet/link", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.PostLink)
+
+	code, out := postJSON(t, app, "/me/bounty-wallet/link", map[string]any{
+		"message": "m", "countersignature": "c", "walletSignature": "wallet-sig",
+	})
+	if code != 409 {
+		t.Fatalf("status = %d, want the agent's own 409", code)
+	}
+	if out["error"] != "wallet_linked_to_another_account" {
+		t.Fatalf("the agent's refusal was not passed through: %v", out)
+	}
+}
+
+func TestBountyWallet_PostLink_RequiresSignedInUser(t *testing.T) {
+	h := NewBountyWalletHandler(nil, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Post("/me/bounty-wallet/link", h.PostLink)
+	code, _ := postJSON(t, app, "/me/bounty-wallet/link", map[string]any{})
+	if code != 401 {
+		t.Fatalf("status = %d, want 401", code)
 	}
 }

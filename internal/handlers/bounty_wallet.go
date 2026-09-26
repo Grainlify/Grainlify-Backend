@@ -15,7 +15,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
 
+	"bytes"
+	"encoding/json"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"io"
+	"net/http"
 )
 
 // BountyWalletHandler countersigns a Solana wallet link for Grainlify Bounties.
@@ -41,6 +45,11 @@ type BountyWalletHandler struct {
 	db  *db.DB
 	key ed25519.PrivateKey // nil when unconfigured: the endpoint answers 503
 	now func() time.Time
+	// Where the bounty agent lives, and the client used to reach it. A short
+	// timeout on purpose: this sits in front of a page render, and a hanging
+	// agent should become a clear "unreachable" rather than a spinner.
+	agentURL  string
+	agentHTTP *http.Client
 }
 
 // bountyLinkDomain prefixes what the countersigning key signs, so a signature
@@ -63,8 +72,8 @@ const bountyLinkTTL = 10 * time.Minute
 // seed (BOUNTY_LINK_SIGNING_KEY). An empty or malformed key leaves the endpoint
 // answering 503 rather than failing the whole API at boot: this feature is
 // optional, and sign-in must never depend on it.
-func NewBountyWalletHandler(d *db.DB, keyB64 string) *BountyWalletHandler {
-	h := &BountyWalletHandler{db: d, now: time.Now}
+func NewBountyWalletHandler(d *db.DB, keyB64, agentURL string) *BountyWalletHandler {
+	h := &BountyWalletHandler{db: d, now: time.Now, agentURL: agentURL, agentHTTP: &http.Client{Timeout: 10 * time.Second}}
 	if strings.TrimSpace(keyB64) == "" {
 		return h
 	}
@@ -103,6 +112,123 @@ func BountyReadMessage(login string, githubUserID int64, nonce string, issued, e
 		"Issued: " + issued.UTC().Format(time.RFC3339),
 		"Expires: " + expires.UTC().Format(time.RFC3339),
 	}, "\n")
+}
+
+// GetLink answers GET /me/bounty-wallet/link with the wallet linked to the
+// signed-in account, by asking the bounty agent itself.
+//
+// The browser used to make this call: it asked here for a countersigned read
+// challenge and then posted that to the agent. That second hop is the problem.
+// Our audience runs wallet extensions, which replace window.fetch and re-issue
+// the page's request from their own context -- changing the Origin, adding
+// headers, and in at least one case mangling the body. The result was a page
+// that reported the agent as unreachable while the agent was answering
+// correctly, four times over.
+//
+// So the browser now makes one call, to an origin it already trusts, and this
+// service does the signed hop with its own credentials. There is nothing left
+// in that exchange for an extension to sit in the middle of.
+func (h *BountyWalletHandler) GetLink(c *fiber.Ctx) error {
+	uid, ok := userID(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+	}
+	if h.key == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "bounty_wallet_link_unconfigured"})
+	}
+	var githubUserID int64
+	var login string
+	err := h.db.Pool.QueryRow(c.Context(),
+		`SELECT github_user_id, login FROM github_accounts WHERE user_id = $1`, uid).Scan(&githubUserID, &login)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "github_not_linked"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+	}
+
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "nonce_failed"})
+	}
+	issued := h.now().UTC().Truncate(time.Second)
+	expires := issued.Add(bountyLinkTTL)
+	msg := BountyReadMessage(login, githubUserID, hex.EncodeToString(raw), issued, expires)
+	sig := ed25519.Sign(h.key, []byte(bountyReadDomain+msg))
+
+	payload, _ := json.Marshal(map[string]string{
+		"message":          msg,
+		"countersignature": base64.StdEncoding.EncodeToString(sig),
+	})
+	req, err := http.NewRequestWithContext(c.Context(), "POST", strings.TrimRight(h.agentURL, "/")+"/link/session/read", bytes.NewReader(payload))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "agent_request_failed"})
+	}
+	req.Header.Set("content-type", "application/json")
+	res, err := h.agentHTTP.Do(req)
+	if err != nil {
+		// The agent being unreachable is not "no wallet linked". Say which.
+		slog.Warn("bounty wallet: agent unreachable", "error", err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable"})
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 16*1024))
+	if res.StatusCode != http.StatusOK {
+		slog.Warn("bounty wallet: agent refused a read", "status", res.StatusCode, "body", string(body))
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_refused", "detail": string(body)})
+	}
+	var out struct {
+		Linked   bool    `json:"linked"`
+		Wallet   *string `json:"wallet"`
+		LinkedAt *string `json:"linkedAt"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_bad_response"})
+	}
+	return c.JSON(fiber.Map{"linked": out.Linked, "wallet": out.Wallet, "linked_at": out.LinkedAt})
+}
+
+// PostLink relays a completed wallet link to the bounty agent.
+//
+// The browser holds the one thing this service cannot produce -- the wallet's
+// signature over the challenge -- so it still has to send it. What it no longer
+// has to do is talk to the agent: it posts here, same origin, and this service
+// forwards. Same reason as GetLink: a wallet extension re-issuing a
+// cross-origin POST is exactly what broke this path, and the linking call has
+// the same shape as the read that broke.
+//
+// This is a relay, not an authority: the agent re-verifies the countersignature
+// and the wallet signature itself and is free to refuse. We pass its answer
+// back unchanged so the page can say what actually happened.
+func (h *BountyWalletHandler) PostLink(c *fiber.Ctx) error {
+	if _, ok := userID(c); !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+	}
+	var body struct {
+		Message          string `json:"message"`
+		Countersignature string `json:"countersignature"`
+		WalletSignature  string `json:"walletSignature"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
+	}
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(c.Context(), "POST", strings.TrimRight(h.agentURL, "/")+"/link/session", bytes.NewReader(payload))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "agent_request_failed"})
+	}
+	req.Header.Set("content-type", "application/json")
+	res, err := h.agentHTTP.Do(req)
+	if err != nil {
+		slog.Warn("bounty wallet: agent unreachable on link", "error", err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable"})
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 16*1024))
+	// The agent's decision, verbatim: its refusals are written for the person
+	// who asked, and rewording them here would only lose detail.
+	c.Set("content-type", "application/json")
+	return c.Status(res.StatusCode).Send(raw)
 }
 
 // GetCountersignKey answers GET /bounty-wallet/countersign-key with the public

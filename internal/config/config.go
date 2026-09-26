@@ -175,6 +175,8 @@ type Config struct {
 	// bounty agent holds the public half. Empty turns that endpoint off (503);
 	// nothing else reads it.
 	BountyLinkSigningKey string
+	// Where the bounty agent lives, for server-to-server reads.
+	BountyAgentURL string
 }
 
 func Load() Config {
@@ -251,6 +253,7 @@ func Load() Config {
 		EmailFromName:     getEnv("EMAIL_FROM_NAME", "Grainlify"),
 
 		BountyLinkSigningKey: getEnv("BOUNTY_LINK_SIGNING_KEY", ""),
+		BountyAgentURL:       getEnv("BOUNTY_AGENT_URL", "https://agent.grainlify.com"),
 	}
 }
 
