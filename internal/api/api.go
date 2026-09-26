@@ -253,6 +253,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// verifies it. The browser never talks to the agent.
 	bountyDraw := handlers.NewBountyDrawHandler(deps.DB, cfg.BountyLinkSigningKey, cfg.BountyAgentURL)
 	app.Post("/bounties/:bountyId/apply", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostApply)
+	app.Get("/me/bounty-applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMyApplications)
 
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money

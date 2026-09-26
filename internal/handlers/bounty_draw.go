@@ -145,8 +145,11 @@ func (h *BountyDrawHandler) call(c *fiber.Ctx, domain, kind, action string, gith
 	payload, _ := json.Marshal(body)
 
 	path := "/bounties/apply"
-	if kind == "admin" {
+	switch {
+	case kind == "admin":
 		path = "/admin/draw"
+	case action == "my_state":
+		path = "/bounties/mine"
 	}
 	req, err := http.NewRequestWithContext(c.Context(), "POST", strings.TrimRight(h.agentURL, "/")+path, bytes.NewReader(payload))
 	if err != nil {
@@ -176,7 +179,41 @@ func (h *BountyDrawHandler) PostApply(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
 	}
-	return h.call(c, bountyApplyDomain, "apply", "apply", id, login, c.Params("bountyId"), nil)
+	// The applicant's own words. Deliberately OUTSIDE the signed message:
+	// signing it would imply Grainlify vouches for text the applicant wrote,
+	// and the agent's prompt is built on the opposite assumption - that it is
+	// untrusted and very likely AI-generated. It is never weighted by the
+	// draw; it exists so the model has something to flag as an injection
+	// attempt, and so somebody with real context has somewhere to put it.
+	var in struct {
+		ApplicationText string `json:"application_text"`
+	}
+	_ = c.BodyParser(&in)
+	return h.call(c, bountyApplyDomain, "apply", "apply", id, login, c.Params("bountyId"),
+		map[string]any{"applicationText": in.ApplicationText})
+}
+
+// GetMyApplications answers "what have I applied for", from the server.
+//
+// The page had no way to ask: whether you had applied lived in React state,
+// which does not survive a re-render or a reload. Someone applied, the list
+// refreshed, the row unmounted, the Apply button came back, and they clicked
+// again to be told they had already applied.
+func (h *BountyDrawHandler) GetMyApplications(c *fiber.Ctx) error {
+	id, login, err := h.githubFor(c)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Not an error worth a status: somebody who has not connected GitHub
+		// simply has no applications, and the page renders the same as for
+		// somebody who has none.
+		return c.JSON(fiber.Map{"applications": fiber.Map{}, "assignments": fiber.Map{}})
+	}
+	if err != nil {
+		if err.Error() == "unauthenticated" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+	}
+	return h.call(c, bountyApplyDomain, "apply", "my_state", id, login, "", nil)
 }
 
 // adminAction is the shared body of every admin route below. requireAdmin has
