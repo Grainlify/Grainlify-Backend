@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -172,10 +174,10 @@ func TestBountyWallet_CountersignsTheSessionsOwnGitHubAccount(t *testing.T) {
 
 func TestBountyReadMessage_Shape(t *testing.T) {
 	issued := time.Date(2026, 9, 26, 9, 30, 0, 0, time.UTC)
-	got := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
+	got := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c853f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
 	want := "Grainlify: read my linked wallet\n" +
 		"GitHub: Octocat (id 583231)\n" +
-		"Nonce: 3f9c1a0be27d4c85\n" +
+		"Nonce: 3f9c1a0be27d4c853f9c1a0be27d4c85\n" +
 		"Issued: 2026-09-26T09:30:00Z\n" +
 		"Expires: 2026-09-26T09:40:00Z"
 	if got != want {
@@ -197,7 +199,7 @@ func TestBountyWallet_ReadAndLinkDomainsAreDistinct(t *testing.T) {
 	issued := time.Date(2026, 9, 26, 9, 30, 0, 0, time.UTC)
 	seed, _ := base64.StdEncoding.DecodeString(testSeedB64)
 	key := ed25519.NewKeyFromSeed(seed)
-	readMsg := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
+	readMsg := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c853f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
 	sig := ed25519.Sign(key, []byte(bountyReadDomain+readMsg))
 
 	if !ed25519.Verify(testPub(t), []byte(bountyReadDomain+readMsg), sig) {
@@ -239,5 +241,37 @@ func TestBountyWallet_ReadChallengeRequiresSignedInUser(t *testing.T) {
 	code, out := postJSON(t, app, "/me/bounty-wallet/read-challenge", map[string]any{})
 	if code != 401 {
 		t.Fatalf("got %d %v, want 401", code, out)
+	}
+}
+
+// The pairing with the agent is only checkable from outside if this key is
+// published, and it must be the verifying half -- never the seed.
+func TestBountyWallet_CountersignKeyIsThePublicHalf(t *testing.T) {
+	app := bountyWalletApp(nil, nil, testSeedB64, time.Now())
+	app.Get("/bounty-wallet/countersign-key", NewBountyWalletHandler(nil, testSeedB64).GetCountersignKey)
+	res, err := app.Test(httptest.NewRequest("GET", "/bounty-wallet/countersign-key", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var body struct {
+		PublicKey  string `json:"public_key"`
+		ReadDomain string `json:"read_domain"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	want := base64.StdEncoding.EncodeToString(testPub(t))
+	if body.PublicKey != want {
+		t.Fatalf("public_key = %q, want %q", body.PublicKey, want)
+	}
+	if body.ReadDomain != bountyReadDomain {
+		t.Fatalf("read_domain = %q, want %q", body.ReadDomain, bountyReadDomain)
+	}
+	// The seed must never appear.
+	if strings.Contains(body.PublicKey, testSeedB64) {
+		t.Fatal("the response leaked the signing seed")
 	}
 }

@@ -105,6 +105,26 @@ func BountyReadMessage(login string, githubUserID int64, nonce string, issued, e
 	}, "\n")
 }
 
+// GetCountersignKey answers GET /bounty-wallet/countersign-key with the public
+// half of the key that signs link and read challenges.
+//
+// Public on purpose and safe to expose: a public key verifies signatures and
+// cannot make them. It exists so the pairing between this service and the
+// bounty agent can be checked from outside, without reading either service's
+// environment -- a mismatch there produces bad_countersignature, which is
+// otherwise indistinguishable from a genuinely bad request.
+func (h *BountyWalletHandler) GetCountersignKey(c *fiber.Ctx) error {
+	if h.key == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "bounty_wallet_link_unconfigured"})
+	}
+	pub := h.key.Public().(ed25519.PublicKey)
+	return c.JSON(fiber.Map{
+		"public_key":  base64.StdEncoding.EncodeToString(pub),
+		"link_domain": bountyLinkDomain,
+		"read_domain": bountyReadDomain,
+	})
+}
+
 // PostReadChallenge answers POST /me/bounty-wallet/read-challenge. It takes no
 // body: the GitHub account comes from the session, and reading your own link
 // needs no proof of wallet control, only proof of who is asking.
