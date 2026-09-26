@@ -350,6 +350,16 @@ func TestBountyWallet_GetLink_AgentDownIsNotNoWallet(t *testing.T) {
 	if res.StatusCode != 502 {
 		t.Fatalf("status = %d, want 502 for an unreachable agent", res.StatusCode)
 	}
+	// A 502 that does not name the host it could not reach sends the reader to
+	// guess at configuration. The address we tried is the single most useful
+	// fact about this failure, and it is not a secret.
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["agent_url"] != "http://127.0.0.1:1" {
+		t.Fatalf("agent_url = %v, want the address that was tried", body["agent_url"])
+	}
 }
 
 func TestBountyWallet_PostLink_RelaysTheAgentsAnswerVerbatim(t *testing.T) {

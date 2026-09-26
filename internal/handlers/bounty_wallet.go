@@ -74,6 +74,10 @@ const bountyLinkTTL = 10 * time.Minute
 // optional, and sign-in must never depend on it.
 func NewBountyWalletHandler(d *db.DB, keyB64, agentURL string) *BountyWalletHandler {
 	h := &BountyWalletHandler{db: d, now: time.Now, agentURL: agentURL, agentHTTP: &http.Client{Timeout: 10 * time.Second}}
+	// Which agent this instance will actually talk to, said once at boot.
+	// "What URL is the deployed backend using?" should be answerable by
+	// reading a log, not by reasoning about defaults and environment.
+	slog.Info("bounty wallet: agent configured", "agent_url", agentURL, "countersigning_key_set", strings.TrimSpace(keyB64) != "")
 	if strings.TrimSpace(keyB64) == "" {
 		return h
 	}
@@ -167,15 +171,19 @@ func (h *BountyWalletHandler) GetLink(c *fiber.Ctx) error {
 	req.Header.Set("content-type", "application/json")
 	res, err := h.agentHTTP.Do(req)
 	if err != nil {
-		// The agent being unreachable is not "no wallet linked". Say which.
-		slog.Warn("bounty wallet: agent unreachable", "error", err)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable"})
+		// The agent being unreachable is not "no wallet linked". Say which,
+		// and say WHICH AGENT: a failure to connect is almost always a wrong
+		// or stale address, and a log line that does not name the host it
+		// tried sends the reader to guess at configuration instead of reading
+		// it. Same for the response, so it is diagnosable without log access.
+		slog.Warn("bounty wallet: agent unreachable", "agent_url", h.agentURL, "error", err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable", "agent_url": h.agentURL})
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 16*1024))
 	if res.StatusCode != http.StatusOK {
-		slog.Warn("bounty wallet: agent refused a read", "status", res.StatusCode, "body", string(body))
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_refused", "detail": string(body)})
+		slog.Warn("bounty wallet: agent refused a read", "agent_url", h.agentURL, "status", res.StatusCode, "body", string(body))
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_refused", "agent_url": h.agentURL, "detail": string(body)})
 	}
 	var out struct {
 		Linked   bool    `json:"linked"`
@@ -220,8 +228,8 @@ func (h *BountyWalletHandler) PostLink(c *fiber.Ctx) error {
 	req.Header.Set("content-type", "application/json")
 	res, err := h.agentHTTP.Do(req)
 	if err != nil {
-		slog.Warn("bounty wallet: agent unreachable on link", "error", err)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable"})
+		slog.Warn("bounty wallet: agent unreachable on link", "agent_url", h.agentURL, "error", err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable", "agent_url": h.agentURL})
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 16*1024))
