@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"
@@ -37,6 +38,7 @@ func bountyWalletApp(uid *uuid.UUID, d *db.DB, keyB64 string, now time.Time) *fi
 		return c.Next()
 	}
 	app.Post("/me/bounty-wallet/challenge", inject, h.PostChallenge)
+	app.Post("/me/bounty-wallet/read-challenge", inject, h.PostReadChallenge)
 	return app
 }
 
@@ -165,5 +167,77 @@ func TestBountyWallet_CountersignsTheSessionsOwnGitHubAccount(t *testing.T) {
 	d.Pool.QueryRow(context.Background(), `SELECT count(*) FROM contributor_addresses WHERE user_id=$1`, uid).Scan(&n)
 	if n != 0 {
 		t.Fatalf("challenge wrote %d payout-address rows", n)
+	}
+}
+
+func TestBountyReadMessage_Shape(t *testing.T) {
+	issued := time.Date(2026, 9, 26, 9, 30, 0, 0, time.UTC)
+	got := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
+	want := "Grainlify: read my linked wallet\n" +
+		"GitHub: Octocat (id 583231)\n" +
+		"Nonce: 3f9c1a0be27d4c85\n" +
+		"Issued: 2026-09-26T09:30:00Z\n" +
+		"Expires: 2026-09-26T09:40:00Z"
+	if got != want {
+		t.Fatalf("read message changed:\n%s\nwant:\n%s", got, want)
+	}
+	// It must carry no Wallet line: a read challenge asks, it does not assert.
+	if strings.Contains(got, "Wallet:") {
+		t.Fatal("a read challenge must not contain a Wallet line")
+	}
+}
+
+// The two challenges are signed by the same key, so the domain prefix is the
+// only thing keeping them apart. A read signature verified under the link
+// domain would mean a read challenge could stand in for a link.
+func TestBountyWallet_ReadAndLinkDomainsAreDistinct(t *testing.T) {
+	if bountyReadDomain == bountyLinkDomain {
+		t.Fatal("read and link domains must differ")
+	}
+	issued := time.Date(2026, 9, 26, 9, 30, 0, 0, time.UTC)
+	seed, _ := base64.StdEncoding.DecodeString(testSeedB64)
+	key := ed25519.NewKeyFromSeed(seed)
+	readMsg := BountyReadMessage("Octocat", 583231, "3f9c1a0be27d4c85", issued, issued.Add(10*time.Minute))
+	sig := ed25519.Sign(key, []byte(bountyReadDomain+readMsg))
+
+	if !ed25519.Verify(testPub(t), []byte(bountyReadDomain+readMsg), sig) {
+		t.Fatal("a read signature must verify under the read domain")
+	}
+	if ed25519.Verify(testPub(t), []byte(bountyLinkDomain+readMsg), sig) {
+		t.Fatal("a read signature must NOT verify under the link domain")
+	}
+}
+
+func TestBountyWallet_ReadChallengeCountersignsTheSessionsOwnAccount(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	ghID := linkGitHub(t, d, uid, "Octocat")
+	now := time.Date(2026, 9, 26, 9, 30, 0, 0, time.UTC)
+	app := bountyWalletApp(&uid, d, testSeedB64, now)
+
+	code, out := postJSON(t, app, "/me/bounty-wallet/read-challenge", map[string]any{})
+	if code != 200 {
+		t.Fatalf("got %d %v", code, out)
+	}
+	msg, _ := out["message"].(string)
+	// The GitHub identity comes from the session, never from the request.
+	if !strings.Contains(msg, fmt.Sprintf("GitHub: Octocat (id %d)", ghID)) {
+		t.Fatalf("message does not name the session's own account: %q", msg)
+	}
+	csig, _ := out["countersignature"].(string)
+	sig, err := base64.StdEncoding.DecodeString(csig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(testPub(t), []byte(bountyReadDomain+msg), sig) {
+		t.Fatal("countersignature does not verify under the read domain")
+	}
+}
+
+func TestBountyWallet_ReadChallengeRequiresSignedInUser(t *testing.T) {
+	app := bountyWalletApp(nil, nil, testSeedB64, time.Now())
+	code, out := postJSON(t, app, "/me/bounty-wallet/read-challenge", map[string]any{})
+	if code != 401 {
+		t.Fatalf("got %d %v, want 401", code, out)
 	}
 }

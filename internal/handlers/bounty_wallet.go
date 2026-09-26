@@ -47,6 +47,14 @@ type BountyWalletHandler struct {
 // from it can never be read as meaning anything but this.
 const bountyLinkDomain = "grainlify-bounty-wallet-link:v1\n"
 
+// bountyReadDomain is deliberately a DIFFERENT domain from the link one. Both
+// are signed by the same key, so the domain is the only thing stopping a
+// signature issued for one purpose being presented as the other. A read
+// challenge proves "this GitHub account is asking"; it must never be usable to
+// link a wallet, which is why it carries no Wallet line and no wallet
+// signature is ever accepted alongside it.
+const bountyReadDomain = "grainlify-bounty-wallet-read:v1\n"
+
 // bountyLinkTTL is how long a countersigned message may be used. Long enough to
 // switch to a wallet app and back; short enough that a leaked one is stale.
 const bountyLinkTTL = 10 * time.Minute
@@ -81,6 +89,60 @@ func BountyLinkMessage(login string, githubUserID int64, wallet, nonce string, i
 		"Issued: " + issued.UTC().Format(time.RFC3339),
 		"Expires: " + expires.UTC().Format(time.RFC3339),
 	}, "\n")
+}
+
+// BountyReadMessage is what the agent parses to answer "which wallet is linked
+// to this GitHub account". Five lines, no Wallet: the caller is asking, not
+// asserting. Its shape is a contract with the agent's
+// packages/gate/src/session-read.ts: change both or neither.
+func BountyReadMessage(login string, githubUserID int64, nonce string, issued, expires time.Time) string {
+	return strings.Join([]string{
+		"Grainlify: read my linked wallet",
+		fmt.Sprintf("GitHub: %s (id %d)", login, githubUserID),
+		"Nonce: " + nonce,
+		"Issued: " + issued.UTC().Format(time.RFC3339),
+		"Expires: " + expires.UTC().Format(time.RFC3339),
+	}, "\n")
+}
+
+// PostReadChallenge answers POST /me/bounty-wallet/read-challenge. It takes no
+// body: the GitHub account comes from the session, and reading your own link
+// needs no proof of wallet control, only proof of who is asking.
+func (h *BountyWalletHandler) PostReadChallenge(c *fiber.Ctx) error {
+	uid, ok := userID(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+	}
+	if h.key == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "bounty_wallet_link_unconfigured"})
+	}
+
+	var githubUserID int64
+	var login string
+	err := h.db.Pool.QueryRow(c.Context(),
+		`SELECT github_user_id, login FROM github_accounts WHERE user_id = $1`, uid).Scan(&githubUserID, &login)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "github_not_linked"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+	}
+
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "nonce_failed"})
+	}
+	nonce := hex.EncodeToString(raw)
+	issued := h.now().UTC().Truncate(time.Second)
+	expires := issued.Add(bountyLinkTTL)
+	msg := BountyReadMessage(login, githubUserID, nonce, issued, expires)
+	sig := ed25519.Sign(h.key, []byte(bountyReadDomain+msg))
+
+	return c.JSON(fiber.Map{
+		"message":          msg,
+		"countersignature": base64.StdEncoding.EncodeToString(sig),
+		"expires_at":       expires,
+	})
 }
 
 // PostChallenge answers POST /me/bounty-wallet/challenge {"wallet": "<base58>"}.
