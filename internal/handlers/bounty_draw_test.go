@@ -172,3 +172,82 @@ func TestBountyDraw_AgentDownIsA502ThatNamesTheHost(t *testing.T) {
 }
 
 func jsonBody(s string) io.Reader { return strings.NewReader(s) }
+
+// A repo name contains a slash, so the signed-subject charset has to allow
+// one. It must not allow anything that could end a line - that property is
+// what stops a caller appending their own Expires.
+func TestBountySubjectSafe_AllowsRepoNamesButStillNoNewlines(t *testing.T) {
+	for _, ok := range []string{"Grainlify/grainlify-agent-sandbox", "Grainlify/Grainlify-Backend", "a/b"} {
+		if !subjectSafe(ok) {
+			t.Fatalf("subjectSafe(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"Grainlify/repo\nExpires: 2099-01-01T00:00:00Z", "a/b\r\nAction: run_draw"} {
+		if subjectSafe(bad) {
+			t.Fatalf("subjectSafe(%q) = true, want false", bad)
+		}
+	}
+}
+
+// The caller says which repo. This service decides whether it is a registered
+// project, because a caller asserting that would defeat the point of the rule.
+func TestBountyDraw_CallerCannotClaimARepoIsRegistered(t *testing.T) {
+	var seen map[string]any
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&seen)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Admin")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Post("/admin/bounty-repos", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.PostBountyRepo)
+
+	req := httptest.NewRequest("POST", "/admin/bounty-repos",
+		jsonBody(`{"full_name":"Someone/unverified","enabled":true,"registeredProject":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	res, _ := app.Test(req, -1)
+	if res.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	// No such project in our tables, so it is not registered, whatever the
+	// body said.
+	if seen["registeredProject"] != false {
+		t.Fatalf("registeredProject = %v, want false for a repo we do not vouch for", seen["registeredProject"])
+	}
+	if !strings.Contains(seen["message"].(string), "Subject: Someone/unverified") {
+		t.Fatalf("repo did not reach the signed message: %v", seen["message"])
+	}
+}
+
+// A maintainer may look at their own repository and nobody else's.
+func TestBountyDraw_MaintainerViewRefusesSomebodyElsesRepo(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
+
+	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
+	if res.StatusCode != 403 {
+		t.Fatalf("status = %d, want 403 for a repository the caller does not own", res.StatusCode)
+	}
+}
+
+func TestBountyDraw_MaintainerViewNeedsARepo(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
+	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications", nil), -1)
+	if res.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400 without a repo", res.StatusCode)
+	}
+}

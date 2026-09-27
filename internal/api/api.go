@@ -255,6 +255,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Post("/bounties/:bountyId/apply", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostApply)
 	app.Get("/me/bounty-applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMyApplications)
 
+	// A maintainer looking at their own repository's bounty. They can see; the
+	// draw assigns. There is deliberately no counterpart POST.
+	app.Get("/maintainer/bounties/:bountyId/applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBountyView)
+
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money
 	// and understands why we might need to reach them. PUT with an empty string
@@ -538,6 +542,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/bounty-draw/settings/reset", requireAdmin, bountyDraw.PostSettingReset)
 	adminGroup.Get("/bounty-draw/:bountyId/state", requireAdmin, bountyDraw.GetBountyState)
 	adminGroup.Post("/bounty-draw/:bountyId/run", requireAdmin, bountyDraw.PostRunDraw)
+
+	// Which repositories may have bounties. Operational, so it lives on the
+	// admin screen with an audit trail rather than in a deployment variable.
+	adminGroup.Get("/bounty-repos", requireAdmin, bountyDraw.GetBountyRepos)
+	adminGroup.Post("/bounty-repos", requireAdmin, bountyDraw.PostBountyRepo)
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
 
 	// Admin KYC reset. Contributors can now retry a *refused* verification

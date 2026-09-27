@@ -95,8 +95,10 @@ func subjectSafe(s string) bool {
 		return false
 	}
 	for _, r := range s {
+		// '/' so a subject can be a repository name (Owner/name). It cannot
+		// terminate a line, so nothing a caller supplies can still add one.
 		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-			r == '_' || r == '.' || r == ':' || r == '-'
+			r == '_' || r == '.' || r == ':' || r == '-' || r == '/'
 		if !ok {
 			return false
 		}
@@ -271,4 +273,161 @@ func (h *BountyDrawHandler) PostRunDraw(c *fiber.Ctx) error {
 	// A body is optional here: no body means a real draw.
 	_ = c.BodyParser(&in)
 	return h.adminAction(c, "run_draw", c.Params("bountyId"), map[string]any{"simulate": in.Simulate})
+}
+
+// ---------------------------------------------------------------- bounty repos
+
+// eligibleBountyRepo is a repository Grainlify vouches for: a project that has
+// been verified and has our GitHub App installed. Both are required, and both
+// are facts this service owns - the bounty agent has no projects table and is
+// told the answer rather than asked to work it out.
+type eligibleBountyRepo struct {
+	ProjectID  string `json:"project_id"`
+	FullName   string `json:"full_name"`
+	Verified   bool   `json:"verified"`
+	AppRepoID  *int64 `json:"github_app_installation_id"`
+	Registered bool   `json:"registered_project"`
+}
+
+// GetBountyRepos lists the projects that MAY have bounties, alongside what the
+// agent currently has switched on for each.
+//
+// Two sources on purpose. Whether something is a registered project is ours;
+// whether bounties are switched on is the agent's. Showing them together is
+// what lets an admin see a project that has lost its verification while its
+// bounties are still on - which is exactly the state worth noticing.
+func (h *BountyDrawHandler) GetBountyRepos(c *fiber.Ctx) error {
+	rows, err := h.db.Pool.Query(c.Context(), `
+SELECT p.id::text, p.github_full_name,
+       (p.verified_at IS NOT NULL) AS verified,
+       p.github_app_installation_id
+  FROM projects p
+ WHERE p.deleted_at IS NULL AND p.github_full_name IS NOT NULL
+ ORDER BY p.github_full_name`)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+	}
+	defer rows.Close()
+
+	projects := []eligibleBountyRepo{}
+	for rows.Next() {
+		var p eligibleBountyRepo
+		if err := rows.Scan(&p.ProjectID, &p.FullName, &p.Verified, &p.AppRepoID); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+		}
+		p.Registered = p.Verified && p.AppRepoID != nil
+		projects = append(projects, p)
+	}
+
+	// The agent's side of the picture. A failure here is reported rather than
+	// rendered as "nothing is switched on", which would invite an admin to
+	// switch something on that already is.
+	agent, status, err := h.relayRead(c, "list_repos", "")
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable", "agent_url": h.agentURL, "projects": projects})
+	}
+	if status != fiber.StatusOK {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_refused", "detail": string(agent), "projects": projects})
+	}
+	var agentState map[string]any
+	_ = json.Unmarshal(agent, &agentState)
+	return c.JSON(fiber.Map{"projects": projects, "agent": agentState["repos"]})
+}
+
+// PostBountyRepo switches bounties on or off for one repository.
+//
+// The caller names the repo; this service decides whether it is a registered
+// project, from its own tables, and sends that judgement along. A caller
+// cannot assert it - that is the whole point of computing it here.
+func (h *BountyDrawHandler) PostBountyRepo(c *fiber.Ctx) error {
+	var in struct {
+		FullName string `json:"full_name"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := c.BodyParser(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
+	}
+	if strings.TrimSpace(in.FullName) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "full_name_required"})
+	}
+
+	var verified bool
+	var installation *int64
+	err := h.db.Pool.QueryRow(c.Context(), `
+SELECT (verified_at IS NOT NULL), github_app_installation_id
+  FROM projects WHERE lower(github_full_name) = lower($1) AND deleted_at IS NULL
+ LIMIT 1`, in.FullName).Scan(&verified, &installation)
+	registered := err == nil && verified && installation != nil
+
+	return h.adminAction(c, "set_repo_bounties", in.FullName, map[string]any{
+		"enabled":           in.Enabled,
+		"registeredProject": registered,
+	})
+}
+
+// GetMaintainerBountyView answers what a maintainer may see about one bounty.
+//
+// This service decides WHETHER they maintain the repository. The agent decides
+// WHAT they may see, by the clock: a rough count while applications are open,
+// the full list once they close. That split matters - if this service also
+// decided the timing, a bug here would leak the pool, and the pool being
+// unknowable while the window is open is what stops anyone working the draw.
+func (h *BountyDrawHandler) GetMaintainerBountyView(c *fiber.Ctx) error {
+	uid, ok := userID(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+	}
+	bountyID := c.Params("bountyId")
+	repo := strings.TrimSpace(c.Query("repo"))
+	if repo == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "repo_required"})
+	}
+
+	var owns bool
+	if err := h.db.Pool.QueryRow(c.Context(), `
+SELECT EXISTS (
+  SELECT 1 FROM projects
+   WHERE lower(github_full_name) = lower($1) AND owner_user_id = $2 AND deleted_at IS NULL
+)`, repo, uid).Scan(&owns); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+	}
+	if !owns {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not_your_repository"})
+	}
+	return h.adminAction(c, "maintainer_view", bountyID, nil)
+}
+
+// relayRead performs an admin action and hands back the raw answer, for the
+// routes that need to merge it with data of our own rather than pass it
+// straight through.
+func (h *BountyDrawHandler) relayRead(c *fiber.Ctx, action, subject string) ([]byte, int, error) {
+	id, login, err := h.githubFor(c)
+	if err != nil {
+		return nil, 0, err
+	}
+	if h.key == nil {
+		return nil, 0, errors.New("bounty_draw_unconfigured")
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, 0, err
+	}
+	issued := h.now().UTC().Truncate(time.Second)
+	msg := BountyActionMessage("admin", action, login, id, subject, hex.EncodeToString(raw), issued, issued.Add(bountyActionTTL))
+	sig := ed25519.Sign(h.key, []byte(bountyAdminDomain+msg))
+	payload, _ := json.Marshal(map[string]any{"message": msg, "countersignature": base64.StdEncoding.EncodeToString(sig)})
+
+	req, err := http.NewRequestWithContext(c.Context(), "POST", strings.TrimRight(h.agentURL, "/")+"/admin/draw", bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("content-type", "application/json")
+	res, err := h.agentHTTP.Do(req)
+	if err != nil {
+		slog.Warn("bounty draw: agent unreachable", "agent_url", h.agentURL, "action", action, "error", err)
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(res.Body, 512*1024))
+	return out, res.StatusCode, nil
 }
