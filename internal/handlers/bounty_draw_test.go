@@ -224,8 +224,34 @@ func TestBountyDraw_CallerCannotClaimARepoIsRegistered(t *testing.T) {
 	}
 }
 
-// A maintainer may look at their own repository and nobody else's.
+// A maintainer may look at their own repository and nobody else's. Owning the
+// Grainlify project is one proof; GitHub permission, which the agent answers,
+// is the other. Refusing needs BOTH to say no.
 func TestBountyDraw_MaintainerViewRefusesSomebodyElsesRepo(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The agent has looked and this caller maintains nothing.
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"bounties":[]}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
+
+	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
+	if res.StatusCode != 403 {
+		t.Fatalf("status = %d, want 403 for a repository the caller does not maintain", res.StatusCode)
+	}
+}
+
+// An agent we cannot reach has not told us the caller lacks permission; it has
+// told us nothing. Answering 403 there would report a refusal we never made,
+// and send somebody to ask for access they may already have.
+func TestBountyDraw_MaintainerViewCannotCheckIsNotARefusal(t *testing.T) {
 	d := dbtest.DB(t)
 	uid := newUser(t, d)
 	linkGitHub(t, d, uid, "Octocat")
@@ -234,8 +260,35 @@ func TestBountyDraw_MaintainerViewRefusesSomebodyElsesRepo(t *testing.T) {
 	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
 
 	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
-	if res.StatusCode != 403 {
-		t.Fatalf("status = %d, want 403 for a repository the caller does not own", res.StatusCode)
+	if res.StatusCode != 502 {
+		t.Fatalf("status = %d, want 502 when the agent could not be asked", res.StatusCode)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&body)
+	if body["agent_url"] != "http://127.0.0.1:1" {
+		t.Fatalf("agent_url = %v, want the address that was tried", body["agent_url"])
+	}
+}
+
+// The agent saying the caller DOES maintain it is sufficient on its own - the
+// project table is a shortcut, not the authority.
+func TestBountyDraw_MaintainerViewAcceptsGitHubPermissionAlone(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"bounties":[{"bountyId":"b1","repo":"Someone/else","issueNumber":1}],"windowOpen":true,"canAssign":false}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Octocat")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
+
+	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
+	if res.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 when the agent says the caller maintains it", res.StatusCode)
 	}
 }
 
