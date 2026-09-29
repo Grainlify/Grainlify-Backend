@@ -105,16 +105,6 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "malformed"})
 	}
 
-	var userID uuid.UUID
-	err := h.db.Pool.QueryRow(c.Context(),
-		`SELECT user_id FROM github_accounts WHERE github_user_id = $1`, e.GitHubUserID).Scan(&userID)
-	if err != nil {
-		// Not an error the agent can fix by retrying: this person has no
-		// Grainlify account, or has unlinked GitHub. Recorded and accepted.
-		slog.Info("bounty event: no Grainlify user for that GitHub account", "github_user_id", e.GitHubUserID, "kind", e.Kind)
-		return c.JSON(fiber.Map{"accepted": true, "notified": false, "reason": "no_linked_account"})
-	}
-
 	amount := money(e.Payload)
 	place := where(e.Payload)
 
@@ -160,6 +150,23 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 		body = fmt.Sprintf("An advisory review is on your pull request for %s. A maintainer decides whether to merge; the review does not.", place)
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unknown_kind", "kind": e.Kind})
+	}
+
+	// The recipient is resolved AFTER the kind is understood, and the order
+	// matters. The other way round, an event whose kind we do not recognise -
+	// a typo, or one added to the agent before this service knew about it -
+	// was answered 200 whenever the person also had no account. The agent
+	// marked it delivered and the event was gone. Two unrelated unknowns
+	// cancelling out into a success is exactly the shape of a bug nobody
+	// finds; a test passed locally only because some other test had left a
+	// user with that GitHub id lying around.
+	var userID uuid.UUID
+	if err := h.db.Pool.QueryRow(c.Context(),
+		`SELECT user_id FROM github_accounts WHERE github_user_id = $1`, e.GitHubUserID).Scan(&userID); err != nil {
+		// This one IS an accepted outcome: no Grainlify account, or GitHub
+		// unlinked. Not something the agent can fix by retrying.
+		slog.Info("bounty event: no Grainlify user for that GitHub account", "github_user_id", e.GitHubUserID, "kind", e.Kind)
+		return c.JSON(fiber.Map{"accepted": true, "notified": false, "reason": "no_linked_account"})
 	}
 
 	h.notif.Notify(c.Context(), userID, t, title, body, link)

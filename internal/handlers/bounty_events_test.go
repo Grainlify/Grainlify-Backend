@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -78,11 +79,18 @@ func TestBountyEvents_WithoutASecretRefusesEverything(t *testing.T) {
 	}
 }
 
+// An unknown kind is refused whether or not the person has an account. The
+// two checks used to run the other way round, so an unrecognised kind for
+// somebody with no account came back 200 - the agent marked it delivered and
+// the event was gone. This test passed locally only because another test had
+// left a user with that GitHub id behind.
 func TestBountyEvents_RefusesAKindItDoesNotKnow(t *testing.T) {
 	app := eventsApp(t, eventsSecret)
-	body := `{"kind":"something_new","githubUserId":1,"payload":{}}`
-	if code := post(t, app, body, signed(body)); code != 400 {
-		t.Fatalf("status = %d, want 400", code)
+	for _, id := range []int64{1, 999999999} {
+		body := fmt.Sprintf(`{"kind":"something_new","githubUserId":%d,"payload":{}}`, id)
+		if code := post(t, app, body, signed(body)); code != 400 {
+			t.Fatalf("githubUserId %d: status = %d, want 400", id, code)
+		}
 	}
 }
 
