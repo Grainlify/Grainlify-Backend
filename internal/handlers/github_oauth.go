@@ -19,6 +19,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/cryptox"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/useremail"
 )
 
 // isAllowedRedirectURI validates that a redirect URI is from an allowed origin.
@@ -440,6 +441,27 @@ ON CONFLICT (user_id) DO UPDATE SET
 		_, _ = h.db.Pool.Exec(c.Context(), `
 UPDATE users SET github_user_id = $2, updated_at = now() WHERE id = $1
 `, userID, u.ID)
+
+		// Capture the address so notification emails have somewhere to go.
+		//
+		// The address can be private, in which case /user returns nothing and
+		// only /user/emails has it - hence the second call and the user:email
+		// scope. Neither failure stops a login: not being able to email
+		// somebody is not a reason to refuse to let them in.
+		//
+		// useremail.Capture is a no-op for anybody who has removed their
+		// address. Re-capturing here is the one line that would turn the
+		// remove button into a lie, so the check lives in the package rather
+		// than at this call site.
+		if addr, err := gh.GetPrimaryEmail(c.Context(), tr.AccessToken); err != nil {
+			slog.Info("OAuth callback - could not read the GitHub email", "user_id", userID, "error", err)
+		} else if changed, err := useremail.Capture(c.Context(), h.db.Pool, userID, addr); err != nil {
+			slog.Warn("OAuth callback - could not store the email", "user_id", userID, "error", err)
+		} else if changed {
+			slog.Info("OAuth callback - stored the GitHub email", "user_id", userID)
+		} else if addr == "" {
+			slog.Info("OAuth callback - GitHub gave no primary email", "user_id", userID)
+		}
 
 		// For login: issue JWT. For link: we can optionally redirect without token.
 		if storedKind == "github_login" {

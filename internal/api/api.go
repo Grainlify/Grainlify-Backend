@@ -226,6 +226,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/me", auth.RequireAuth(cfg.JWTSecret), authHandler.Me())
 	app.Post("/me/github/resync", auth.RequireAuth(cfg.JWTSecret), authHandler.ResyncGitHubProfile())
 
+	// The stored email address and its two controls. Every one of these is
+	// about the caller's own address; nothing here can read anybody else's.
+	userEmail := handlers.NewUserEmailHandler(deps.DB)
+	app.Get("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Get)
+	app.Put("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Put)
+	app.Delete("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Delete)
+
 	// Payout: where a reward is sent, and how somebody claims it.
 	//
 	// Separate from wallet sign-in throughout - `wallets` answers "prove you hold

@@ -122,13 +122,21 @@ VALUES ($1, $2, $3, $4, $5)
 }
 
 func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, t Type, title, body string, link Link) {
+	// The master switch is read here rather than at the call site, so a new
+	// caller cannot forget it. It sits alongside the address in one query for
+	// the same reason: two queries is two chances to check only one of them.
 	var to *string
-	if err := s.db.Pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&to); err != nil {
+	var enabled bool
+	if err := s.db.Pool.QueryRow(ctx,
+		`SELECT email, email_notifications_enabled FROM users WHERE id = $1`, userID).Scan(&to, &enabled); err != nil {
 		slog.Warn("notifications: user lookup for email failed", "user_id", userID, "type", t, "error", err)
 		return
 	}
+	if !enabled {
+		return // "no email from Grainlify at all"; the in-app notification is already stored
+	}
 	if to == nil || *to == "" {
-		return // no persisted email on file; skip silently, this is expected for many users today
+		return // no address on file - nobody has signed in since capture went live, or they removed it
 	}
 
 	html := fmt.Sprintf(`<p>%s</p>`, body)

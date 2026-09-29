@@ -11,6 +11,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/useremail"
 )
 
 type AuthHandler struct {
@@ -349,6 +350,12 @@ func (h *AuthHandler) ResyncGitHubProfile() fiber.Handler {
 		if err != nil {
 			slog.Warn("failed to fetch GitHub email", "error", err, "user_id", userID)
 			// Continue without email if email fetch fails
+		} else if _, err := useremail.Capture(c.Context(), h.db.Pool, userID, email); err != nil {
+			// A resync is the other place we learn somebody's address changed
+			// - somebody who changes it on GitHub and hits "resync" should not
+			// have to sign out and back in for our email to follow. Capture
+			// still declines to write for anybody who removed theirs.
+			slog.Warn("resync: could not store the email", "error", err, "user_id", userID)
 		}
 
 		// Update github_accounts table with fresh data
