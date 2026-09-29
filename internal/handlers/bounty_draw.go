@@ -365,6 +365,17 @@ SELECT (verified_at IS NOT NULL), github_app_installation_id
 	})
 }
 
+// GetMaintainerBounties lists the bounties this person may look at.
+//
+// Membership is GitHub's answer, resolved by the agent, not this service's
+// project table. Those are different questions: somebody can plainly maintain
+// a repository without having registered it as a Grainlify project, and the
+// maintainer tab used to filter on registration - so such a repository showed
+// nothing at all.
+func (h *BountyDrawHandler) GetMaintainerBounties(c *fiber.Ctx) error {
+	return h.adminAction(c, "maintainer_bounties", "", nil)
+}
+
 // GetMaintainerBountyView answers what a maintainer may see about one bounty.
 //
 // This service decides WHETHER they maintain the repository. The agent decides
@@ -383,6 +394,10 @@ func (h *BountyDrawHandler) GetMaintainerBountyView(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "repo_required"})
 	}
 
+	// Owning the Grainlify project is sufficient and cheap, so it is checked
+	// first. It is not NECESSARY: the agent decides the same question from
+	// GitHub permission, which is the more honest source and the one that
+	// covers a repository somebody maintains without having registered it.
 	var owns bool
 	if err := h.db.Pool.QueryRow(c.Context(), `
 SELECT EXISTS (
@@ -392,7 +407,26 @@ SELECT EXISTS (
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
 	}
 	if !owns {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not_your_repository"})
+		raw, status, err := h.relayRead(c, "maintainer_bounties", "")
+		if err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable", "agent_url": h.agentURL})
+		}
+		var list struct {
+			Bounties []struct {
+				BountyID string `json:"bountyId"`
+			} `json:"bounties"`
+		}
+		_ = json.Unmarshal(raw, &list)
+		found := false
+		for _, b := range list.Bounties {
+			if b.BountyID == bountyID {
+				found = true
+				break
+			}
+		}
+		if status != fiber.StatusOK || !found {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not_your_repository"})
+		}
 	}
 	return h.adminAction(c, "maintainer_view", bountyID, nil)
 }
