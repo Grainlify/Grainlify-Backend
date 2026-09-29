@@ -189,6 +189,14 @@ var AllTypes = []Type{
 	TypeGrainHackAssigned,
 	TypeGrainHackAssignmentReleased,
 	TypeGrainHackEventEnding,
+	TypeGrainHackAssignmentExpiring,
+
+	TypeBountyDrawWon,
+	TypeBountyAssignmentExpiring,
+	TypeBountyPaid,
+	TypeBountyApplicationReceived,
+	TypeBountyDrawLost,
+	TypeBountyReviewPosted,
 }
 
 func (t Type) Valid() bool {
