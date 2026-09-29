@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -302,5 +303,80 @@ func TestBountyDraw_MaintainerViewNeedsARepo(t *testing.T) {
 	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications", nil), -1)
 	if res.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 without a repo", res.StatusCode)
+	}
+}
+
+// GetBountyRepos must actually read the projects table.
+//
+// It could not. projects.github_app_installation_id is `text` and the struct
+// scanned it into *int64, so every row failed to scan and the handler answered
+// "lookup_failed" to every admin on every load. The Bounty Repositories screen
+// has never listed a single project in production.
+//
+// Nothing caught it because nothing ran this handler against a database: the
+// compiler cannot know a column's type, and the two only meet at runtime. So
+// this test inserts a project and insists the handler returns it.
+func TestBountyDraw_GetBountyReposReadsRealProjectRows(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"repos":[]}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	owner := newUser(t, d)
+	full := "Grainlify/scan-type-probe"
+	if _, err := d.Pool.Exec(ctx, `
+INSERT INTO projects (owner_user_id, github_full_name, status, verified_at, github_app_installation_id)
+VALUES ($1, $2, 'verified', now(), '162850488')`, owner, full); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Pool.Exec(ctx, `DELETE FROM projects WHERE github_full_name = $1`, full)
+	})
+
+	// The handler relays a signed read to the agent, and signing needs the
+	// caller's linked GitHub identity, so the admin is a real row here.
+	admin := newUser(t, d)
+	linkGitHub(t, d, admin, "Maintainer")
+
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Get("/admin/bounty-repos", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, admin.String())
+		return c.Next()
+	}, h.GetBountyRepos)
+
+	res, err := app.Test(httptest.NewRequest("GET", "/admin/bounty-repos", nil), -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if res.StatusCode != 200 {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200: %s", res.StatusCode, b)
+	}
+	var out struct {
+		Projects []struct {
+			FullName   string `json:"full_name"`
+			Verified   bool   `json:"verified"`
+			Registered bool   `json:"registered_project"`
+		} `json:"projects"`
+	}
+	b, _ := io.ReadAll(res.Body)
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, b)
+	}
+	var found bool
+	for _, p := range out.Projects {
+		if p.FullName == full {
+			found = true
+			if !p.Verified || !p.Registered {
+				t.Errorf("%s: verified=%v registered=%v, want both true", full, p.Verified, p.Registered)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the handler returned %d projects and none was %s", len(out.Projects), full)
 	}
 }

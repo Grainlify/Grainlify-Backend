@@ -282,11 +282,19 @@ func (h *BountyDrawHandler) PostRunDraw(c *fiber.Ctx) error {
 // are facts this service owns - the bounty agent has no projects table and is
 // told the answer rather than asked to work it out.
 type eligibleBountyRepo struct {
-	ProjectID  string `json:"project_id"`
-	FullName   string `json:"full_name"`
-	Verified   bool   `json:"verified"`
-	AppRepoID  *int64 `json:"github_app_installation_id"`
-	Registered bool   `json:"registered_project"`
+	ProjectID string `json:"project_id"`
+	FullName  string `json:"full_name"`
+	Verified  bool   `json:"verified"`
+	// A string, because projects.github_app_installation_id is `text`.
+	//
+	// It was declared *int64 here, and every scan of this row failed - pgx
+	// will not put text into an int64 - so GetBountyRepos returned
+	// "lookup_failed" to every admin on every load. The screen has never once
+	// listed a project. Nothing caught it because nothing tested this handler
+	// against a database; the compiler cannot know the column's type, and the
+	// only place the two meet is at runtime.
+	AppRepoID  *string `json:"github_app_installation_id"`
+	Registered bool    `json:"registered_project"`
 }
 
 // GetBountyRepos lists the projects that MAY have bounties, alongside what the
