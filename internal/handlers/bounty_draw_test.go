@@ -380,3 +380,62 @@ VALUES ($1, $2, 'verified', now(), '162850488')`, owner, full); err != nil {
 		t.Errorf("the handler returned %d projects and none was %s", len(out.Projects), full)
 	}
 }
+
+// The POST decides whether a repository is a registered project and tells the
+// agent. It read the same `text` column into an *int64 as the GET did, so the
+// scan failed, `registered` fell to false, and it asserted "not a verified
+// project" about a project that is verified. That is worse than the GET's
+// failure: the GET showed an error, this one succeeded and wrote a wrong
+// answer the payout gate then enforced.
+func TestBountyDraw_PostBountyRepoTellsTheAgentTheProjectIsRegistered(t *testing.T) {
+	var sent map[string]any
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The extra fields travel beside the signed message, not inside it.
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true,"repos":[]}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	owner := newUser(t, d)
+	full := "Grainlify/registered-probe"
+	if _, err := d.Pool.Exec(ctx, `
+INSERT INTO projects (owner_user_id, github_full_name, status, verified_at, github_app_installation_id)
+VALUES ($1, $2, 'verified', now(), '162850488')`, owner, full); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	t.Cleanup(func() { _, _ = d.Pool.Exec(ctx, `DELETE FROM projects WHERE github_full_name = $1`, full) })
+
+	admin := newUser(t, d)
+	linkGitHub(t, d, admin, "Admin")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Post("/admin/bounty-repos", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, admin.String())
+		return c.Next()
+	}, h.PostBountyRepo)
+
+	body := `{"full_name":"Grainlify/registered-probe","enabled":true}`
+	req := httptest.NewRequest("POST", "/admin/bounty-repos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if res.StatusCode != 200 {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d: %s", res.StatusCode, b)
+	}
+
+	// This is the judgement the agent records. Without it, registered_project
+	// is written false and the payout gate refuses a repository the admin has
+	// just switched on, with the screen showing it as on.
+	if sent["registeredProject"] != true {
+		t.Errorf("the agent was told registeredProject=%v, want true; whole body: %v", sent["registeredProject"], sent)
+	}
+	if sent["enabled"] != true {
+		t.Errorf("the agent was told enabled=%v, want true", sent["enabled"])
+	}
+}

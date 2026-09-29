@@ -359,13 +359,26 @@ func (h *BountyDrawHandler) PostBountyRepo(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "full_name_required"})
 	}
 
+	// A string, because projects.github_app_installation_id is `text`. This
+	// was *int64, and the failure was silent and worse than the one on the GET:
+	// the scan failed, `registered` fell to false, and we sent "not a verified
+	// project" for a project that is verified. The agent recorded it, and the
+	// payout gate then refused a repository an admin had just switched on -
+	// with the screen showing it as on. The same column and the same mistake
+	// twice, one handler apart.
 	var verified bool
-	var installation *int64
+	var installation *string
 	err := h.db.Pool.QueryRow(c.Context(), `
 SELECT (verified_at IS NOT NULL), github_app_installation_id
   FROM projects WHERE lower(github_full_name) = lower($1) AND deleted_at IS NULL
  LIMIT 1`, in.FullName).Scan(&verified, &installation)
-	registered := err == nil && verified && installation != nil
+	if err != nil {
+		// Distinguishable in the log, because "no such project" and "the query
+		// broke" both arrive here as registered=false and only one of them is
+		// somebody's mistake.
+		slog.Warn("bounty repos: could not read the project", "full_name", in.FullName, "error", err)
+	}
+	registered := err == nil && verified && installation != nil && *installation != ""
 
 	return h.adminAction(c, "set_repo_bounties", in.FullName, map[string]any{
 		"enabled":           in.Enabled,
