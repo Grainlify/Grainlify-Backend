@@ -1,0 +1,19 @@
+-- Re-issues 000090, which never ran anywhere that already had a database.
+--
+-- golang-migrate applies only versions ABOVE the one recorded in
+-- schema_migrations. This repository's numbering moved from a 0000xx series to
+-- timestamps, and production sits at 20260917120000 - so 000090 is far below
+-- the current version and was skipped in silence. Nothing failed at deploy
+-- time. The failure arrived a minute later and once a minute after that:
+--
+--   level=WARN msg="hackathon: expiry warning sweep"
+--     error="hackathon.WarnExpiring: ERROR: column a.expiry_warned_at does not exist"
+--
+-- A fresh database (the regression suite recreates one every run) applies the
+-- whole series in order, so 000090 ran there and the suite was green while
+-- production was broken. That gap is the reason this file exists rather than
+-- an edit to 000090: editing it would fix nothing, because its version is
+-- already behind.
+--
+-- IF NOT EXISTS, so the databases where 000090 did run are untouched.
+ALTER TABLE hackathon_assignments ADD COLUMN IF NOT EXISTS expiry_warned_at TIMESTAMPTZ;
