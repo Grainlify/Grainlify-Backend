@@ -151,6 +151,56 @@ type ReleasedAssignment struct {
 // an admin lengthening stale_assignment_days mid-event never retroactively
 // rescues an assignment that already expired, and shortening it never
 // retroactively kills one that was fine when it was made.
+// ExpiringAssignment is an active assignment close enough to its deadline that
+// the holder should be told before it is too late to act.
+type ExpiringAssignment struct {
+	ReleasedAssignment
+	HoursLeft int
+}
+
+// WarnExpiring finds assignments about to lapse, and marks them warned in the
+// same statement that selects them.
+//
+// Deliberately in this file, beside ReleaseStale, reading the same stale_at
+// with the same clock. A warning computed anywhere else could disagree with
+// the release - and "24 hours left" about something released an hour ago is
+// worse than saying nothing.
+//
+// expiry_warned_at is set as part of the UPDATE that returns the rows, so the
+// runner ticking every few minutes for a day warns once rather than hundreds
+// of times. That is the same idempotency the bounty side gets from a unique
+// dedupe key; here the row itself carries it.
+func WarnExpiring(ctx context.Context, pool db.DBPool, within time.Duration) ([]ExpiringAssignment, error) {
+	rows, err := pool.Query(ctx, `
+UPDATE hackathon_assignments a
+SET expiry_warned_at = now(), updated_at = now()
+FROM hackathons h
+WHERE h.id = a.hackathon_id
+  AND h.phase = 'live'
+  AND a.status = 'active'
+  AND a.expiry_warned_at IS NULL
+  AND a.stale_at IS NOT NULL
+  AND a.stale_at > now()
+  AND a.stale_at <= now() + $1::interval
+RETURNING a.id, a.hackathon_id, a.hackathon_issue_id, a.project_id, a.issue_number, a.user_id, a.github_login,
+          GREATEST(1, CEIL(EXTRACT(EPOCH FROM (a.stale_at - now())) / 3600))::int
+`, fmt.Sprintf("%d hours", int(within.Hours())))
+	if err != nil {
+		return nil, fmt.Errorf("hackathon.WarnExpiring: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ExpiringAssignment
+	for rows.Next() {
+		var e ExpiringAssignment
+		if err := rows.Scan(&e.AssignmentID, &e.HackathonID, &e.IssueID, &e.ProjectID, &e.IssueNumber, &e.UserID, &e.GitHubLogin, &e.HoursLeft); err != nil {
+			return nil, fmt.Errorf("hackathon.WarnExpiring scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func ReleaseStale(ctx context.Context, pool db.DBPool) ([]ReleasedAssignment, error) {
 	rows, err := pool.Query(ctx, `
 UPDATE hackathon_assignments a

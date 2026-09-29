@@ -177,6 +177,11 @@ type Config struct {
 	BountyLinkSigningKey string
 	// Where the bounty agent lives, for server-to-server reads.
 	BountyAgentURL string
+	// Shared with the bounty agent, which signs the events it sends us. Unset
+	// means the endpoint refuses everything, which is the safe direction: a
+	// missing secret must not become an open endpoint that anybody can use to
+	// send notifications to our users.
+	BountyEventsSecret string
 }
 
 func Load() Config {
@@ -254,6 +259,7 @@ func Load() Config {
 
 		BountyLinkSigningKey: getEnv("BOUNTY_LINK_SIGNING_KEY", ""),
 		BountyAgentURL:       getEnv("BOUNTY_AGENT_URL", "https://agent.grainlify.com"),
+		BountyEventsSecret:   getEnv("BOUNTY_EVENTS_SECRET", ""),
 	}
 }
 

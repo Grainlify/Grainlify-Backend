@@ -262,6 +262,23 @@ func (r *AssignmentRunner) onAssigned(ctx context.Context, d dueIssue, res *Draw
 }
 
 func (r *AssignmentRunner) releaseStale(ctx context.Context) error {
+	// Warn first, release second, in that order and from the same tick. The
+	// other way round, somebody could be released and warned in the same
+	// sweep - told they have a day left about a thing they had just lost.
+	warned, err := WarnExpiring(ctx, r.pool, 24*time.Hour)
+	if err != nil {
+		slog.Warn("hackathon: expiry warning sweep", "error", err)
+	}
+	for _, w := range warned {
+		if r.notifier != nil {
+			r.notifier.Notify(ctx, w.UserID, notifications.TypeGrainHackAssignmentExpiring,
+				fmt.Sprintf("Your GrainHack assignment expires in %d hours", w.HoursLeft),
+				fmt.Sprintf("Issue #%d has no qualifying pull request yet. If the deadline passes it goes back into the pool and counts as an abandon, which lowers your odds on future draws.", w.IssueNumber),
+				notifications.NoLink,
+			)
+		}
+	}
+
 	released, err := ReleaseStale(ctx, r.pool)
 	if err != nil {
 		return err

@@ -120,6 +120,49 @@ const (
 	// assignment that the event ends soon - sent *before* ends_at, per
 	// AI-specs.md §13's second open question.
 	TypeGrainHackEventEnding Type = "grainhack_event_ending"
+	// ---------------------------------------------------------------- bounties
+	//
+	// A contributor who wins the draw had no way of finding out. Nothing told
+	// them: not in-app, not by email. With the stale sweeper live, somebody
+	// could win a bounty, never be told, miss the deadline, lose it AND take
+	// an abandon penalty that lowers their odds next time - entirely for want
+	// of a message.
+	//
+	// Published by the bounty agent, which knows the facts, and delivered
+	// here, which owns notifications and preferences
+	// (internal/handlers/bounty_events.go).
+
+	// TypeBountyDrawWon is the one that had to exist. It carries the amount,
+	// the repository and issue, what to do next, and the deadline, because a
+	// notification saying only "you won" sends somebody hunting for the thing
+	// they are now on the clock for.
+	TypeBountyDrawWon Type = "bounty_draw_won"
+	// TypeBountyAssignmentExpiring warns before an assignment lapses, and says
+	// plainly that letting it lapse counts as an abandon - a consequence
+	// somebody would reasonably want to avoid and cannot avoid unless told.
+	TypeBountyAssignmentExpiring Type = "bounty_assignment_expiring"
+	// TypeBountyPaid confirms a payment with its explorer link. Money arriving
+	// in a wallet with no message is indistinguishable from money arriving
+	// from anywhere else.
+	TypeBountyPaid Type = "bounty_paid"
+	// TypeBountyApplicationReceived confirms an application was recorded.
+	// In-app only: a receipt, not news. Same reasoning as
+	// TypeIssueApplicationReceived - the first message somebody gets about
+	// their own application should not be its refusal.
+	TypeBountyApplicationReceived Type = "bounty_application_received"
+	// TypeBountyDrawLost tells the people who did not win. In-app only.
+	// Silence after applying is indistinguishable from being ignored, and the
+	// draw is the one thing here that must not look arbitrary.
+	TypeBountyDrawLost Type = "bounty_draw_lost"
+	// TypeBountyReviewPosted tells a pull request author the agent's advisory
+	// review is up. In-app only; GitHub has already emailed them.
+	// TypeGrainHackAssignmentExpiring warns before a GrainHack assignment
+	// lapses. The release notification already existed and says it counts as
+	// an abandon - but it arrives after the fact, when nothing can be done
+	// about it. Being told only once it is too late is the same harm the
+	// bounty side had, in a milder form.
+	TypeGrainHackAssignmentExpiring Type = "grainhack_assignment_expiring"
+	TypeBountyReviewPosted          Type = "bounty_review_posted"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in

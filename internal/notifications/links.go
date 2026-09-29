@@ -143,3 +143,19 @@ func MyApplicationsLink() Link {
 func IssueLink(projectID string, githubIssueID int64) Link {
 	return Link{fmt.Sprintf("%s?tab=browse&project=%s&issue=%d", DashboardPath, url.QueryEscape(projectID), githubIssueID)}
 }
+
+// BountiesLink points at the bounties list, where every bounty a contributor
+// has applied to shows its own state - applied, drawn, assigned, paid.
+//
+// Deliberately not a link to the GitHub issue. A contributor who has just been
+// told they won needs the deadline and what to do next, and those are here;
+// the issue is one click further on and is linked from the row.
+func BountiesLink() Link {
+	return Link{DashboardPath + "?tab=bounties"}
+}
+
+// BountyRulesLink is the published rules page, for notifications that state a
+// consequence somebody may want to check - an abandon, most of all.
+func BountyRulesLink() Link {
+	return Link{"/bounties/rules"}
+}

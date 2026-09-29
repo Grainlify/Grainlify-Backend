@@ -257,6 +257,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	// A maintainer looking at their own repository's bounty. They can see; the
 	// draw assigns. There is deliberately no counterpart POST.
+	// The bounty agent telling us what happened, so we can tell the person it
+	// happened to. Authenticated by HMAC over the body, not by a session.
+	bountyEvents := handlers.NewBountyEventsHandler(deps.DB, notifSvc, cfg.BountyEventsSecret)
+	app.Post("/internal/bounty-events", bountyEvents.Receive)
+
 	app.Get("/maintainer/bounties", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBounties)
 	app.Get("/maintainer/bounties/:bountyId/applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBountyView)
 
