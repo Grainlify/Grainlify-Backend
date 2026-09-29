@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -141,5 +142,139 @@ func TestBountyEvents_WonBodyCarriesTheDeadlineAndTheConsequence(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"kind": "bounty_draw_won", "githubUserId": 1, "payload": payload})
 	if code := post(t, app, string(raw), signed(string(raw))); code != 200 {
 		t.Fatalf("status = %d, want 200", code)
+	}
+}
+
+// One test per kind, asserting what the person actually ends up reading.
+//
+// The tests above check the channel - signature, unknown kinds, unknown
+// recipients - and none of them check the message. A kind could map to an
+// empty body, or to the wrong notification type (and so be governed by the
+// wrong preference switch, and land under the wrong heading), and every test
+// here would still pass. These read the row back out.
+func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
+	base := map[string]any{
+		"repo": "Grainlify/grainlify-agent-sandbox", "issue_number": float64(5),
+		"amount_minor": "25000000", "currency": "USDC",
+	}
+	with := func(extra map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+
+	cases := []struct {
+		kind     string
+		wantType notifications.Type
+		payload  map[string]any
+		// Fragments the body must contain. Not the whole string: wording is
+		// allowed to improve, but the facts somebody needs are not optional.
+		wantIn   []string
+		wantLink notifications.Link
+	}{
+		{
+			kind: "bounty_draw_won", wantType: notifications.TypeBountyDrawWon,
+			payload: with(map[string]any{"staleAt": "2026-10-09T04:21:42Z"}),
+			// The amount, where, what to do, by when, and what happens if not.
+			wantIn:   []string{"25 USDC", "Grainlify/grainlify-agent-sandbox #5", "Closes #5", "2026-10-09T04:21:42Z", "abandon"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_assignment_expiring", wantType: notifications.TypeBountyAssignmentExpiring,
+			payload: with(map[string]any{"hoursLeft": float64(24)}),
+			// Says plainly that letting it lapse counts as an abandon.
+			wantIn:   []string{"25 USDC", "Grainlify/grainlify-agent-sandbox #5", "abandon"},
+			wantLink: notifications.BountyRulesLink(),
+		},
+		{
+			kind: "bounty_paid", wantType: notifications.TypeBountyPaid,
+			payload:  with(map[string]any{"txUrl": "https://solscan.io/tx/abc"}),
+			wantIn:   []string{"25 USDC", "https://solscan.io/tx/abc"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_application_received", wantType: notifications.TypeBountyApplicationReceived,
+			payload:  with(map[string]any{"closesAt": "2026-10-01T12:00:00Z"}),
+			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "2026-10-01T12:00:00Z", "draw"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_draw_lost", wantType: notifications.TypeBountyDrawLost,
+			payload: base,
+			// Says the loss costs them nothing, because silence after a draw
+			// reads as being penalised for applying.
+			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "unaffected"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_review_posted", wantType: notifications.TypeBountyReviewPosted,
+			payload: base,
+			// Says the review does not decide anything, so nobody reads an
+			// advisory review as a rejection.
+			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "maintainer"},
+			wantLink: notifications.BountiesLink(),
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			d := dbtest.DB(t)
+			uid := newUser(t, d)
+			ghID := linkGitHub(t, d, uid, "applicant")
+			h := NewBountyEventsHandler(d, notifications.New(d, nil, "https://grainlify.com"), eventsSecret)
+			app := fiber.New()
+			app.Post("/internal/bounty-events", h.Receive)
+
+			raw, _ := json.Marshal(map[string]any{"kind": c.kind, "githubUserId": ghID, "payload": c.payload})
+			if code := post(t, app, string(raw), signed(string(raw))); code != 200 {
+				t.Fatalf("status = %d, want 200", code)
+			}
+
+			var gotType, title, body, link string
+			if err := d.Pool.QueryRow(context.Background(), `
+SELECT type, title, body, link_path FROM notifications WHERE user_id = $1
+`, uid).Scan(&gotType, &title, &body, &link); err != nil {
+				t.Fatalf("no notification stored for %s: %v", c.kind, err)
+			}
+
+			if gotType != string(c.wantType) {
+				t.Errorf("type = %q, want %q - a wrong type means the wrong preference switch governs it", gotType, c.wantType)
+			}
+			if strings.TrimSpace(title) == "" {
+				t.Error("title is empty")
+			}
+			for _, fragment := range c.wantIn {
+				if !strings.Contains(body, fragment) {
+					t.Errorf("body is missing %q:\n%s", fragment, body)
+				}
+			}
+			if link != c.wantLink.String() {
+				t.Errorf("link_path = %q, want %q", link, c.wantLink)
+			}
+		})
+	}
+}
+
+// Every bounty type must be one the preferences screen can switch off. The
+// notifications package has its own test for this over all types; this one
+// names the six that arrive through this handler, so a kind added here
+// without a preference fails in the file that added it.
+func TestBountyEvents_EveryKindIsSwitchable(t *testing.T) {
+	for _, ty := range []notifications.Type{
+		notifications.TypeBountyDrawWon,
+		notifications.TypeBountyAssignmentExpiring,
+		notifications.TypeBountyPaid,
+		notifications.TypeBountyApplicationReceived,
+		notifications.TypeBountyDrawLost,
+		notifications.TypeBountyReviewPosted,
+	} {
+		if !ty.Valid() {
+			t.Errorf("%q is not in notifications.AllTypes, so nobody can turn it off", ty)
+		}
 	}
 }
