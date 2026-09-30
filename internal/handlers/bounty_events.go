@@ -178,12 +178,21 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 		// question somebody actually has. Then, plainly, that this is not held
 		// against them - "unassigned" reads as a judgement unless it says
 		// otherwise, and here it is not one.
-		body = fmt.Sprintf(
-			"%s ended your assignment on the %s bounty for %s. They gave this reason: %q\n\n"+
-				"Nothing is counted against you. No abandon is recorded, your odds in future draws are unchanged, "+
-				"and your application is back in the pool. The very next draw on this bounty skips you, so you are not "+
-				"unassigned and reassigned in the same minute; after that you are eligible again, this bounty included.",
-			who, amount, place, reason)
+		if closed, _ := e.Payload["closed"].(bool); closed {
+			// The bounty was closed with the assignment, so the second
+			// paragraph below would be untrue: there is no pool to go back
+			// to and no next draw. The reason given carries the rest.
+			body = fmt.Sprintf(
+				"%s ended your assignment on the %s bounty for %s. They gave this reason: %q",
+				who, amount, place, reason)
+		} else {
+			body = fmt.Sprintf(
+				"%s ended your assignment on the %s bounty for %s. They gave this reason: %q\n\n"+
+					"Nothing is counted against you. No abandon is recorded, your odds in future draws are unchanged, "+
+					"and your application is back in the pool. The very next draw on this bounty skips you, so you are not "+
+					"unassigned and reassigned in the same minute; after that you are eligible again, this bounty included.",
+				who, amount, place, reason)
+		}
 		link = notifications.BountiesLink()
 	case "bounty_deadline_changed":
 		t = notifications.TypeBountyDeadlineChanged

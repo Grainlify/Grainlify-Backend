@@ -174,7 +174,9 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 		payload  map[string]any
 		// Fragments the body must contain. Not the whole string: wording is
 		// allowed to improve, but the facts somebody needs are not optional.
-		wantIn   []string
+		wantIn []string
+		// Phrases that must not appear - for a message that would be untrue with them.
+		wantOut  []string
 		wantLink notifications.Link
 	}{
 		{
@@ -217,6 +219,17 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 			// The reason, and the two things that stop this reading as a
 			// judgement: nothing counted against them, and they are back in.
 			wantIn:   []string{"25 USDC", "We changed the plan on our side.", "Nothing is counted against you", "back in the pool"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_unassigned", wantType: notifications.TypeBountyUnassigned,
+			payload: with(map[string]any{
+				"reason": "We're closing this round and reopening it with new issues.", "actor": "Jagadeeshftw", "closed": true,
+			}),
+			// Closed with the bounty: the reason, and nothing about a pool or a
+			// next draw, which no longer exist.
+			wantIn:   []string{"25 USDC", "We're closing this round and reopening it with new issues."},
+			wantOut:  []string{"back in the pool", "next draw"},
 			wantLink: notifications.BountiesLink(),
 		},
 		{
@@ -272,6 +285,11 @@ SELECT type, title, body, link_path FROM notifications WHERE user_id = $1
 			for _, fragment := range c.wantIn {
 				if !strings.Contains(body, fragment) {
 					t.Errorf("body is missing %q:\n%s", fragment, body)
+				}
+			}
+			for _, fragment := range c.wantOut {
+				if strings.Contains(body, fragment) {
+					t.Errorf("body must not say %q:\n%s", fragment, body)
 				}
 			}
 			if link != c.wantLink.String() {
