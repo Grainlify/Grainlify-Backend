@@ -162,6 +162,17 @@ const (
 	// about it. Being told only once it is too late is the same harm the
 	// bounty side had, in a milder form.
 	TypeGrainHackAssignmentExpiring Type = "grainhack_assignment_expiring"
+	// TypeBountyUnassigned fires when a maintainer or admin ends somebody's
+	// assignment by choice. It carries their reason, because "you have been
+	// unassigned" with no explanation reads as a judgement on the person, and
+	// this is explicitly not one: no abandon is recorded and their odds are
+	// untouched. The message has to say both.
+	TypeBountyUnassigned Type = "bounty_unassigned"
+	// TypeBountyDeadlineChanged fires when the deadline on a live assignment
+	// moves. Somebody working to a date must be told it changed, whichever way
+	// it moved - a deadline that shifted silently is the thing we tell
+	// everybody else we do not do.
+	TypeBountyDeadlineChanged       Type = "bounty_deadline_changed"
 	TypeBountyReviewPosted          Type = "bounty_review_posted"
 )
 
@@ -197,6 +208,8 @@ var AllTypes = []Type{
 	TypeBountyApplicationReceived,
 	TypeBountyDrawLost,
 	TypeBountyReviewPosted,
+	TypeBountyUnassigned,
+	TypeBountyDeadlineChanged,
 }
 
 func (t Type) Valid() bool {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -77,6 +78,26 @@ func money(payload map[string]any) string {
 	return fmt.Sprintf("%s.%s %s", whole, frac, currency)
 }
 
+// when renders a timestamp the way a person reads one.
+//
+// Every date a contributor sees uses this. Two formats for the same instant -
+// an ISO string in one message and a written date in the next - makes somebody
+// check whether they are even the same deadline, which is a cost paid by the
+// person least able to afford the doubt.
+func when(payload map[string]any, key string) string {
+	raw, _ := payload[key].(string)
+	if raw == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		// Unparseable is worth showing as-is rather than dropping: a wrong-
+		// looking date is a bug report, a missing one is silence.
+		return raw
+	}
+	return t.UTC().Format("2 January 2006 at 15:04 UTC")
+}
+
 func where(payload map[string]any) string {
 	repo, _ := payload["repo"].(string)
 	issue, ok := payload["issue_number"].(float64)
@@ -116,7 +137,7 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 	case "bounty_draw_won":
 		t = notifications.TypeBountyDrawWon
 		title = "You won the draw"
-		deadline, _ := e.Payload["staleAt"].(string)
+		deadline := when(e.Payload, "staleAt")
 		body = fmt.Sprintf(
 			"The %s bounty on %s is yours. Open a pull request that says \"Closes #%v\" before %s. "+
 				"If nothing arrives by then the bounty is drawn again and it counts as an abandon, which lowers your odds next time.",
@@ -138,12 +159,49 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 	case "bounty_application_received":
 		t = notifications.TypeBountyApplicationReceived
 		title = "Application received"
-		closes, _ := e.Payload["closesAt"].(string)
+		closes := when(e.Payload, "closesAt")
 		body = fmt.Sprintf("You are in the draw for the bounty on %s. Applications close %s, and the draw runs after that.", place, closes)
 	case "bounty_draw_lost":
 		t = notifications.TypeBountyDrawLost
 		title = "The draw went to someone else"
 		body = fmt.Sprintf("The bounty on %s was drawn and went to another applicant. Applying again costs you nothing and your odds are unaffected.", place)
+	case "bounty_unassigned":
+		t = notifications.TypeBountyUnassigned
+		title = "Your bounty assignment has ended"
+		reason, _ := e.Payload["reason"].(string)
+		actor, _ := e.Payload["actor"].(string)
+		who := actor
+		if who == "" {
+			who = "A maintainer"
+		}
+		// The reason comes first because it is the only part that answers the
+		// question somebody actually has. Then, plainly, that this is not held
+		// against them - "unassigned" reads as a judgement unless it says
+		// otherwise, and here it is not one.
+		body = fmt.Sprintf(
+			"%s ended your assignment on the %s bounty for %s. They gave this reason: %q\n\n"+
+				"Nothing is counted against you. No abandon is recorded, your odds in future draws are unchanged, "+
+				"and your application is back in the pool. The very next draw on this bounty skips you, so you are not "+
+				"unassigned and reassigned in the same minute; after that you are eligible again, this bounty included.",
+			who, amount, place, reason)
+		link = notifications.BountiesLink()
+	case "bounty_deadline_changed":
+		t = notifications.TypeBountyDeadlineChanged
+		title = "The deadline on your bounty has moved"
+		reason, _ := e.Payload["reason"].(string)
+		actor, _ := e.Payload["actor"].(string)
+		previous := when(e.Payload, "previousAt")
+		nowAt := when(e.Payload, "staleAt")
+		who := actor
+		if who == "" {
+			who = "A maintainer"
+		}
+		body = fmt.Sprintf(
+			"%s changed the deadline for opening a pull request on the %s bounty for %s. "+
+				"It was %s and it is now %s. They gave this reason: %q\n\n"+
+				"If no pull request arrives by the new deadline the bounty is drawn again, and that does count as an abandon.",
+			who, amount, place, previous, nowAt, reason)
+		link = notifications.BountiesLink()
 	case "bounty_review_posted":
 		t = notifications.TypeBountyReviewPosted
 		title = "The agent reviewed your pull request"

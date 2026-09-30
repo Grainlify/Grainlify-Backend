@@ -181,7 +181,7 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 			kind: "bounty_draw_won", wantType: notifications.TypeBountyDrawWon,
 			payload: with(map[string]any{"staleAt": "2026-10-09T04:21:42Z"}),
 			// The amount, where, what to do, by when, and what happens if not.
-			wantIn:   []string{"25 USDC", "Grainlify/grainlify-agent-sandbox #5", "Closes #5", "2026-10-09T04:21:42Z", "abandon"},
+			wantIn:   []string{"25 USDC", "Grainlify/grainlify-agent-sandbox #5", "Closes #5", "9 October 2026 at 04:21 UTC", "abandon"},
 			wantLink: notifications.BountiesLink(),
 		},
 		{
@@ -200,7 +200,7 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 		{
 			kind: "bounty_application_received", wantType: notifications.TypeBountyApplicationReceived,
 			payload:  with(map[string]any{"closesAt": "2026-10-01T12:00:00Z"}),
-			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "2026-10-01T12:00:00Z", "draw"},
+			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "1 October 2026 at 12:00 UTC", "draw"},
 			wantLink: notifications.BountiesLink(),
 		},
 		{
@@ -209,6 +209,27 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 			// Says the loss costs them nothing, because silence after a draw
 			// reads as being penalised for applying.
 			wantIn:   []string{"Grainlify/grainlify-agent-sandbox #5", "unaffected"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_unassigned", wantType: notifications.TypeBountyUnassigned,
+			payload: with(map[string]any{"reason": "We changed the plan on our side.", "actor": "Jagadeeshftw"}),
+			// The reason, and the two things that stop this reading as a
+			// judgement: nothing counted against them, and they are back in.
+			wantIn:   []string{"25 USDC", "We changed the plan on our side.", "Nothing is counted against you", "back in the pool"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_deadline_changed", wantType: notifications.TypeBountyDeadlineChanged,
+			payload: with(map[string]any{
+				"reason": "You asked for more time.", "actor": "Jagadeeshftw",
+				"previousAt": "2026-10-03T01:17:12Z", "staleAt": "2026-10-06T01:17:12Z",
+			}),
+			// Both dates, so somebody can see what changed rather than being
+			// told only the new one.
+			// Written dates, not ISO: the same format everywhere a contributor
+			// sees one, so two messages about one deadline cannot look like two.
+			wantIn:   []string{"3 October 2026 at 01:17 UTC", "6 October 2026 at 01:17 UTC", "You asked for more time."},
 			wantLink: notifications.BountiesLink(),
 		},
 		{
@@ -272,6 +293,8 @@ func TestBountyEvents_EveryKindIsSwitchable(t *testing.T) {
 		notifications.TypeBountyApplicationReceived,
 		notifications.TypeBountyDrawLost,
 		notifications.TypeBountyReviewPosted,
+		notifications.TypeBountyUnassigned,
+		notifications.TypeBountyDeadlineChanged,
 	} {
 		if !ty.Valid() {
 			t.Errorf("%q is not in notifications.AllTypes, so nobody can turn it off", ty)
