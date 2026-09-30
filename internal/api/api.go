@@ -275,6 +275,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Maintainer-funded bounties. The agent refuses every one of these while
 	// its own switch is off, so these routes exist but lead nowhere until it
 	// is turned on - the feature is unreachable rather than merely unrendered.
+	// The same two controls a maintainer needs on a bounty they fund. The agent
+	// decides whether this caller may act on this bounty; this service decides
+	// only that they are signed in.
+	app.Post("/maintainer/bounties/:bountyId/unassign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostUnassign)
+	app.Post("/maintainer/bounties/:bountyId/deadline", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostAssignmentDeadline)
+	app.Post("/maintainer/bounties/:bountyId/run", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostRunDraw)
+
 	app.Get("/bounties/escrow/quote", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrowQuote)
 	app.Get("/bounties/:bountyId/escrow", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrow)
 	app.Post("/bounties/:bountyId/escrow/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostEscrowConfirm)
@@ -562,6 +569,8 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/bounty-draw/settings/reset", requireAdmin, bountyDraw.PostSettingReset)
 	adminGroup.Get("/bounty-draw/:bountyId/state", requireAdmin, bountyDraw.GetBountyState)
 	adminGroup.Post("/bounty-draw/:bountyId/run", requireAdmin, bountyDraw.PostRunDraw)
+	adminGroup.Post("/bounty-draw/:bountyId/unassign", requireAdmin, bountyDraw.PostUnassign)
+	adminGroup.Post("/bounty-draw/:bountyId/deadline", requireAdmin, bountyDraw.PostAssignmentDeadline)
 
 	// Which repositories may have bounties. Operational, so it lives on the
 	// admin screen with an audit trail rather than in a deployment variable.

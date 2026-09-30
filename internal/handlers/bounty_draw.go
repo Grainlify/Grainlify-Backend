@@ -269,10 +269,56 @@ func (h *BountyDrawHandler) GetBountyState(c *fiber.Ctx) error {
 func (h *BountyDrawHandler) PostRunDraw(c *fiber.Ctx) error {
 	var in struct {
 		Simulate bool `json:"simulate"`
+		// Hours until the pull-request deadline. Absent means the global
+		// setting, which is what a draw did before this existed.
+		StaleHours int `json:"stale_hours"`
 	}
 	// A body is optional here: no body means a real draw.
 	_ = c.BodyParser(&in)
-	return h.adminAction(c, "run_draw", c.Params("bountyId"), map[string]any{"simulate": in.Simulate})
+	extra := map[string]any{"simulate": in.Simulate}
+	if in.StaleHours > 0 {
+		extra["staleHours"] = in.StaleHours
+	}
+	return h.adminAction(c, "run_draw", c.Params("bountyId"), extra)
+}
+
+// PostUnassign ends an assignment because somebody decided to.
+//
+// The reason is required here as well as in the agent, because a caller that
+// forgot it should be told so by the service it called rather than by a relay
+// three hops away.
+func (h *BountyDrawHandler) PostUnassign(c *fiber.Ctx) error {
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.BodyParser(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
+	}
+	if strings.TrimSpace(in.Reason) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "reason_required",
+			"detail": "the contributor is shown this reason, so it cannot be blank"})
+	}
+	return h.adminAction(c, "unassign", c.Params("bountyId"), map[string]any{"reason": in.Reason})
+}
+
+// PostAssignmentDeadline moves the pull-request deadline on a live assignment.
+func (h *BountyDrawHandler) PostAssignmentDeadline(c *fiber.Ctx) error {
+	var in struct {
+		Deadline string `json:"deadline"`
+		Reason   string `json:"reason"`
+	}
+	if err := c.BodyParser(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
+	}
+	if strings.TrimSpace(in.Deadline) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "deadline_required"})
+	}
+	if strings.TrimSpace(in.Reason) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "reason_required",
+			"detail": "the contributor is told why their deadline moved, so it cannot be blank"})
+	}
+	return h.adminAction(c, "set_assignment_deadline", c.Params("bountyId"),
+		map[string]any{"deadline": in.Deadline, "reason": in.Reason})
 }
 
 // ---------------------------------------------------------------- bounty repos

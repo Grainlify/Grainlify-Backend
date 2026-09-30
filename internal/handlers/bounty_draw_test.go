@@ -558,3 +558,88 @@ func TestBountyDraw_EscrowConfirmNeedsASignature(t *testing.T) {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}
 }
+
+// The reason reaches the contributor, so a blank one is refused here rather
+// than three hops away in the agent.
+func TestBountyDraw_UnassignRequiresAReason(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Maintainer")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Post("/x/:bountyId/unassign", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uid.String())
+		return c.Next()
+	}, h.PostUnassign)
+
+	for _, body := range []string{`{}`, `{"reason":"   "}`} {
+		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/unassign", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		res, _ := app.Test(r, -1)
+		if res.StatusCode != 400 {
+			t.Fatalf("body %s: status = %d, want 400", body, res.StatusCode)
+		}
+	}
+}
+
+func TestBountyDraw_DeadlineChangeRequiresBothFields(t *testing.T) {
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Maintainer")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Post("/x/:bountyId/deadline", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uid.String())
+		return c.Next()
+	}, h.PostAssignmentDeadline)
+
+	for _, body := range []string{`{"reason":"more time"}`, `{"deadline":"2026-10-06T01:00:00Z"}`} {
+		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/deadline", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		res, _ := app.Test(r, -1)
+		if res.StatusCode != 400 {
+			t.Fatalf("body %s: status = %d, want 400", body, res.StatusCode)
+		}
+	}
+}
+
+// A draw with no chosen deadline must not send one, or every draw would
+// silently override the global setting with a zero.
+func TestBountyDraw_RunDrawOnlySendsADeadlineWhenOneWasChosen(t *testing.T) {
+	var bodies []map[string]any
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	uid := newUser(t, d)
+	linkGitHub(t, d, uid, "Maintainer")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	app.Post("/x/:bountyId/run", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, uid.String())
+		return c.Next()
+	}, h.PostRunDraw)
+
+	post := func(body string) {
+		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/run", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		if _, err := app.Test(r, -1); err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+	}
+	post(`{}`)
+	post(`{"stale_hours":96}`)
+
+	if _, ok := bodies[0]["staleHours"]; ok {
+		t.Errorf("a draw with no chosen deadline sent one: %v", bodies[0])
+	}
+	if bodies[1]["staleHours"] != float64(96) {
+		t.Errorf("staleHours = %v, want 96", bodies[1]["staleHours"])
+	}
+}
