@@ -439,3 +439,122 @@ VALUES ($1, $2, 'verified', now(), '162850488')`, owner, full); err != nil {
 		t.Errorf("the agent was told enabled=%v, want true", sent["enabled"])
 	}
 }
+
+// The funded-bounty routes relay to the agent and decide nothing about money
+// themselves. What they must get right is which action they name: a signature
+// issued to read a quote must not be able to confirm a funding.
+func TestBountyDraw_EscrowRoutesRelayTheRightAction(t *testing.T) {
+	var seen []string
+	var lastBody map[string]any
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		lastBody = body
+		if msg, ok := body["message"].(string); ok {
+			for _, line := range strings.Split(msg, "\n") {
+				if strings.HasPrefix(line, "Action: ") {
+					seen = append(seen, strings.TrimPrefix(line, "Action: "))
+				}
+			}
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer agent.Close()
+
+	d := dbtest.DB(t)
+	admin := newUser(t, d)
+	linkGitHub(t, d, admin, "Funder")
+	h := NewBountyDrawHandler(d, testSeedB64, agent.URL)
+	app := fiber.New()
+	withUser := func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, admin.String()); return c.Next() }
+	app.Get("/bounties/escrow/quote", withUser, h.GetEscrowQuote)
+	app.Get("/bounties/:bountyId/escrow", withUser, h.GetEscrow)
+	app.Post("/bounties/:bountyId/escrow/confirm", withUser, h.PostEscrowConfirm)
+	app.Get("/admin/escrows", withUser, h.GetEscrows)
+
+	bounty := "b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85"
+	do := func(method, path, body string) int {
+		var r *http.Request
+		if body == "" {
+			r = httptest.NewRequest(method, path, nil)
+		} else {
+			r = httptest.NewRequest(method, path, strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		res, err := app.Test(r, -1)
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		return res.StatusCode
+	}
+
+	if code := do("GET", "/bounties/escrow/quote?amount_minor=50000000", ""); code != 200 {
+		t.Fatalf("quote: status = %d", code)
+	}
+	if lastBody["amountMinor"] != "50000000" {
+		t.Errorf("the agent was sent amountMinor=%v", lastBody["amountMinor"])
+	}
+	if code := do("GET", "/bounties/"+bounty+"/escrow", ""); code != 200 {
+		t.Fatalf("state: status = %d", code)
+	}
+	if code := do("POST", "/bounties/"+bounty+"/escrow/confirm", `{"signature":"5tRe9"}`); code != 200 {
+		t.Fatalf("confirm: status = %d", code)
+	}
+	if lastBody["signature"] != "5tRe9" {
+		t.Errorf("the agent was sent signature=%v", lastBody["signature"])
+	}
+	if code := do("GET", "/admin/escrows", ""); code != 200 {
+		t.Fatalf("list: status = %d", code)
+	}
+
+	want := []string{"escrow_quote", "escrow_state", "escrow_confirm", "escrow_list"}
+	if len(seen) != len(want) {
+		t.Fatalf("actions sent = %v, want %v", seen, want)
+	}
+	for i, a := range want {
+		if seen[i] != a {
+			t.Errorf("action %d = %q, want %q", i, seen[i], a)
+		}
+	}
+}
+
+// A quote with no amount is the caller's mistake and is refused here rather
+// than relayed, so the agent is not asked to interpret an empty string.
+func TestBountyDraw_EscrowQuoteNeedsAnAmount(t *testing.T) {
+	d := dbtest.DB(t)
+	admin := newUser(t, d)
+	linkGitHub(t, d, admin, "Funder")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Get("/bounties/escrow/quote", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, admin.String())
+		return c.Next()
+	}, h.GetEscrowQuote)
+
+	res, _ := app.Test(httptest.NewRequest("GET", "/bounties/escrow/quote", nil), -1)
+	if res.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+}
+
+// Confirming without a signature is refused before anything is relayed: an
+// empty signature is not a claim the agent should have to evaluate.
+func TestBountyDraw_EscrowConfirmNeedsASignature(t *testing.T) {
+	d := dbtest.DB(t)
+	admin := newUser(t, d)
+	linkGitHub(t, d, admin, "Funder")
+	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
+	app := fiber.New()
+	app.Post("/bounties/:bountyId/escrow/confirm", func(c *fiber.Ctx) error {
+		c.Locals(auth.LocalUserID, admin.String())
+		return c.Next()
+	}, h.PostEscrowConfirm)
+
+	r := httptest.NewRequest("POST", "/bounties/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/escrow/confirm", strings.NewReader(`{}`))
+	r.Header.Set("Content-Type", "application/json")
+	res, _ := app.Test(r, -1)
+	if res.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+}

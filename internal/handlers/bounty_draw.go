@@ -486,3 +486,56 @@ func (h *BountyDrawHandler) relayRead(c *fiber.Ctx, action, subject string) ([]b
 	out, _ := io.ReadAll(io.LimitReader(res.Body, 512*1024))
 	return out, res.StatusCode, nil
 }
+
+// --- maintainer-funded bounties -------------------------------------------
+//
+// The money never passes through this service. These relay to the agent, which
+// builds an unsigned transaction for the funder's own wallet to sign; nothing
+// here holds a key or moves funds. What this service decides is who may ask.
+
+// GetEscrowQuote answers what a funder would pay for a given amount.
+//
+// Deliberately a relay rather than arithmetic repeated here: the fee is the
+// number the escrow will charge, and a second implementation of it in a third
+// language is how a screen ends up quoting something the chain does not do.
+func (h *BountyDrawHandler) GetEscrowQuote(c *fiber.Ctx) error {
+	amount := strings.TrimSpace(c.Query("amount_minor"))
+	if amount == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "amount_required"})
+	}
+	return h.adminAction(c, "escrow_quote", "", map[string]any{"amountMinor": amount})
+}
+
+// GetEscrow returns one escrow and its history.
+func (h *BountyDrawHandler) GetEscrow(c *fiber.Ctx) error {
+	bountyID := strings.TrimSpace(c.Params("bountyId"))
+	if bountyID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bounty_required"})
+	}
+	return h.adminAction(c, "escrow_state", bountyID, nil)
+}
+
+// PostEscrowConfirm tells the agent a funding transaction was sent.
+//
+// The signature is a claim, not proof: the agent reads the escrow account and
+// compares its terms against what was quoted before it believes any of it. So
+// a caller who reports a funding that did not happen gets a refusal, and this
+// handler does not need to verify anything itself.
+func (h *BountyDrawHandler) PostEscrowConfirm(c *fiber.Ctx) error {
+	bountyID := strings.TrimSpace(c.Params("bountyId"))
+	var in struct {
+		Signature string `json:"signature"`
+	}
+	if err := c.BodyParser(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bad_request"})
+	}
+	if strings.TrimSpace(in.Signature) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "signature_required"})
+	}
+	return h.adminAction(c, "escrow_confirm", bountyID, map[string]any{"signature": in.Signature})
+}
+
+// GetEscrows lists every escrow, for the admin screen.
+func (h *BountyDrawHandler) GetEscrows(c *fiber.Ctx) error {
+	return h.adminAction(c, "escrow_list", "", nil)
+}

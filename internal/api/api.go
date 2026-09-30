@@ -272,6 +272,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/maintainer/bounties", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBounties)
 	app.Get("/maintainer/bounties/:bountyId/applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBountyView)
 
+	// Maintainer-funded bounties. The agent refuses every one of these while
+	// its own switch is off, so these routes exist but lead nowhere until it
+	// is turned on - the feature is unreachable rather than merely unrendered.
+	app.Get("/bounties/escrow/quote", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrowQuote)
+	app.Get("/bounties/:bountyId/escrow", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrow)
+	app.Post("/bounties/:bountyId/escrow/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostEscrowConfirm)
+
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money
 	// and understands why we might need to reach them. PUT with an empty string
@@ -558,6 +565,7 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 
 	// Which repositories may have bounties. Operational, so it lives on the
 	// admin screen with an audit trail rather than in a deployment variable.
+	adminGroup.Get("/escrows", requireAdmin, bountyDraw.GetEscrows)
 	adminGroup.Get("/bounty-repos", requireAdmin, bountyDraw.GetBountyRepos)
 	adminGroup.Post("/bounty-repos", requireAdmin, bountyDraw.PostBountyRepo)
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())
