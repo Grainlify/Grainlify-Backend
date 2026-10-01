@@ -50,6 +50,10 @@ type BountyDrawHandler struct {
 const (
 	bountyApplyDomain = "grainlify-bounty-apply:v1\n"
 	bountyAdminDomain = "grainlify-bounty-admin:v1\n"
+	// Signed for anybody signed in. Whether they may act on a given bounty is
+	// decided by the agent, from GitHub permission on that bounty's own
+	// repository - a maintainer message can never verify as an admin one.
+	bountyMaintainerDomain = "grainlify-bounty-maintainer:v1\n"
 )
 
 const bountyActionTTL = 10 * time.Minute
@@ -73,8 +77,11 @@ func NewBountyDrawHandler(d *db.DB, keyB64, agentURL string) *BountyDrawHandler 
 // with no newline in it, so nothing a caller supplies can add a line.
 func BountyActionMessage(kind, action, login string, githubUserID int64, subject, nonce string, issued, expires time.Time) string {
 	headline := "apply for a bounty"
-	if kind == "admin" {
+	switch kind {
+	case "admin":
 		headline = "admin action"
+	case "maintainer":
+		headline = "maintainer action"
 	}
 	return strings.Join([]string{
 		"Grainlify: " + headline,
@@ -150,6 +157,8 @@ func (h *BountyDrawHandler) call(c *fiber.Ctx, domain, kind, action string, gith
 	switch {
 	case kind == "admin":
 		path = "/admin/draw"
+	case kind == "maintainer":
+		path = "/maintainer/draw"
 	case action == "my_state":
 		path = "/bounties/mine"
 	}
@@ -237,6 +246,26 @@ func (h *BountyDrawHandler) adminAction(c *fiber.Ctx, action, subject string, ex
 	return h.call(c, bountyAdminDomain, "admin", action, id, login, subject, extra)
 }
 
+// maintainerAction relays an action on the maintainer channel. Nothing is
+// decided here beyond who the caller is: the agent checks, per bounty, that
+// they maintain its repository or funded it. These must never go through
+// adminAction - that channel is signed as "admin" and the agent trusts it,
+// which is how any signed-in user once ran admin actions through a
+// /maintainer route (see internal/api TestAdminActionsAreAdminOnly).
+func (h *BountyDrawHandler) maintainerAction(c *fiber.Ctx, action, subject string, extra map[string]any) error {
+	id, login, err := h.githubFor(c)
+	if err != nil {
+		if err.Error() == "unauthenticated" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
+		}
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "github_not_linked", "detail": "link a GitHub account first: maintaining a repository is a GitHub permission"})
+	}
+	return h.call(c, bountyMaintainerDomain, "maintainer", action, id, login, subject, extra)
+}
+
 func (h *BountyDrawHandler) GetSettings(c *fiber.Ctx) error {
 	return h.adminAction(c, "list_settings", "", nil)
 }
@@ -262,11 +291,8 @@ func (h *BountyDrawHandler) PostSettingReset(c *fiber.Ctx) error {
 	return h.adminAction(c, "reset_setting", in.Key, nil)
 }
 
-func (h *BountyDrawHandler) GetBountyState(c *fiber.Ctx) error {
-	return h.adminAction(c, "bounty_state", c.Params("bountyId"), nil)
-}
-
-func (h *BountyDrawHandler) PostRunDraw(c *fiber.Ctx) error {
+// MaintainerRunDraw runs (or simulates) the draw on a bounty the caller maintains.
+func (h *BountyDrawHandler) MaintainerRunDraw(c *fiber.Ctx) error {
 	var in struct {
 		Simulate bool `json:"simulate"`
 		// Hours until the pull-request deadline. Absent means the global
@@ -279,15 +305,15 @@ func (h *BountyDrawHandler) PostRunDraw(c *fiber.Ctx) error {
 	if in.StaleHours > 0 {
 		extra["staleHours"] = in.StaleHours
 	}
-	return h.adminAction(c, "run_draw", c.Params("bountyId"), extra)
+	return h.maintainerAction(c, "run_draw", c.Params("bountyId"), extra)
 }
 
-// PostUnassign ends an assignment because somebody decided to.
+// MaintainerUnassign ends an assignment because somebody decided to.
 //
 // The reason is required here as well as in the agent, because a caller that
 // forgot it should be told so by the service it called rather than by a relay
 // three hops away.
-func (h *BountyDrawHandler) PostUnassign(c *fiber.Ctx) error {
+func (h *BountyDrawHandler) MaintainerUnassign(c *fiber.Ctx) error {
 	var in struct {
 		Reason string `json:"reason"`
 	}
@@ -298,11 +324,11 @@ func (h *BountyDrawHandler) PostUnassign(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "reason_required",
 			"detail": "the contributor is shown this reason, so it cannot be blank"})
 	}
-	return h.adminAction(c, "unassign", c.Params("bountyId"), map[string]any{"reason": in.Reason})
+	return h.maintainerAction(c, "unassign", c.Params("bountyId"), map[string]any{"reason": in.Reason})
 }
 
-// PostAssignmentDeadline moves the pull-request deadline on a live assignment.
-func (h *BountyDrawHandler) PostAssignmentDeadline(c *fiber.Ctx) error {
+// MaintainerDeadline moves the pull-request deadline on a live assignment.
+func (h *BountyDrawHandler) MaintainerDeadline(c *fiber.Ctx) error {
 	var in struct {
 		Deadline string `json:"deadline"`
 		Reason   string `json:"reason"`
@@ -317,7 +343,7 @@ func (h *BountyDrawHandler) PostAssignmentDeadline(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "reason_required",
 			"detail": "the contributor is told why their deadline moved, so it cannot be blank"})
 	}
-	return h.adminAction(c, "set_assignment_deadline", c.Params("bountyId"),
+	return h.maintainerAction(c, "set_assignment_deadline", c.Params("bountyId"),
 		map[string]any{"deadline": in.Deadline, "reason": in.Reason})
 }
 
@@ -440,63 +466,26 @@ SELECT (verified_at IS NOT NULL), github_app_installation_id
 // maintainer tab used to filter on registration - so such a repository showed
 // nothing at all.
 func (h *BountyDrawHandler) GetMaintainerBounties(c *fiber.Ctx) error {
-	return h.adminAction(c, "maintainer_bounties", "", nil)
+	return h.maintainerAction(c, "bounties", "", nil)
 }
 
 // GetMaintainerBountyView answers what a maintainer may see about one bounty.
 //
-// This service decides WHETHER they maintain the repository. The agent decides
-// WHAT they may see, by the clock: a rough count while applications are open,
-// the full list once they close. That split matters - if this service also
-// decided the timing, a bug here would leak the pool, and the pool being
-// unknowable while the window is open is what stops anyone working the draw.
+// The agent decides both questions: WHETHER the caller maintains this
+// bounty's repository (GitHub permission on the bounty's own repo, or having
+// funded it), and WHAT they may see, by the clock. This used to check
+// ownership of whatever repository the query string named, never that the
+// bounty was in it - so any project owner could read any bounty's applicants.
+// The repo query parameter is now ignored.
 func (h *BountyDrawHandler) GetMaintainerBountyView(c *fiber.Ctx) error {
-	uid, ok := userID(c)
-	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
-	}
-	bountyID := c.Params("bountyId")
-	repo := strings.TrimSpace(c.Query("repo"))
-	if repo == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "repo_required"})
-	}
-
-	// Owning the Grainlify project is sufficient and cheap, so it is checked
-	// first. It is not NECESSARY: the agent decides the same question from
-	// GitHub permission, which is the more honest source and the one that
-	// covers a repository somebody maintains without having registered it.
-	var owns bool
-	if err := h.db.Pool.QueryRow(c.Context(), `
-SELECT EXISTS (
-  SELECT 1 FROM projects
-   WHERE lower(github_full_name) = lower($1) AND owner_user_id = $2 AND deleted_at IS NULL
-)`, repo, uid).Scan(&owns); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup_failed"})
-	}
-	if !owns {
-		raw, status, err := h.relayRead(c, "maintainer_bounties", "")
-		if err != nil {
-			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent_unreachable", "agent_url": h.agentURL})
-		}
-		var list struct {
-			Bounties []struct {
-				BountyID string `json:"bountyId"`
-			} `json:"bounties"`
-		}
-		_ = json.Unmarshal(raw, &list)
-		found := false
-		for _, b := range list.Bounties {
-			if b.BountyID == bountyID {
-				found = true
-				break
-			}
-		}
-		if status != fiber.StatusOK || !found {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not_your_repository"})
-		}
-	}
-	return h.adminAction(c, "maintainer_view", bountyID, nil)
+	return h.maintainerAction(c, "view", c.Params("bountyId"), nil)
 }
+
+// --- maintainer-funded bounties -------------------------------------------
+//
+// The money never passes through this service. These relay to the agent, which
+// builds an unsigned transaction for the funder's own wallet to sign; nothing
+// here holds a key or moves funds. What this service decides is who may ask.
 
 // relayRead performs an admin action and hands back the raw answer, for the
 // routes that need to merge it with data of our own rather than pass it
@@ -533,12 +522,6 @@ func (h *BountyDrawHandler) relayRead(c *fiber.Ctx, action, subject string) ([]b
 	return out, res.StatusCode, nil
 }
 
-// --- maintainer-funded bounties -------------------------------------------
-//
-// The money never passes through this service. These relay to the agent, which
-// builds an unsigned transaction for the funder's own wallet to sign; nothing
-// here holds a key or moves funds. What this service decides is who may ask.
-
 // GetEscrowQuote answers what a funder would pay for a given amount.
 //
 // Deliberately a relay rather than arithmetic repeated here: the fee is the
@@ -549,7 +532,7 @@ func (h *BountyDrawHandler) GetEscrowQuote(c *fiber.Ctx) error {
 	if amount == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "amount_required"})
 	}
-	return h.adminAction(c, "escrow_quote", "", map[string]any{"amountMinor": amount})
+	return h.maintainerAction(c, "escrow_quote", "", map[string]any{"amountMinor": amount})
 }
 
 // GetEscrow returns one escrow and its history.
@@ -558,7 +541,7 @@ func (h *BountyDrawHandler) GetEscrow(c *fiber.Ctx) error {
 	if bountyID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "bounty_required"})
 	}
-	return h.adminAction(c, "escrow_state", bountyID, nil)
+	return h.maintainerAction(c, "escrow_state", bountyID, nil)
 }
 
 // PostEscrowConfirm tells the agent a funding transaction was sent.
@@ -578,7 +561,7 @@ func (h *BountyDrawHandler) PostEscrowConfirm(c *fiber.Ctx) error {
 	if strings.TrimSpace(in.Signature) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "signature_required"})
 	}
-	return h.adminAction(c, "escrow_confirm", bountyID, map[string]any{"signature": in.Signature})
+	return h.maintainerAction(c, "escrow_confirm", bountyID, map[string]any{"signature": in.Signature})
 }
 
 // GetEscrows lists every escrow, for the admin screen.

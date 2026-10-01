@@ -275,13 +275,17 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Maintainer-funded bounties. The agent refuses every one of these while
 	// its own switch is off, so these routes exist but lead nowhere until it
 	// is turned on - the feature is unreachable rather than merely unrendered.
-	//
-	// There were maintainer routes here for unassign, deadline and run-draw.
-	// They checked only that somebody was signed in, and the handlers relay
-	// through the admin channel, which this service countersigns as "admin" -
-	// so any signed-in user could act on any bounty. Removed until they can
-	// check that the caller maintains the bounty's repository. See
-	// TestAdminActionsAreAdminOnly.
+
+	// Run the draw, unassign, redraw and deadline changes: maintainers', not
+	// admins'. Signed on the maintainer channel for anybody signed in; the
+	// agent decides per bounty whether the caller may act, from GitHub
+	// permission on that bounty's own repository or from having funded it.
+	// These once relayed on the admin channel with only a sign-in check, so
+	// any signed-in user could act on any bounty - see
+	// TestAdminActionsAreAdminOnly, which now fails on that pattern.
+	app.Post("/maintainer/bounties/:bountyId/unassign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerUnassign)
+	app.Post("/maintainer/bounties/:bountyId/deadline", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerDeadline)
+	app.Post("/maintainer/bounties/:bountyId/run", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerRunDraw)
 
 	app.Get("/bounties/escrow/quote", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrowQuote)
 	app.Get("/bounties/:bountyId/escrow", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrow)
@@ -568,10 +572,6 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Get("/bounty-draw/settings", requireAdmin, bountyDraw.GetSettings)
 	adminGroup.Post("/bounty-draw/settings", requireAdmin, bountyDraw.PostSetting)
 	adminGroup.Post("/bounty-draw/settings/reset", requireAdmin, bountyDraw.PostSettingReset)
-	adminGroup.Get("/bounty-draw/:bountyId/state", requireAdmin, bountyDraw.GetBountyState)
-	adminGroup.Post("/bounty-draw/:bountyId/run", requireAdmin, bountyDraw.PostRunDraw)
-	adminGroup.Post("/bounty-draw/:bountyId/unassign", requireAdmin, bountyDraw.PostUnassign)
-	adminGroup.Post("/bounty-draw/:bountyId/deadline", requireAdmin, bountyDraw.PostAssignmentDeadline)
 
 	// Which repositories may have bounties. Operational, so it lives on the
 	// admin screen with an audit trail rather than in a deployment variable.

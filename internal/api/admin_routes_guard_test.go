@@ -138,14 +138,10 @@ func TestBootstrapRouteIsGone(t *testing.T) {
 // Three were once mounted under /maintainer with only a sign-in check, and
 // any signed-in user could unassign, redraw or move a deadline on any bounty.
 var adminChannelHandlers = []string{
-	"bountyDraw.PostUnassign",
-	"bountyDraw.PostAssignmentDeadline",
-	"bountyDraw.PostRunDraw",
 	"bountyDraw.PostSetting",
 	"bountyDraw.PostSettingReset",
 	"bountyDraw.PostBountyRepo",
 	"bountyDraw.GetSettings",
-	"bountyDraw.GetBountyState",
 	"bountyDraw.GetBountyRepos",
 	"bountyDraw.GetEscrows",
 }
@@ -175,5 +171,49 @@ func TestAdminActionsAreAdminOnly(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("matched no routes; this guard is not checking anything")
+	}
+}
+
+// The list above has to be complete, or the route check proves nothing about
+// a handler nobody added to it. So it is checked against the handlers' own
+// source: every BountyDrawHandler method that relays on the admin channel
+// (adminAction, or relayRead, which signs the same way) must be listed - and
+// therefore mounted only behind requireAdmin. A new admin-channel handler
+// cannot be added without this failing until it is.
+func TestEveryAdminChannelHandlerIsListed(t *testing.T) {
+	src, err := os.ReadFile("../handlers/bounty_draw.go")
+	if err != nil {
+		t.Fatalf("read bounty_draw.go: %v", err)
+	}
+	listed := map[string]bool{}
+	for _, h := range adminChannelHandlers {
+		listed[strings.TrimPrefix(h, "bountyDraw.")] = true
+	}
+	funcRe := regexp.MustCompile(`(?m)^func \(h \*BountyDrawHandler\) ([A-Z][A-Za-z]*)\(`)
+	locs := funcRe.FindAllStringSubmatchIndex(string(src), -1)
+	checked := 0
+	for i, loc := range locs {
+		name := string(src[loc[2]:loc[3]])
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := string(src[loc[1]:end])
+		admin := strings.Contains(body, "h.adminAction(") || strings.Contains(body, "h.relayRead(")
+		maintainer := strings.Contains(body, "h.maintainerAction(")
+		if admin {
+			checked++
+			if !listed[name] {
+				t.Errorf("%s relays on the admin channel but is not in adminChannelHandlers, so nothing checks it is admin-only", name)
+			}
+		}
+		// The other direction: a maintainer handler must never borrow the
+		// admin channel, which the agent trusts as an admin.
+		if strings.HasPrefix(name, "Maintainer") && (admin || !maintainer) {
+			t.Errorf("%s must relay on the maintainer channel and only that one", name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no admin-channel handlers; this guard is not checking anything")
 	}
 }

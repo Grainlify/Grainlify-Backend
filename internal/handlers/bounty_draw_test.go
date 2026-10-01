@@ -225,14 +225,20 @@ func TestBountyDraw_CallerCannotClaimARepoIsRegistered(t *testing.T) {
 	}
 }
 
-// A maintainer may look at their own repository and nobody else's. Owning the
-// Grainlify project is one proof; GitHub permission, which the agent answers,
-// is the other. Refusing needs BOTH to say no.
-func TestBountyDraw_MaintainerViewRefusesSomebodyElsesRepo(t *testing.T) {
+// Whether somebody maintains the bounty is the agent's answer, from GitHub
+// permission on the bounty's OWN repository. This service only proves who is
+// asking - on the maintainer channel, never the admin one - and passes the
+// agent's refusal through. It used to check ownership of whatever repository
+// the query string named, never that the bounty was in it.
+func TestBountyDraw_MaintainerViewIsTheAgentsDecision(t *testing.T) {
+	var gotPath, gotMessage string
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The agent has looked and this caller maintains nothing.
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"bounties":[]}`))
+		gotPath = r.URL.Path
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotMessage, _ = body["message"].(string)
+		w.WriteHeader(403)
+		_, _ = w.Write([]byte(`{"error":"not_your_bounty"}`))
 	}))
 	defer agent.Close()
 
@@ -243,9 +249,16 @@ func TestBountyDraw_MaintainerViewRefusesSomebodyElsesRepo(t *testing.T) {
 	app := fiber.New()
 	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
 
-	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
+	// A repository the caller might own is named, and must make no difference.
+	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Octocat/own-repo", nil), -1)
 	if res.StatusCode != 403 {
-		t.Fatalf("status = %d, want 403 for a repository the caller does not maintain", res.StatusCode)
+		t.Fatalf("status = %d, want the agent's 403 passed through", res.StatusCode)
+	}
+	if gotPath != "/maintainer/draw" {
+		t.Errorf("relayed to %q, want /maintainer/draw - never the admin channel", gotPath)
+	}
+	if !strings.HasPrefix(gotMessage, "Grainlify: maintainer action\nAction: view\n") || !strings.Contains(gotMessage, "\nSubject: b1\n") {
+		t.Errorf("message is not a maintainer view of b1:\n%s", gotMessage)
 	}
 }
 
@@ -290,19 +303,6 @@ func TestBountyDraw_MaintainerViewAcceptsGitHubPermissionAlone(t *testing.T) {
 	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications?repo=Someone/else", nil), -1)
 	if res.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 when the agent says the caller maintains it", res.StatusCode)
-	}
-}
-
-func TestBountyDraw_MaintainerViewNeedsARepo(t *testing.T) {
-	d := dbtest.DB(t)
-	uid := newUser(t, d)
-	linkGitHub(t, d, uid, "Octocat")
-	h := NewBountyDrawHandler(d, testSeedB64, "http://127.0.0.1:1")
-	app := fiber.New()
-	app.Get("/maintainer/bounties/:bountyId/applications", func(c *fiber.Ctx) error { c.Locals(auth.LocalUserID, uid.String()); return c.Next() }, h.GetMaintainerBountyView)
-	res, _ := app.Test(httptest.NewRequest("GET", "/maintainer/bounties/b1/applications", nil), -1)
-	if res.StatusCode != 400 {
-		t.Fatalf("status = %d, want 400 without a repo", res.StatusCode)
 	}
 }
 
@@ -570,7 +570,7 @@ func TestBountyDraw_UnassignRequiresAReason(t *testing.T) {
 	app.Post("/x/:bountyId/unassign", func(c *fiber.Ctx) error {
 		c.Locals(auth.LocalUserID, uid.String())
 		return c.Next()
-	}, h.PostUnassign)
+	}, h.MaintainerUnassign)
 
 	for _, body := range []string{`{}`, `{"reason":"   "}`} {
 		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/unassign", strings.NewReader(body))
@@ -591,7 +591,7 @@ func TestBountyDraw_DeadlineChangeRequiresBothFields(t *testing.T) {
 	app.Post("/x/:bountyId/deadline", func(c *fiber.Ctx) error {
 		c.Locals(auth.LocalUserID, uid.String())
 		return c.Next()
-	}, h.PostAssignmentDeadline)
+	}, h.MaintainerDeadline)
 
 	for _, body := range []string{`{"reason":"more time"}`, `{"deadline":"2026-10-06T01:00:00Z"}`} {
 		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/deadline", strings.NewReader(body))
@@ -624,7 +624,7 @@ func TestBountyDraw_RunDrawOnlySendsADeadlineWhenOneWasChosen(t *testing.T) {
 	app.Post("/x/:bountyId/run", func(c *fiber.Ctx) error {
 		c.Locals(auth.LocalUserID, uid.String())
 		return c.Next()
-	}, h.PostRunDraw)
+	}, h.MaintainerRunDraw)
 
 	post := func(body string) {
 		r := httptest.NewRequest("POST", "/x/b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85/run", strings.NewReader(body))
