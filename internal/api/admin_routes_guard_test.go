@@ -131,3 +131,49 @@ func TestBootstrapRouteIsGone(t *testing.T) {
 		t.Error("api.go references BootstrapAdmin again; the handler was removed with the route")
 	}
 }
+
+// The bounty-draw handlers that relay through the agent's admin channel. This
+// service countersigns that channel as "admin", and the agent trusts it, so
+// any route reaching one of these IS an admin route wherever it is mounted.
+// Three were once mounted under /maintainer with only a sign-in check, and
+// any signed-in user could unassign, redraw or move a deadline on any bounty.
+var adminChannelHandlers = []string{
+	"bountyDraw.PostUnassign",
+	"bountyDraw.PostAssignmentDeadline",
+	"bountyDraw.PostRunDraw",
+	"bountyDraw.PostSetting",
+	"bountyDraw.PostSettingReset",
+	"bountyDraw.PostBountyRepo",
+	"bountyDraw.GetSettings",
+	"bountyDraw.GetBountyState",
+	"bountyDraw.GetBountyRepos",
+	"bountyDraw.GetEscrows",
+}
+
+func TestAdminActionsAreAdminOnly(t *testing.T) {
+	src, err := os.ReadFile("api.go")
+	if err != nil {
+		t.Fatalf("read api.go: %v", err)
+	}
+	found := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "//") {
+			continue
+		}
+		for _, h := range adminChannelHandlers {
+			if !strings.Contains(code, h+")") && !strings.Contains(code, h+",") {
+				continue
+			}
+			found++
+			if !strings.Contains(code, "requireAdmin") {
+				t.Errorf("%s is mounted without requireAdmin:\n  %s\n"+
+					"It relays through the admin channel, which the agent trusts as an admin; "+
+					"a route to it without the live admin check lets any signed-in user act as one.", h, code)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("matched no routes; this guard is not checking anything")
+	}
+}

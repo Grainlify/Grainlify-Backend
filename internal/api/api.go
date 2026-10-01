@@ -275,12 +275,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Maintainer-funded bounties. The agent refuses every one of these while
 	// its own switch is off, so these routes exist but lead nowhere until it
 	// is turned on - the feature is unreachable rather than merely unrendered.
-	// The same two controls a maintainer needs on a bounty they fund. The agent
-	// decides whether this caller may act on this bounty; this service decides
-	// only that they are signed in.
-	app.Post("/maintainer/bounties/:bountyId/unassign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostUnassign)
-	app.Post("/maintainer/bounties/:bountyId/deadline", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostAssignmentDeadline)
-	app.Post("/maintainer/bounties/:bountyId/run", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostRunDraw)
+	//
+	// There were maintainer routes here for unassign, deadline and run-draw.
+	// They checked only that somebody was signed in, and the handlers relay
+	// through the admin channel, which this service countersigns as "admin" -
+	// so any signed-in user could act on any bounty. Removed until they can
+	// check that the caller maintains the bounty's repository. See
+	// TestAdminActionsAreAdminOnly.
 
 	app.Get("/bounties/escrow/quote", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrowQuote)
 	app.Get("/bounties/:bountyId/escrow", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrow)
