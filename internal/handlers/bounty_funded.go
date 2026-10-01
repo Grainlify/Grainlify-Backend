@@ -83,6 +83,23 @@ func (h *BountyDrawHandler) MaintainerFundedPrepare(c *fiber.Ctx) error {
 	})
 }
 
+// MaintainerFundedStatus says whether this person can fund bounties, and on
+// what terms. The agent decides: everybody when the switch is on, named
+// testers while it is off.
+func (h *BountyDrawHandler) MaintainerFundedStatus(c *fiber.Ctx) error {
+	return h.maintainerAction(c, "funded_status", "", nil)
+}
+
+// MaintainerFundedReclaim builds the funder's own cancel or refund.
+func (h *BountyDrawHandler) MaintainerFundedReclaim(c *fiber.Ctx) error {
+	return h.maintainerAction(c, "funded_reclaim", c.Params("bountyId"), nil)
+}
+
+// MaintainerFundedReclaimConfirm reads the chain after the funder's wallet sent it.
+func (h *BountyDrawHandler) MaintainerFundedReclaimConfirm(c *fiber.Ctx) error {
+	return h.maintainerAction(c, "funded_reclaim_confirm", c.Params("bountyId"), nil)
+}
+
 // MaintainerFundedView is the funder's view of their bounty.
 func (h *BountyDrawHandler) MaintainerFundedView(c *fiber.Ctx) error {
 	return h.maintainerAction(c, "funded_view", c.Params("bountyId"), nil)

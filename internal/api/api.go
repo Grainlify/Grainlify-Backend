@@ -293,7 +293,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Funded bounties. The funder's actions: signed on the maintainer channel
 	// for anybody signed in, and the agent checks per bounty that they funded
 	// it. The contributor's answers: on their own apply channel.
+	app.Get("/maintainer/funded-status", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedStatus)
 	app.Post("/maintainer/funded", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedPrepare)
+	app.Post("/maintainer/funded/:bountyId/reclaim", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedReclaim)
+	app.Post("/maintainer/funded/:bountyId/reclaim/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedReclaimConfirm)
 	app.Get("/maintainer/funded/:bountyId", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedView)
 	app.Post("/maintainer/funded/:bountyId/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedConfirm)
 	app.Post("/maintainer/funded/:bountyId/assign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedAssign)
