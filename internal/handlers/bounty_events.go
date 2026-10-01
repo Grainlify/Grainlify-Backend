@@ -178,7 +178,21 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 		// question somebody actually has. Then, plainly, that this is not held
 		// against them - "unassigned" reads as a judgement unless it says
 		// otherwise, and here it is not one.
-		if closed, _ := e.Payload["closed"].(bool); closed {
+		if funded, _ := e.Payload["funded"].(bool); funded {
+			// A funded bounty is the funder's to run. Before a pull request
+			// they need not give a reason, so the message does not pretend
+			// one was given; and how often they do this is public.
+			given, _ := e.Payload["reasonGiven"].(bool)
+			why := fmt.Sprintf("They gave this reason: %q", reason)
+			if !given {
+				why = "They did not give a reason; before a pull request is open, a funder does not have to."
+			}
+			body = fmt.Sprintf(
+				"%s ended your assignment on the %s bounty for %s. %s\n\n"+
+					"Nothing is counted against you: no abandon is recorded and your odds in future draws are unchanged. "+
+					"How many times this funder has ended an assignment before a pull request is shown on their public profile.",
+				who, amount, place, why)
+		} else if closed, _ := e.Payload["closed"].(bool); closed {
 			// The bounty was closed with the assignment, so the second
 			// paragraph below would be untrue: there is no pool to go back
 			// to and no next draw. The reason given carries the rest.
@@ -211,6 +225,41 @@ func (h *BountyEventsHandler) Receive(c *fiber.Ctx) error {
 				"If no pull request arrives by the new deadline the bounty is drawn again, and that does count as an abandon.",
 			who, amount, place, previous, nowAt, reason)
 		link = notifications.BountiesLink()
+	case "bounty_funded_assigned":
+		t = notifications.TypeBountyFundedAssigned
+		title = "You've been assigned a funded bounty"
+		funder, _ := e.Payload["funder"].(string)
+		wallet, _ := e.Payload["wallet"].(string)
+		body = fmt.Sprintf(
+			"%s assigned you the %s bounty on %s. Open a pull request that says \"Closes #%v\". "+
+				"It is paid from their escrow to %s once the pull request is merged and the release is approved.\n\n"+
+				"The escrow's deadline is %s. If nothing is merged by then, the funder can take the money back.",
+			funder, amount, place, e.Payload["issue_number"], wallet, when(e.Payload, "deadlineAt"))
+	case "bounty_unassign_proposed":
+		t = notifications.TypeBountyUnassignProposed
+		title = "A proposal to end an assignment needs your answer"
+		proposer, _ := e.Payload["proposer"].(string)
+		reason, _ := e.Payload["reason"].(string)
+		pr := ""
+		if n, ok := e.Payload["prNumber"].(float64); ok {
+			pr = fmt.Sprintf(", where pull request #%d is open", int(n))
+		}
+		body = fmt.Sprintf(
+			"%s proposed ending the assignment on %s%s. Their reason: %q\n\n"+
+				"It only happens if you agree. Accept or refuse on the Bounties page by %s. "+
+				"If you have not answered by then, it counts as agreeing.",
+			proposer, place, pr, reason, when(e.Payload, "respondBy"))
+	case "bounty_unassign_refused":
+		t = notifications.TypeBountyUnassignRefused
+		title = "Your proposal to end the assignment was refused"
+		by, _ := e.Payload["refusedBy"].(string)
+		response, _ := e.Payload["response"].(string)
+		body = fmt.Sprintf(
+			"%s refused to end the assignment on %s. Their reason: %q\n\n"+
+				"Nothing else changes. The escrow's deadline, %s, still decides: if the pull request is merged before then "+
+				"the contributor is paid, and if not, the funder can take the escrow back. An admin looks only if one of you "+
+				"believes deliverable work is being held back.",
+			by, place, response, when(e.Payload, "deadlineAt"))
 	case "bounty_review_posted":
 		t = notifications.TypeBountyReviewPosted
 		title = "The agent reviewed your pull request"

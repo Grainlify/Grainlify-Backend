@@ -246,6 +246,34 @@ func TestBountyEvents_EachKindStoresAReadableNotification(t *testing.T) {
 			wantLink: notifications.BountiesLink(),
 		},
 		{
+			kind: "bounty_unassigned", wantType: notifications.TypeBountyUnassigned,
+			payload: with(map[string]any{"reason": "No reason was given.", "actor": "owen", "funded": true, "reasonGiven": false}),
+			// A funder need give no reason before a pull request; the message
+			// says so rather than quoting a placeholder as if it were one.
+			wantIn:   []string{"did not give a reason", "Nothing is counted against you", "public profile"},
+			wantOut:  []string{"No reason was given.", "back in the pool"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_funded_assigned", wantType: notifications.TypeBountyFundedAssigned,
+			payload:  with(map[string]any{"funder": "owen", "wallet": "7Qm9kM1s", "deadlineAt": "2026-10-16T00:00:00Z"}),
+			wantIn:   []string{"owen assigned you", "25 USDC", "7Qm9kM1s", "16 October 2026 at 00:00 UTC", "take the money back"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_unassign_proposed", wantType: notifications.TypeBountyUnassignProposed,
+			payload: with(map[string]any{"proposer": "owen", "reason": "going a different direction", "prNumber": 58, "respondBy": "2026-10-09T10:00:00Z"}),
+			// Silence is consent, so the message has to say it.
+			wantIn:   []string{"pull request #58", "going a different direction", "9 October 2026 at 10:00 UTC", "counts as agreeing"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
+			kind: "bounty_unassign_refused", wantType: notifications.TypeBountyUnassignRefused,
+			payload:  with(map[string]any{"refusedBy": "jotel-dev", "response": "CI is green", "deadlineAt": "2026-10-16T00:00:00Z"}),
+			wantIn:   []string{"jotel-dev refused", "CI is green", "Nothing else changes", "16 October 2026 at 00:00 UTC"},
+			wantLink: notifications.BountiesLink(),
+		},
+		{
 			kind: "bounty_review_posted", wantType: notifications.TypeBountyReviewPosted,
 			payload: base,
 			// Says the review does not decide anything, so nobody reads an
@@ -313,6 +341,9 @@ func TestBountyEvents_EveryKindIsSwitchable(t *testing.T) {
 		notifications.TypeBountyReviewPosted,
 		notifications.TypeBountyUnassigned,
 		notifications.TypeBountyDeadlineChanged,
+		notifications.TypeBountyFundedAssigned,
+		notifications.TypeBountyUnassignProposed,
+		notifications.TypeBountyUnassignRefused,
 	} {
 		if !ty.Valid() {
 			t.Errorf("%q is not in notifications.AllTypes, so nobody can turn it off", ty)

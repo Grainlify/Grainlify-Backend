@@ -172,8 +172,20 @@ const (
 	// moves. Somebody working to a date must be told it changed, whichever way
 	// it moved - a deadline that shifted silently is the thing we tell
 	// everybody else we do not do.
-	TypeBountyDeadlineChanged       Type = "bounty_deadline_changed"
-	TypeBountyReviewPosted          Type = "bounty_review_posted"
+	TypeBountyDeadlineChanged Type = "bounty_deadline_changed"
+	TypeBountyReviewPosted    Type = "bounty_review_posted"
+	// TypeBountyFundedAssigned: a funder assigned a funded bounty to you
+	// directly. Says where the money is and the escrow deadline, because on
+	// a funded bounty that date - not a pull-request deadline - is the one
+	// that decides whether you are paid.
+	TypeBountyFundedAssigned Type = "bounty_funded_assigned"
+	// TypeBountyUnassignProposed: the other side of a funded bounty proposed
+	// ending an assignment whose pull request is open. It needs an answer, and
+	// silence for seven days counts as agreeing, so the message says both.
+	TypeBountyUnassignProposed Type = "bounty_unassign_proposed"
+	// TypeBountyUnassignRefused: a proposal you made was refused. Says that
+	// nothing else changes and the escrow deadline still decides.
+	TypeBountyUnassignRefused Type = "bounty_unassign_refused"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -210,6 +222,9 @@ var AllTypes = []Type{
 	TypeBountyReviewPosted,
 	TypeBountyUnassigned,
 	TypeBountyDeadlineChanged,
+	TypeBountyFundedAssigned,
+	TypeBountyUnassignProposed,
+	TypeBountyUnassignRefused,
 }
 
 func (t Type) Valid() bool {
