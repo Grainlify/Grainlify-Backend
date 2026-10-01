@@ -290,6 +290,21 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Get("/bounties/escrow/quote", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrowQuote)
 	app.Get("/bounties/:bountyId/escrow", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetEscrow)
 	app.Post("/bounties/:bountyId/escrow/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostEscrowConfirm)
+	// Funded bounties. The funder's actions: signed on the maintainer channel
+	// for anybody signed in, and the agent checks per bounty that they funded
+	// it. The contributor's answers: on their own apply channel.
+	app.Post("/maintainer/funded", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedPrepare)
+	app.Get("/maintainer/funded/:bountyId", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedView)
+	app.Post("/maintainer/funded/:bountyId/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedConfirm)
+	app.Post("/maintainer/funded/:bountyId/assign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedAssign)
+	app.Post("/maintainer/funded/:bountyId/assign/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedAssignConfirm)
+	app.Post("/maintainer/funded/:bountyId/draw", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedDraw)
+	app.Post("/maintainer/funded/:bountyId/unassign", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedUnassign)
+	app.Post("/maintainer/funded/:bountyId/unassign/confirm", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedUnassignConfirm)
+	app.Post("/maintainer/funded/:bountyId/propose", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedPropose)
+	app.Post("/maintainer/funded-proposals/:proposalId/:answer", auth.RequireAuth(cfg.JWTSecret), bountyDraw.MaintainerFundedAnswer)
+	app.Post("/bounties/:bountyId/unassign/propose", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostUnassignPropose)
+	app.Post("/bounties/unassign-proposals/:proposalId/:answer", auth.RequireAuth(cfg.JWTSecret), bountyDraw.PostUnassignAnswer)
 
 	// Optional, and asked for on the payout screen rather than at signup: that
 	// is the one moment somebody is doing something consequential with money
@@ -576,6 +591,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// Which repositories may have bounties. Operational, so it lives on the
 	// admin screen with an audit trail rather than in a deployment variable.
 	adminGroup.Get("/escrows", requireAdmin, bountyDraw.GetEscrows)
+	adminGroup.Get("/bounty-disputes", requireAdmin, bountyDraw.GetBountyDisputes)
+	adminGroup.Get("/bounty-disputes/:id", requireAdmin, bountyDraw.GetBountyDispute)
+	adminGroup.Post("/bounty-disputes/:id/leave", requireAdmin, bountyDraw.PostBountyDisputeLeave)
+	adminGroup.Post("/bounty-disputes/:id/note", requireAdmin, bountyDraw.PostBountyDisputeNote)
 	adminGroup.Get("/bounty-repos", requireAdmin, bountyDraw.GetBountyRepos)
 	adminGroup.Post("/bounty-repos", requireAdmin, bountyDraw.PostBountyRepo)
 	adminGroup.Put("/users/:id/role", requireAdmin, admin.SetUserRole())

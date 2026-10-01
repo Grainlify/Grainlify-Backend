@@ -2,6 +2,7 @@ package api
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -144,6 +145,10 @@ var adminChannelHandlers = []string{
 	"bountyDraw.GetSettings",
 	"bountyDraw.GetBountyRepos",
 	"bountyDraw.GetEscrows",
+	"bountyDraw.GetBountyDisputes",
+	"bountyDraw.GetBountyDispute",
+	"bountyDraw.PostBountyDisputeLeave",
+	"bountyDraw.PostBountyDisputeNote",
 }
 
 func TestAdminActionsAreAdminOnly(t *testing.T) {
@@ -181,10 +186,25 @@ func TestAdminActionsAreAdminOnly(t *testing.T) {
 // therefore mounted only behind requireAdmin. A new admin-channel handler
 // cannot be added without this failing until it is.
 func TestEveryAdminChannelHandlerIsListed(t *testing.T) {
-	src, err := os.ReadFile("../handlers/bounty_draw.go")
-	if err != nil {
-		t.Fatalf("read bounty_draw.go: %v", err)
+	// Every file the relay lives in, not one: a handler added in a new file
+	// would otherwise be outside this guard entirely.
+	files, err := filepath.Glob("../handlers/bounty_*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("found no bounty relay sources: %v", err)
 	}
+	var all []byte
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		all = append(all, b...)
+		all = append(all, '\n')
+	}
+	src := all
 	listed := map[string]bool{}
 	for _, h := range adminChannelHandlers {
 		listed[strings.TrimPrefix(h, "bountyDraw.")] = true
