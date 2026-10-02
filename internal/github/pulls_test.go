@@ -56,6 +56,53 @@ func TestRepoAdmins_ErrorsRatherThanReturningEmpty(t *testing.T) {
 	}
 }
 
+func TestRepoPermission(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"admin", http.StatusOK, `{"permission":"admin"}`, "admin"},
+		{"write", http.StatusOK, `{"permission":"write"}`, "write"},
+		// Not a collaborator at all is an answer, not a failure.
+		{"not a collaborator", http.StatusNotFound, `{"message":"Not Found"}`, "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubRepos(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/acme/widgets/collaborators/octocat/permission" {
+					t.Errorf("path = %q", r.URL.Path)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			got, err := NewClient().RepoPermission(context.Background(), "tok", "acme/widgets", "octocat")
+			if err != nil {
+				t.Fatalf("RepoPermission: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("permission = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A permission GitHub would not show us is unknown, and must not come back as
+// "none" or anything a caller could compare against.
+func TestRepoPermission_ErrorsRatherThanGuessing(t *testing.T) {
+	stubRepos(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+	})
+	got, err := NewClient().RepoPermission(context.Background(), "tok", "acme/widgets", "octocat")
+	if err == nil {
+		t.Fatalf("no error for an unreadable permission (got %q)", got)
+	}
+	if got != "" {
+		t.Errorf("permission = %q, want empty on error", got)
+	}
+}
+
 func TestCommitCIStatus(t *testing.T) {
 	tests := []struct {
 		name      string

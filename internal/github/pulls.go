@@ -98,16 +98,31 @@ func (c *Client) ListPRFiles(ctx context.Context, accessToken, fullName string, 
 // read an unreadable permission as "not an admin", since that is the
 // direction that lets a maintainer collect on their own org's issues.
 func (c *Client) IsRepoCollaboratorAdmin(ctx context.Context, accessToken, fullName, login string) (bool, error) {
-	owner, repo, err := splitFullName(fullName)
+	permission, err := c.RepoPermission(ctx, accessToken, fullName, login)
 	if err != nil {
 		return false, err
+	}
+	return permission == "admin", nil
+}
+
+// RepoPermission returns login's permission on the repo as GitHub reports it:
+// "admin", "write", "read" or "none". Org owners read as "admin", and the
+// maintain and triage roles as "write" and "read". Works with an installation
+// token, since it needs only the metadata permission every App has.
+//
+// "none" is returned for a 404, which means "not a collaborator at all" - a
+// real answer. Anything else unreadable is an error, never "none".
+func (c *Client) RepoPermission(ctx context.Context, accessToken, fullName, login string) (string, error) {
+	owner, repo, err := splitFullName(fullName)
+	if err != nil {
+		return "", err
 	}
 	u := pullsAPIBase + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/collaborators/" + url.PathEscape(login) + "/permission"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -119,23 +134,22 @@ func (c *Client) IsRepoCollaboratorAdmin(ctx context.Context, accessToken, fullN
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	defer resp.Body.Close()
-	// 404 means "not a collaborator at all", which is a real answer.
 	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
+		return "none", nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, parseGitHubAPIError(resp)
+		return "", parseGitHubAPIError(resp)
 	}
 	var payload struct {
 		Permission string `json:"permission"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return false, fmt.Errorf("github.IsRepoCollaboratorAdmin: decode: %w", err)
+		return "", fmt.Errorf("github.RepoPermission: decode: %w", err)
 	}
-	return payload.Permission == "admin", nil
+	return payload.Permission, nil
 }
 
 // RepoAdmins returns the set of logins with admin permission on a repo,
