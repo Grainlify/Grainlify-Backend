@@ -70,8 +70,8 @@ type updateOrgLinksRequest struct {
 }
 
 // Update handles PUT /orgs/:login/links - authenticated, requires the
-// caller to own at least one project under this org (isOrgOwner, shared
-// with org_ratings.go). Unlike users.UpdateProfile, a field CAN be cleared:
+// caller to own at least one verified, live project under this org
+// (isOrgOwner, in org_ratings.go). Unlike users.UpdateProfile, a field CAN be cleared:
 // a JSON key present with an empty string sets that column to NULL; an
 // absent key leaves the existing value untouched; a non-empty string sets
 // it (trimmed). This matters here specifically because a maintainer fixing

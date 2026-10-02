@@ -48,10 +48,34 @@ SELECT EXISTS (
 	return exists, err
 }
 
-// isOrgOwner reports whether userID owns at least one project under
-// orgLogin - excluded from rating eligibility so an org's own maintainer
-// can't trivially self-merge a PR and rate their own org.
+// isOrgOwner reports whether userID owns at least one verified, live project
+// under orgLogin - the proof PUT /orgs/:login/links asks for before letting
+// someone speak for the org.
+//
+// It used to count any row. POST /projects writes one for any owner/repo it
+// is given, unverified, so registering victim-org/anything was enough to
+// rewrite victim-org's public contact links.
 func isOrgOwner(ctx context.Context, pool db.DBPool, userID uuid.UUID, orgLogin string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM projects
+  WHERE owner_user_id = $1 AND LOWER(SPLIT_PART(github_full_name, '/', 1)) = LOWER($2)
+    AND status = 'verified' AND deleted_at IS NULL
+)
+`, userID, orgLogin).Scan(&exists)
+	return exists, err
+}
+
+// hasAnyProjectInOrg reports whether userID owns any project row under
+// orgLogin, verified or not - excluded from rating eligibility so an org's
+// own maintainer can't trivially self-merge a PR and rate their own org.
+//
+// Deliberately looser than isOrgOwner. This one only ever takes something
+// away, so counting a row nobody verified errs toward excluding a rating,
+// which is the safe direction; requiring verification here would let a
+// maintainer who never verified their own repo rate the org they work in.
+func hasAnyProjectInOrg(ctx context.Context, pool db.DBPool, userID uuid.UUID, orgLogin string) (bool, error) {
 	var exists bool
 	err := pool.QueryRow(ctx, `
 SELECT EXISTS (
@@ -69,7 +93,7 @@ func canRateOrg(ctx context.Context, pool db.DBPool, userID uuid.UUID, githubLog
 	if err != nil || !eligible {
 		return false, err
 	}
-	owner, err := isOrgOwner(ctx, pool, userID, orgLogin)
+	owner, err := hasAnyProjectInOrg(ctx, pool, userID, orgLogin)
 	if err != nil {
 		return false, err
 	}

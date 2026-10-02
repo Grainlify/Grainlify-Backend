@@ -183,6 +183,61 @@ func TestCanRateOrg_ExcludesSelfRating(t *testing.T) {
 	}
 }
 
+// isOrgOwner is what lets someone edit an org's public links, so a row
+// anybody can create by naming a repository must not satisfy it.
+func TestIsOrgOwner_IgnoresUnverifiedAndDeletedProjects(t *testing.T) {
+	d := referralsTestDB(t)
+	for _, tc := range []struct {
+		name    string
+		status  string
+		deleted bool
+	}{{"pending_verification", "pending_verification", false}, {"verified but deleted", "verified", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := referralsCreateUser(t, d)
+			orgLogin := "org-" + uuid.New().String()[:8]
+			projectID := orgRatingsFxProject(t, d.Pool, user, orgLogin, nil)
+			if _, err := d.Pool.Exec(context.Background(), `
+UPDATE projects SET status = $2, deleted_at = CASE WHEN $3 THEN now() END WHERE id = $1
+`, projectID, tc.status, tc.deleted); err != nil {
+				t.Fatalf("set project state: %v", err)
+			}
+			isOwner, err := isOrgOwner(context.Background(), d.Pool, user, orgLogin)
+			if err != nil {
+				t.Fatalf("isOrgOwner() error = %v", err)
+			}
+			if isOwner {
+				t.Errorf("isOrgOwner() = true for a %s project, want false", tc.name)
+			}
+		})
+	}
+}
+
+// The rating exclusion stays on ANY project row: it only ever takes a rating
+// away, and a maintainer who never verified their own repo is still the org's
+// maintainer when they merge into its verified one.
+func TestCanRateOrg_StillExcludesOwnerOfUnverifiedProject(t *testing.T) {
+	d := referralsTestDB(t)
+	verifiedOwner := referralsCreateUser(t, d)
+	orgLogin := "org-" + uuid.New().String()[:8]
+	verifiedID := orgRatingsFxProject(t, d.Pool, verifiedOwner, orgLogin, nil)
+
+	maintainer := referralsCreateUser(t, d)
+	unverifiedID := orgRatingsFxProject(t, d.Pool, maintainer, orgLogin, nil)
+	if _, err := d.Pool.Exec(context.Background(), `UPDATE projects SET status = 'pending_verification' WHERE id = $1`, unverifiedID); err != nil {
+		t.Fatalf("unverify: %v", err)
+	}
+	maintainerLogin := "maintainer-login-" + uuid.New().String()[:8]
+	orgRatingsFxPR(t, d.Pool, verifiedID, 1, maintainerLogin, true)
+
+	canRate, err := canRateOrg(context.Background(), d.Pool, maintainer, maintainerLogin, orgLogin)
+	if err != nil {
+		t.Fatalf("canRateOrg() error = %v", err)
+	}
+	if canRate {
+		t.Error("canRateOrg() = true, want false: owning an unverified project in the org still excludes a self-rating")
+	}
+}
+
 func TestCanRateOrg_TrueForEligibleNonOwner(t *testing.T) {
 	d := referralsTestDB(t)
 	owner := referralsCreateUser(t, d)

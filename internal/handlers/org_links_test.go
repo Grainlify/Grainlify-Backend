@@ -85,6 +85,44 @@ func TestOrgLinksHandler_Update_ForbiddenForNonOwner(t *testing.T) {
 	}
 }
 
+// Owning "a project under the org" used to mean any row at all, and POST
+// /projects writes a row for any owner/repo it is given, unverified. So anyone
+// signed in could register victim-org/anything and then rewrite victim-org's
+// Telegram, Discord and WhatsApp links - a phishing link on a real org's page.
+// Only a verified, live project shows the caller maintains something there.
+func TestOrgLinksHandler_Update_ForbiddenWithoutAVerifiedLiveProject(t *testing.T) {
+	d := testDB(t)
+	cfg := config.Config{JWTSecret: orgLinksSuiteJWTSecret}
+	app := orgLinksSuiteApp(cfg, d)
+
+	for _, tc := range []struct {
+		name    string
+		status  string
+		deleted bool
+	}{
+		{"unverified registration", "pending_verification", false},
+		{"rejected", "rejected", false},
+		{"verified but deleted", "verified", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userID := projectsFxUser(t, d.Pool)
+			orgLogin := "victim-org-" + uuid.New().String()[:8]
+			projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{
+				OwnerUserID:    userID,
+				GitHubFullName: orgLogin + "/anything",
+				Status:         tc.status,
+				Deleted:        tc.deleted,
+			})
+
+			resp, body := notifSuiteDo(t, app, "PUT", "/orgs/"+orgLogin+"/links", orgLinksSuiteToken(t, userID),
+				[]byte(`{"telegram":"https://t.me/not-really-them"}`))
+			if resp.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want 403, body = %s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
 func TestOrgLinksHandler_Update_OwnerCanSetThenPartiallyUpdateThenClear(t *testing.T) {
 	d := testDB(t)
 	cfg := config.Config{JWTSecret: orgLinksSuiteJWTSecret}
