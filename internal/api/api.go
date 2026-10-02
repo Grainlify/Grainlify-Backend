@@ -182,6 +182,11 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Use(cors.New(corsConfig))
 	app.Use(logger.New())
 
+	// An erased account's unexpired tokens stop working at once, rather than
+	// when they expire (internal/handlers/account_deletion.go). After CORS so
+	// the refusal still carries the headers a browser needs to read it.
+	app.Use(handlers.RefuseErasedAccounts(cfg.JWTSecret, deps.DB))
+
 	// Routes.
 	// Root handler - also handle POST requests to catch misconfigured webhooks
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -239,6 +244,14 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	termsH := handlers.NewTermsHandler(deps.DB)
 	app.Get("/me/terms", auth.RequireAuth(cfg.JWTSecret), termsH.Get)
 	app.Post("/me/terms/accept", auth.RequireAuth(cfg.JWTSecret), termsH.Accept)
+
+	// Deleting your own account (internal/erasure): request, see, cancel.
+	// The erasure itself runs later, in the background, after the grace
+	// period - see cmd/api/main.go.
+	deletion := handlers.NewAccountDeletionHandler(deps.DB, notifSvc)
+	app.Get("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Get)
+	app.Post("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Request)
+	app.Post("/me/deletion/cancel", auth.RequireAuth(cfg.JWTSecret), deletion.Cancel)
 
 	// Payout: where a reward is sent, and how somebody claims it.
 	//

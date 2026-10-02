@@ -186,6 +186,12 @@ const (
 	// TypeBountyUnassignRefused: a proposal you made was refused. Says that
 	// nothing else changes and the escrow deadline still decides.
 	TypeBountyUnassignRefused Type = "bounty_unassign_refused"
+
+	// TypeAccountDeletion confirms a deletion request was recorded, and that
+	// it was cancelled. The request is made from a signed-in session, and a
+	// session can be somebody else's: this message is how the real owner finds
+	// out in time to cancel during the grace period (internal/erasure).
+	TypeAccountDeletion Type = "account_deletion"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -225,6 +231,8 @@ var AllTypes = []Type{
 	TypeBountyFundedAssigned,
 	TypeBountyUnassignProposed,
 	TypeBountyUnassignRefused,
+
+	TypeAccountDeletion,
 }
 
 func (t Type) Valid() bool {

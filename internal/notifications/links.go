@@ -71,6 +71,7 @@ const (
 	SubtabPayout        SettingsSubtab = "payout"
 	SubtabBilling       SettingsSubtab = "billing"
 	SubtabTerms         SettingsSubtab = "terms"
+	SubtabAccount       SettingsSubtab = "account"
 )
 
 // DashboardPath is the only routed path the app serves for signed-in surfaces.

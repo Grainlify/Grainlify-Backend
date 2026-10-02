@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/email"
+	"github.com/jagadeesh/grainlify/backend/internal/erasure"
 	"github.com/jagadeesh/grainlify/backend/internal/expiry"
 	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
 	"github.com/jagadeesh/grainlify/backend/internal/handlers"
@@ -320,6 +321,15 @@ func main() {
 	// attempts will not complete, so auth_nonces inherits the same shape unless
 	// something sweeps it.
 	go expiry.New(database.Pool, time.Hour).Run(context.Background())
+
+	// Carry out account deletions whose grace period has ended
+	// (internal/erasure). Here rather than in the worker branch above:
+	// whether NATS is configured has nothing to do with whether somebody's
+	// erasure is due, and a deletion that silently never runs is the defect
+	// this exists to remove.
+	erasureServices := erasure.NewServices(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret,
+		cfg.DiditAPIKey, cfg.BountyAgentURL, cfg.BountyLinkSigningKey)
+	go erasure.NewExecutor(database.Pool, erasureServices, cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
