@@ -33,10 +33,12 @@ var (
 type GitHubAppHandler struct {
 	cfg config.Config
 	db  *db.DB
-	// token and listRepos read an installation. Injected so the installation
-	// sync can be tested without GitHub; nil means the real API.
-	token     func(ctx context.Context, installationID string) (string, error)
-	listRepos func(ctx context.Context, installationToken string) ([]github.InstallationRepository, string, error)
+	// token and listRepos read an installation, and repoPermission reports a
+	// GitHub login's permission on one of its repositories. Injected so the
+	// installation sync can be tested without GitHub; nil means the real API.
+	token          func(ctx context.Context, installationID string) (string, error)
+	listRepos      func(ctx context.Context, installationToken string) ([]github.InstallationRepository, string, error)
+	repoPermission func(ctx context.Context, installationToken, fullName, login string) (string, error)
 }
 
 func NewGitHubAppHandler(cfg config.Config, d *db.DB) *GitHubAppHandler {
@@ -328,6 +330,22 @@ func (h *GitHubAppHandler) syncInstallationRepositories(ctx context.Context, use
 		"repository_selection", repositorySelection,
 	)
 
+	// Who the installer is on GitHub, to check them against each repository.
+	var installerLogin string
+	err = h.db.Pool.QueryRow(ctx, `SELECT login FROM github_accounts WHERE user_id = $1`, userID).Scan(&installerLogin)
+	if err != nil {
+		slog.Error("installer has no linked GitHub account, cannot check their access, not syncing",
+			"user_id", userID,
+			"installation_id", installationID,
+			"error", err,
+		)
+		return
+	}
+	repoPermission := h.repoPermission
+	if repoPermission == nil {
+		repoPermission = github.NewClient().RepoPermission
+	}
+
 	// Get default ecosystem (or use a fallback)
 	var defaultEcosystemID uuid.UUID
 	err = h.db.Pool.QueryRow(ctx, `
@@ -354,6 +372,34 @@ SELECT id FROM ecosystems WHERE status = 'active' ORDER BY created_at ASC LIMIT 
 					"repo", repo.FullName,
 				)
 			}
+			continue
+		}
+
+		// The installation_id arrives in the callback URL, next to a state that
+		// only says which of OUR users is signed in. Nothing in it shows that
+		// user installed the App: anyone could start an install and swap in
+		// another account's installation_id, and every repository it covers
+		// was registered here as a verified project owned by them. So each
+		// repository is checked against the installer, with GitHub's own
+		// answer: admin or write, the bar Verify() holds a project registered
+		// by hand to. An unreadable permission is not a yes.
+		permission, permErr := repoPermission(ctx, installationToken, repo.FullName, installerLogin)
+		if permErr != nil {
+			slog.Warn("could not read installer's permission, repository not synced",
+				"repo", repo.FullName,
+				"installer", installerLogin,
+				"installation_id", installationID,
+				"error", permErr,
+			)
+			continue
+		}
+		if permission != "admin" && permission != "write" {
+			slog.Warn("installer cannot maintain repository, not synced",
+				"repo", repo.FullName,
+				"installer", installerLogin,
+				"permission", permission,
+				"installation_id", installationID,
+			)
 			continue
 		}
 
