@@ -33,6 +33,10 @@ var (
 type GitHubAppHandler struct {
 	cfg config.Config
 	db  *db.DB
+	// token and listRepos read an installation. Injected so the installation
+	// sync can be tested without GitHub; nil means the real API.
+	token     func(ctx context.Context, installationID string) (string, error)
+	listRepos func(ctx context.Context, installationToken string) ([]github.InstallationRepository, string, error)
 }
 
 func NewGitHubAppHandler(cfg config.Config, d *db.DB) *GitHubAppHandler {
@@ -281,31 +285,35 @@ func (h *GitHubAppHandler) syncInstallationRepositories(ctx context.Context, use
 		"installation_id", installationID,
 	)
 
-	// Check if GitHub App is configured
-	if h.cfg.GitHubAppID == "" || h.cfg.GitHubAppPrivateKey == "" {
-		slog.Error("GitHub App not configured, cannot sync repositories",
-			"app_id_set", h.cfg.GitHubAppID != "",
-			"private_key_set", h.cfg.GitHubAppPrivateKey != "",
-		)
-		return
-	}
+	getToken, listRepos := h.token, h.listRepos
+	if getToken == nil || listRepos == nil {
+		// Check if GitHub App is configured
+		if h.cfg.GitHubAppID == "" || h.cfg.GitHubAppPrivateKey == "" {
+			slog.Error("GitHub App not configured, cannot sync repositories",
+				"app_id_set", h.cfg.GitHubAppID != "",
+				"private_key_set", h.cfg.GitHubAppPrivateKey != "",
+			)
+			return
+		}
 
-	// Create GitHub App client
-	appClient, err := github.NewGitHubAppClient(h.cfg.GitHubAppID, h.cfg.GitHubAppPrivateKey)
-	if err != nil {
-		slog.Error("failed to create GitHub App client", "error", err)
-		return
+		// Create GitHub App client
+		appClient, err := github.NewGitHubAppClient(h.cfg.GitHubAppID, h.cfg.GitHubAppPrivateKey)
+		if err != nil {
+			slog.Error("failed to create GitHub App client", "error", err)
+			return
+		}
+		getToken, listRepos = appClient.GetInstallationToken, appClient.ListInstallationRepositories
 	}
 
 	// Get installation token
-	installationToken, err := appClient.GetInstallationToken(ctx, installationID)
+	installationToken, err := getToken(ctx, installationID)
 	if err != nil {
 		slog.Error("failed to get installation token", "error", err, "installation_id", installationID)
 		return
 	}
 
 	// List repositories
-	repos, repositorySelection, err := appClient.ListInstallationRepositories(ctx, installationToken)
+	repos, repositorySelection, err := listRepos(ctx, installationToken)
 	if err != nil {
 		slog.Error("failed to list installation repositories", "error", err)
 		return
