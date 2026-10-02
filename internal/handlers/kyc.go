@@ -408,7 +408,9 @@ WHERE id = $1
 				"message": err.Error(),
 			})
 		}
-		slog.Info("didit session created", "session_id", sessionResp.SessionID, "url", sessionResp.URL, "user_id", userID)
+		// Not the URL: it is the contributor's link into their own
+		// verification, and it is already stored in kyc_data.
+		slog.Info("didit session created", "session_id", sessionResp.SessionID, "user_id", userID)
 
 		// Store session ID and URL in database (replaces any existing session)
 		// Store the URL in kyc_data so we can retrieve it later
@@ -604,10 +606,14 @@ WHERE id = $2
 			} else {
 				// Session exists in Didit - update status based on Didit response
 
-				// Log the full decision structure for debugging
-				decisionJSONDebug, _ := json.Marshal(decision.Decision)
-				dataJSONDebug, _ := json.Marshal(decision.Data)
-				extraFieldsJSON, _ := json.Marshal(decision.ExtraFields)
+				// Statuses only. This used to log decision, data and
+				// extra_fields in full, at Info, on every poll - and the
+				// billing tab polls every three seconds while a verification
+				// is open. Those blocks are the identity record itself: name,
+				// date of birth, document number, address, the lot, copied
+				// into the platform's log stream where we cannot delete it.
+				// The decision is already stored in kyc_data for anyone who
+				// needs to look at one.
 				currentStatusStr := "nil"
 				if kycStatus != nil {
 					currentStatusStr = *kycStatus
@@ -616,10 +622,7 @@ WHERE id = $2
 					"session_id", *kycSessionID,
 					"didit_status", decision.Status,
 					"mapped_status", newStatus,
-					"current_db_status", currentStatusStr,
-					"decision", string(decisionJSONDebug),
-					"data", string(dataJSONDebug),
-					"extra_fields", string(extraFieldsJSON))
+					"current_db_status", currentStatusStr)
 
 				// Store Decision, Data, and any extra fields from Didit response
 				combinedData := map[string]interface{}{

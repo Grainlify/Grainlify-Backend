@@ -151,9 +151,12 @@ func (c *Client) GetSessionDecision(ctx context.Context, sessionID string) (Sess
 	}
 
 	// First, unmarshal into a generic map to capture all fields
+	// The body is deliberately not in this error. A 2xx body from this
+	// endpoint IS the decision record - name, date of birth, document
+	// number - and every caller logs the error it gets back.
 	var rawMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
-		return SessionDecisionResponse{}, fmt.Errorf("decode response: %w, body: %s", err, string(bodyBytes))
+		return SessionDecisionResponse{}, fmt.Errorf("decode decision response (%d bytes): %w", len(bodyBytes), err)
 	}
 
 	// Extract known fields
