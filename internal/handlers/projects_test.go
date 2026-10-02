@@ -120,6 +120,78 @@ func TestProjectsHandler_Create(t *testing.T) {
 	})
 }
 
+// POST /projects is open to anybody signed in, and it used to upsert on
+// github_full_name with owner_user_id = EXCLUDED.owner_user_id - so naming a
+// repository someone else had registered made you its owner, verified status,
+// installation and all. Ownership is what every maintainer route checks, and
+// the installation is what the bot comments and assigns with.
+func TestProjectsHandler_Create_CannotTakeOverAnotherUsersProject(t *testing.T) {
+	d := testDB(t)
+	cfg := config.Config{JWTSecret: projectsTestJWTSecret}
+	app := newProjectsTestApp(cfg, d)
+	ctx := context.Background()
+	_, ecoName := projectsFxEcosystem(t, d.Pool)
+
+	for _, status := range []string{"verified", "pending_verification"} {
+		t.Run(status, func(t *testing.T) {
+			owner := projectsFxUser(t, d.Pool)
+			intruder := projectsFxUser(t, d.Pool)
+			installation := "inst-" + uuid.New().String()[:8]
+			projectID := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{
+				OwnerUserID: owner, Status: status, InstallationID: &installation,
+			})
+			var fullName string
+			if err := d.Pool.QueryRow(ctx, `SELECT github_full_name FROM projects WHERE id = $1`, projectID).Scan(&fullName); err != nil {
+				t.Fatalf("read project: %v", err)
+			}
+
+			code, body := projectsFxDoJSON(t, app, "POST", "/projects", projectsFxJWT(t, cfg.JWTSecret, intruder, "contributor"), map[string]any{
+				"github_full_name": fullName,
+				"ecosystem_name":   ecoName,
+			})
+			if code != fiber.StatusConflict {
+				t.Errorf("status = %d, want 409, body=%s", code, body)
+			}
+
+			var gotOwner uuid.UUID
+			var gotStatus string
+			if err := d.Pool.QueryRow(ctx, `SELECT owner_user_id, status FROM projects WHERE id = $1`, projectID).Scan(&gotOwner, &gotStatus); err != nil {
+				t.Fatalf("read project: %v", err)
+			}
+			if gotOwner != owner {
+				t.Errorf("owner_user_id = %s, want the original owner %s: another user took the project over", gotOwner, owner)
+			}
+			if gotStatus != status {
+				t.Errorf("status = %q, want %q unchanged", gotStatus, status)
+			}
+		})
+	}
+
+	// The owner re-submitting their own project is an edit, and stays one.
+	t.Run("owner re-registering keeps the project and its status", func(t *testing.T) {
+		owner := projectsFxUser(t, d.Pool)
+		projectID := projectsFxInsertProject(t, d.Pool, projectsFxProjectSpec{OwnerUserID: owner})
+		var fullName string
+		if err := d.Pool.QueryRow(ctx, `SELECT github_full_name FROM projects WHERE id = $1`, projectID).Scan(&fullName); err != nil {
+			t.Fatalf("read project: %v", err)
+		}
+		code, body := projectsFxDoJSON(t, app, "POST", "/projects", projectsFxJWT(t, cfg.JWTSecret, owner, "contributor"), map[string]any{
+			"github_full_name": fullName,
+			"ecosystem_name":   ecoName,
+		})
+		if code != fiber.StatusCreated {
+			t.Fatalf("status = %d, want 201, body=%s", code, body)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp["id"] != projectID.String() || resp["status"] != "verified" {
+			t.Errorf("response = %v, want the same project (%s), still verified", resp, projectID)
+		}
+	})
+}
+
 func TestProjectsHandler_Mine(t *testing.T) {
 	d := testDB(t)
 	cfg := config.Config{JWTSecret: projectsTestJWTSecret}

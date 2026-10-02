@@ -82,20 +82,35 @@ WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
 			tagsJSON, _ = json.Marshal(req.Tags)
 		}
 
+		// A repository already registered is only ever updated by its owner.
+		//
+		// This used to set owner_user_id = EXCLUDED.owner_user_id on conflict,
+		// so anybody signed in could name a repository someone else had
+		// registered and become its owner - verified status, installation and
+		// all - without proving anything. The WHERE makes the conflict a no-op
+		// for anyone else, which RETURNING reports as no row. Ownership moves
+		// only through the GitHub App installation, where GitHub has said the
+		// installer can maintain the repository.
 		var projectID uuid.UUID
 		var status string
 		err = h.db.Pool.QueryRow(c.Context(), `
 INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, category, status)
 VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification')
 ON CONFLICT (github_full_name) DO UPDATE SET
-  owner_user_id = EXCLUDED.owner_user_id,
   ecosystem_id = EXCLUDED.ecosystem_id,
   language = EXCLUDED.language,
   tags = EXCLUDED.tags,
   category = EXCLUDED.category,
   updated_at = now()
+WHERE projects.owner_user_id = EXCLUDED.owner_user_id
 RETURNING id, status
 `, userID, fullName, ecosystemID, req.Language, tagsJSON, req.Category).Scan(&projectID, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":   "project_already_registered",
+				"message": "This repository is already registered by another account. If you maintain it, install the Grainlify GitHub App on it to verify.",
+			})
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "project_create_failed"})
 		}
