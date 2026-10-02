@@ -233,6 +233,13 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Put("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Put)
 	app.Delete("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Delete)
 
+	// Which version of the Terms the caller accepted (internal/terms). The
+	// frontend asks before letting somebody continue when it is older than
+	// the text it is showing.
+	termsH := handlers.NewTermsHandler(deps.DB)
+	app.Get("/me/terms", auth.RequireAuth(cfg.JWTSecret), termsH.Get)
+	app.Post("/me/terms/accept", auth.RequireAuth(cfg.JWTSecret), termsH.Accept)
+
 	// Payout: where a reward is sent, and how somebody claims it.
 	//
 	// Separate from wallet sign-in throughout - `wallets` answers "prove you hold
