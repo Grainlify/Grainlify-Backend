@@ -61,6 +61,19 @@ func NewAdminKeeperHubPayoutHandlerWith(svc *keeperhubrail.Service) *AdminKeeper
 // leg, every dispatch attempt and every exclusion. 404 not_found when the event
 // has no run for the pool.
 //
+// # latest_payout_run_id, in both answers
+//
+// Both the 200 and the 404 carry latest_payout_run_id and
+// latest_payout_run_created_at: the event's current payout computation, which
+// is the payout_run_id release accepts, or null for both when nothing has been
+// computed. The 404 carries them because that is the moment they are needed -
+// no run yet, and release takes the computation as an explicit id the admin
+// otherwise has no way to see. It stays a 404 rather than becoming a 200 with
+// a null run so a client that reads "404 not_found" as "no run" keeps working.
+//
+// The id comes from keeperhubrail, which reads it with the same query release
+// checks against; nothing here touches the computation tables.
+//
 // # No 503 here, deliberately
 //
 // The write routes answer 503 when KeeperHub is not configured, because they
@@ -79,6 +92,15 @@ func (h *AdminKeeperHubPayoutHandler) Run() fiber.Handler {
 		}
 		pool := c.Query("pool", keeperhubrail.PoolContributor)
 		view, err := h.reader.RunView(c.Context(), hid, pool, adminActor(c), h.configErr)
+		var noRun *keeperhubrail.NoRunError
+		if errors.As(err, &noRun) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error":                        "not_found",
+				"detail":                       err.Error(),
+				"latest_payout_run_id":         noRun.ID,
+				"latest_payout_run_created_at": noRun.CreatedAt,
+			})
+		}
 		if err != nil {
 			return keeperhubError(c, err, hid)
 		}

@@ -34,6 +34,64 @@ type RunView struct {
 	Exclusions      []ExclusionView `json:"exclusions"`
 
 	PayoutWallet PayoutWalletView `json:"payout_wallet"`
+
+	// Embedded, so its two fields sit at the top level of the response beside
+	// run rather than inside it: they describe the event, not this run.
+	LatestPayoutRun
+}
+
+// LatestPayoutRun is the event's current payout computation - the
+// hackathon_payout_runs row release will accept as payout_run_id - or nulls
+// when nothing has been computed yet.
+//
+// # Why the screen needs it
+//
+// Release takes the computation to pay as an explicit id and refuses any but
+// the newest, so an admin cannot start a first payout without knowing it, and
+// before this nothing in the API said what it was. It is the same function
+// release checks against (currentPayoutRun), so the id offered here is the id
+// release accepts - until an upheld appeal recomputes, at which point both move
+// together.
+//
+// # Not the run's own computation
+//
+// Run.PayoutRunID is what an existing run was planned from, and a resume must
+// keep sending that one (release refuses run_mismatch otherwise). When the two
+// differ, the run was planned from a superseded computation and the resume
+// summary already says payout_run_not_current; this field is not an invitation
+// to resume under the newer id.
+//
+// It is an id and a timestamp, never an amount: unit values stay in the
+// domain packages (see TestSettlementFiguresNeverReachAPresentationLayer).
+type LatestPayoutRun struct {
+	ID        *uuid.UUID `json:"latest_payout_run_id"`
+	CreatedAt *time.Time `json:"latest_payout_run_created_at"`
+}
+
+// NoRunError is RunView's answer for an event with no run in the pool yet. It
+// is ErrNotFound to everything that only asks errors.Is, so every existing
+// caller and the 404 not_found mapping are unchanged, and it still carries the
+// current computation - because "no run yet" is exactly when the screen needs
+// that id, to start the first one.
+type NoRunError struct {
+	LatestPayoutRun
+}
+
+func (e *NoRunError) Error() string { return ErrNotFound.Error() }
+func (e *NoRunError) Unwrap() error { return ErrNotFound }
+
+// latestPayoutRun reads currentPayoutRun for the view, turning "nothing
+// computed yet" into nulls rather than an error: it is a state the screen
+// shows, not a failure to read.
+func (s *Service) latestPayoutRun(ctx context.Context, hackathonID uuid.UUID) (LatestPayoutRun, error) {
+	id, createdAt, err := s.currentPayoutRun(ctx, hackathonID)
+	if isNotFound(err) {
+		return LatestPayoutRun{}, nil
+	}
+	if err != nil {
+		return LatestPayoutRun{}, fmt.Errorf("keeperhubrail: latest payout run: %w", err)
+	}
+	return LatestPayoutRun{ID: &id, CreatedAt: &createdAt}, nil
 }
 
 // PayoutWalletView is the wallet the payout workflow sends from, as configured
@@ -214,6 +272,10 @@ const resumeAssumes = "Evaluated as though the release request were explicitly c
 // RunView reads one event and pool's run for the admin screen. It calls nothing
 // outside this database, so it works whether or not KeeperHub is configured.
 //
+// With no run for the pool it returns a *NoRunError (errors.Is ErrNotFound)
+// carrying the event's current computation, so the screen can offer a first
+// release.
+//
 // railUnavailable is why the rail cannot dispatch at all (unset keys), or nil.
 // It changes only the resume summary.
 func (s *Service) RunView(ctx context.Context, hackathonID uuid.UUID, pool string, reader uuid.UUID, railUnavailable error) (*RunView, error) {
@@ -221,11 +283,17 @@ func (s *Service) RunView(ctx context.Context, hackathonID uuid.UUID, pool strin
 		return nil, fmt.Errorf("%w (got %q)", ErrUnsupportedPool, pool)
 	}
 
+	// Read before the run, because it is answered whether or not one exists.
+	latest, err := s.latestPayoutRun(ctx, hackathonID)
+	if err != nil {
+		return nil, err
+	}
+
 	var (
 		h        RunHeader
 		explorer *string
 	)
-	err := s.Pool.QueryRow(ctx, `
+	err = s.Pool.QueryRow(ctx, `
 		SELECT r.id, r.hackathon_id, r.pool, r.pool_minor::text, r.chain_id, r.evm_chain_id, r.state,
 		       r.hackathon_payout_run_id, r.released_by, r.created_at, r.updated_at,
 		       c.network, c.asset->>'symbol', (c.asset->>'decimals')::int, c.explorer_url_template
@@ -236,7 +304,7 @@ func (s *Service) RunView(ctx context.Context, hackathonID uuid.UUID, pool strin
 			&h.PayoutRunID, &h.ReleasedBy, &h.CreatedAt, &h.UpdatedAt,
 			&h.Network, &h.AssetSymbol, &h.AssetDecimals, &explorer)
 	if isNotFound(err) {
-		return nil, ErrNotFound
+		return nil, &NoRunError{LatestPayoutRun: latest}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("keeperhubrail: load run: %w", err)
@@ -244,7 +312,8 @@ func (s *Service) RunView(ctx context.Context, hackathonID uuid.UUID, pool strin
 	h.ExplorerURLTemplate = explorer
 	v := &RunView{
 		Run: h, Legs: []LegView{}, Attempts: []AttemptView{}, Exclusions: []ExclusionView{},
-		PayoutWallet: payoutWalletView(s.PayoutWallet),
+		PayoutWallet:    payoutWalletView(s.PayoutWallet),
+		LatestPayoutRun: latest,
 	}
 
 	if err := s.loadLegs(ctx, v); err != nil {

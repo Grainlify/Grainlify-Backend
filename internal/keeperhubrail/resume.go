@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -169,10 +170,8 @@ func (s *Service) checkEvent(ctx context.Context, req ReleaseRequest) error {
 	// The guard confirms a payout run id was supplied, not that it is the one
 	// to pay. An upheld appeal recomputes into a NEW run, and paying the
 	// superseded one pays the pre-appeal unit value - correct for nobody.
-	var current uuid.UUID
-	if err := s.Pool.QueryRow(ctx, `
-		SELECT id FROM hackathon_payout_runs WHERE hackathon_id = $1
-		ORDER BY created_at DESC, id DESC LIMIT 1`, req.HackathonID).Scan(&current); err != nil {
+	current, _, err := s.currentPayoutRun(ctx, req.HackathonID)
+	if err != nil {
 		return fmt.Errorf("%w: no computed payout run: %v", ErrPayoutRunNotCurrent, err)
 	}
 	if current != req.PayoutRunID {
@@ -193,6 +192,29 @@ func (s *Service) checkEvent(ctx context.Context, req ReleaseRequest) error {
 		return fmt.Errorf("%w: settlement %s", ErrSettledOnAptos, id)
 	}
 	return nil
+}
+
+// currentPayoutRun is THE definition of "this event's current computation": the
+// newest hackathon_payout_runs row by created_at, ties broken by the larger id
+// so two rows written in the same instant still have exactly one answer.
+//
+// checkEvent refuses a release for any other computation, and RunView offers
+// this one to the admin screen as the id to start a first release with. Both
+// read it here, for the same reason the leg rules above are shared: a screen
+// that offers an id the release then refuses as payout_run_not_current is
+// worse than a screen that offers nothing.
+//
+// pgx.ErrNoRows when the event has no computation yet; the caller decides what
+// that means.
+func (s *Service) currentPayoutRun(ctx context.Context, hackathonID uuid.UUID) (uuid.UUID, time.Time, error) {
+	var (
+		id        uuid.UUID
+		createdAt time.Time
+	)
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, created_at FROM hackathon_payout_runs WHERE hackathon_id = $1
+		ORDER BY created_at DESC, id DESC LIMIT 1`, hackathonID).Scan(&id, &createdAt)
+	return id, createdAt, err
 }
 
 // Refusal reasons, as the admin screen receives them. Each is the same name the

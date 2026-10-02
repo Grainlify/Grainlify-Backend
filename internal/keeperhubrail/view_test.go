@@ -1,6 +1,7 @@
 package keeperhubrail
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -404,5 +406,132 @@ func TestLegClassification_IsOneDefinition(t *testing.T) {
 	}
 	if LegResendable("unknown") || !LegResendable("failed") || LegBlocks("confirmed") || LegResendable("confirmed") {
 		t.Error("unknown must never be resendable; failed must be; confirmed is neither")
+	}
+}
+
+// An event nothing has been computed for: no run, and the view says so with
+// nulls rather than an id the release would refuse.
+func TestRunView_NoComputationOffersNoPayoutRunID(t *testing.T) {
+	f := fixture(t)
+	s := &Service{Pool: f.d.Pool}
+	// An event id with no computation and no run at all.
+	_, err := s.RunView(context.Background(), uuid.New(), PoolContributor, f.actor, nil)
+	var noRun *NoRunError
+	if !errors.As(err, &noRun) || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want a *NoRunError that is ErrNotFound", err)
+	}
+	if noRun.ID != nil || noRun.CreatedAt != nil {
+		t.Fatalf("latest = %v / %v, want null / null when nothing is computed", noRun.ID, noRun.CreatedAt)
+	}
+	b, _ := json.Marshal(noRun.LatestPayoutRun)
+	if string(b) != `{"latest_payout_run_id":null,"latest_payout_run_created_at":null}` {
+		t.Fatalf("json = %s, want both fields present and null", b)
+	}
+}
+
+// Several computations, the newest by created_at among them and two that tie
+// on created_at: the view offers exactly the one release accepts, and release
+// refuses every other. This is the test that keeps the screen and the release
+// on one definition of "current".
+func TestRunView_NoRunOffersThePayoutRunIDReleaseAccepts(t *testing.T) {
+	f := fixture(t)
+	ctx := context.Background()
+	insert := func(at time.Time) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := f.d.Pool.QueryRow(ctx, `
+			INSERT INTO hackathon_payout_runs (hackathon_id, contributor_prize_pool, total_units, unit_value, created_at)
+			VALUES ($1, 7, 7, 1, $2) RETURNING id`, f.hid, at).Scan(&id); err != nil {
+			t.Fatalf("payout run: %v", err)
+		}
+		return id
+	}
+	older := insert(time.Now().Add(-time.Hour))
+	// Two rows in the same instant, both newer than the fixture's: only the id
+	// tiebreak separates them, and it must separate them the same way for both
+	// readers.
+	tie := time.Now().Add(time.Minute)
+	tieA, tieB := insert(tie), insert(tie)
+	newest, loser := tieA, tieB
+	if bytes.Compare(tieB[:], tieA[:]) > 0 {
+		newest, loser = tieB, tieA
+	}
+
+	s := &Service{Pool: f.d.Pool, Rail: &fakeRail{chainID: f.evmChainID}}
+	_, err := s.RunView(ctx, f.hid, PoolContributor, f.actor, nil)
+	var noRun *NoRunError
+	if !errors.As(err, &noRun) {
+		t.Fatalf("err = %v, want *NoRunError before any release", err)
+	}
+	if noRun.ID == nil || *noRun.ID != newest {
+		t.Fatalf("latest_payout_run_id = %v, want %s (newest created_at, larger id on a tie)", noRun.ID, newest)
+	}
+	if noRun.CreatedAt == nil || noRun.CreatedAt.IsZero() {
+		t.Fatalf("latest_payout_run_created_at = %v, want the computation's timestamp", noRun.CreatedAt)
+	}
+
+	// Every other computation is refused as not current...
+	for _, other := range []uuid.UUID{f.payoutRun, older, loser} {
+		req := f.req()
+		req.PayoutRunID = other
+		if _, err := s.Release(ctx, req); !errors.Is(err, ErrPayoutRunNotCurrent) {
+			t.Fatalf("release with %s: err = %v, want ErrPayoutRunNotCurrent", other, err)
+		}
+	}
+	// ...and the offered one is accepted.
+	req := f.req()
+	req.PayoutRunID = *noRun.ID
+	if _, err := s.Release(ctx, req); err != nil {
+		t.Fatalf("release with the offered latest_payout_run_id: %v", err)
+	}
+
+	// Once the run exists the field is still there, beside the run, at the
+	// top level of the response.
+	v, err := s.RunView(ctx, f.hid, PoolContributor, f.actor, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.LatestPayoutRun.ID == nil || *v.LatestPayoutRun.ID != newest || v.Run.PayoutRunID != newest {
+		t.Fatalf("latest = %v, run planned from %s; want both %s", v.LatestPayoutRun.ID, v.Run.PayoutRunID, newest)
+	}
+	var top map[string]json.RawMessage
+	b, _ := json.Marshal(v)
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatal(err)
+	}
+	if string(top["latest_payout_run_id"]) != `"`+newest.String()+`"` {
+		t.Fatalf("top-level latest_payout_run_id = %s, want %q", top["latest_payout_run_id"], newest)
+	}
+	if _, ok := top["latest_payout_run_created_at"]; !ok {
+		t.Fatal("latest_payout_run_created_at missing from the top level")
+	}
+}
+
+// An appeal recomputes after the run was planned: the field moves to the new
+// computation, the run keeps the one it was planned from, and the resume
+// summary - not this field - is what says the run can no longer send.
+func TestRunView_LatestMovesPastASupersededRun(t *testing.T) {
+	f := fixture(t)
+	ctx := context.Background()
+	s, _, _ := partialFailureRun(t, f)
+
+	var recomputed uuid.UUID
+	if err := f.d.Pool.QueryRow(ctx, `
+		INSERT INTO hackathon_payout_runs (hackathon_id, contributor_prize_pool, total_units, unit_value, created_at)
+		VALUES ($1, 7, 7, 1, now() + interval '1 minute') RETURNING id`, f.hid).Scan(&recomputed); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.RunView(ctx, f.hid, PoolContributor, f.actor, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.LatestPayoutRun.ID == nil || *v.LatestPayoutRun.ID != recomputed {
+		t.Fatalf("latest = %v, want the recomputation %s", v.LatestPayoutRun.ID, recomputed)
+	}
+	if v.Run.PayoutRunID != f.payoutRun {
+		t.Fatalf("run.payout_run_id = %s, want the computation it was planned from, %s", v.Run.PayoutRunID, f.payoutRun)
+	}
+	if v.Resume.Allowed || v.Resume.Reason != ReasonPayoutRunNotCurrent {
+		t.Fatalf("resume = %+v, want refused with %s", v.Resume, ReasonPayoutRunNotCurrent)
 	}
 }
