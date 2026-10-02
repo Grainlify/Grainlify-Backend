@@ -234,8 +234,11 @@ WHERE state = $1
 				"state", state,
 			)
 		} else {
-			// Sync repositories in background (don't block redirect)
-			go h.syncInstallationRepositories(c.Context(), userID, installationID)
+			// Sync repositories in background (don't block redirect). Not
+			// c.Context(): fiber recycles the request context once this
+			// handler returns, while the sync is still running. The sync sets
+			// its own 60s timeout, as verifyAndWebhook does for Verify().
+			go h.syncInstallationRepositories(context.Background(), userID, installationID)
 		}
 
 		// Redirect to frontend with success message
