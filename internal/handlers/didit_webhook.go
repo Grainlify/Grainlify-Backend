@@ -5,9 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -93,12 +93,17 @@ func (h *DiditWebhookHandler) Receive() fiber.Handler {
 		}
 
 		var sessionID string
-		var status string
 
 		// Handle GET request (callback redirect from Didit)
 		if c.Method() == "GET" {
+			// The callback also carries a `status` query param. It is
+			// deliberately not read. This request is a browser redirect, so
+			// its query string is whatever the person holding the link typed:
+			// "status=Approved" here once marked somebody verified whenever
+			// Didit's API was slow or unconfigured, and verification is what
+			// unlocks GrainHack and Founding Pool payouts. The session id is
+			// only used to ask Didit what the decision actually is.
 			sessionID = c.Query("verificationSessionId")
-			status = c.Query("status")
 
 			if sessionID == "" {
 				// Try alternative query param name
@@ -118,52 +123,60 @@ func (h *DiditWebhookHandler) Receive() fiber.Handler {
 			if err := c.BodyParser(&event); err != nil {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_json"})
 			}
+			// event.Status is signed by Didit, so unlike the GET query it is
+			// not forgeable - but it is still not applied. One source of truth
+			// for both paths: the decision read back from Didit's API. A
+			// signed body status used only when that read fails would mean
+			// the rule is "Didit decides, unless Didit is down", and the
+			// whole point is that an outage leaves KYC exactly as it was.
 			sessionID = event.SessionID
-			status = event.Status
 		}
 
 		if sessionID == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing_session_id"})
 		}
 
-		// Find user by session ID
+		// Find user by session ID. The stored status comes back too so that a
+		// request we decline to act on can still say what we hold.
 		var userID uuid.UUID
+		var storedStatus string
 		err := h.db.Pool.QueryRow(c.Context(), `
-SELECT id
+SELECT id, COALESCE(kyc_status, '')
 FROM users
 WHERE kyc_session_id = $1
-`, sessionID).Scan(&userID)
+`, sessionID).Scan(&userID, &storedStatus)
 		if err != nil {
 			// Session not found - might be from another system or invalid
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session_not_found"})
 		}
 
-		// Process status update
-		// Fetch latest decision from Didit API if available
-		var kycStatus string
-		var recognised bool
-		var decisionData map[string]interface{}
-		// The raw status this decision came from, for the log if we reject it.
-		rawStatus := status
+		// The decision fetched from Didit's API is the only thing that may
+		// change kyc_status here. There used to be a fallback to the
+		// query/body status when this fetch failed or no client was
+		// configured; that fallback is what made the GET callback fail open.
+		//
+		// When Didit cannot be asked, nothing changes. Nothing is lost by
+		// waiting: the /auth/kyc/status poll and KYCStatusReconciler both
+		// re-read the same decision later, and a POST answered 5xx is
+		// redelivered by Didit. Only the session id is logged - the error
+		// from the client can carry a response body.
+		if h.didit == nil {
+			slog.Warn("didit webhook: no Didit client configured, kyc_status left unchanged",
+				"session_id", sessionID)
+			return h.respondUnchanged(c, sessionID, storedStatus, "didit_not_configured")
+		}
+		decision, err := h.didit.GetSessionDecision(c.Context(), sessionID)
+		if err != nil {
+			slog.Warn("didit webhook: could not fetch decision from Didit, kyc_status left unchanged",
+				"session_id", sessionID)
+			return h.respondUnchanged(c, sessionID, storedStatus, "didit_unreachable")
+		}
 
-		if h.didit != nil {
-			decision, err := h.didit.GetSessionDecision(c.Context(), sessionID)
-			if err != nil {
-				// If API call fails, use status from query/body
-				kycStatus, recognised = mapDiditStatus(status)
-			} else {
-				// Map Didit status to our KYC status
-				rawStatus = decision.Status
-				kycStatus, recognised = mapDiditStatus(decision.Status)
-				// Store both Decision and Data from Didit response
-				decisionData = map[string]interface{}{
-					"decision": decision.Decision,
-					"data":     decision.Data,
-				}
-			}
-		} else {
-			// If no Didit client, use status from query/body
-			kycStatus, recognised = mapDiditStatus(status)
+		kycStatus, recognised := mapDiditStatus(decision.Status)
+		// Store both Decision and Data from Didit response
+		decisionData := map[string]interface{}{
+			"decision": decision.Decision,
+			"data":     decision.Data,
 		}
 
 		// An unrecognised status must not overwrite a real one. Ack the
@@ -173,7 +186,7 @@ WHERE kyc_session_id = $1
 		// mapDiditStatus has already logged the unknown value at error level.
 		if !recognised {
 			slog.Warn("didit webhook: unrecognised status, kyc_status left unchanged",
-				"session_id", sessionID, "didit_status", rawStatus)
+				"session_id", sessionID, "didit_status", decision.Status)
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{
 				"ok": true, "ignored": "unrecognised_status",
 			})
@@ -217,21 +230,57 @@ WHERE kyc_session_id = $1
 			alertAdminOfKYCReview(c.Context(), h.db, h.reviewSink, userID, sessionID, "webhook")
 		}
 
-		// For GET requests (callback redirect), redirect to success page
+		// For GET requests (callback redirect), send the browser back to the app
 		if c.Method() == "GET" {
-			// Redirect to frontend with success message
-			successURL := h.cfg.GitHubOAuthSuccessRedirectURL
-			if successURL == "" && h.cfg.FrontendBaseURL != "" {
-				successURL = strings.TrimSuffix(h.cfg.FrontendBaseURL, "/")
-			}
-			if successURL != "" {
-				// Add query params to indicate success
-				redirectURL := fmt.Sprintf("%s?kyc=verified&session_id=%s", successURL, sessionID)
-				return c.Redirect(redirectURL, fiber.StatusFound)
+			if redirected, err := h.redirectToApp(c, sessionID, kycStatus); redirected {
+				return err
 			}
 		}
 
 		// For POST requests (webhook), return JSON
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true, "status": kycStatus})
 	}
+}
+
+// respondUnchanged answers a request that was authenticated (or, for GET, at
+// least named a real session) but could not be checked against Didit, so
+// kyc_status was left alone.
+//
+// GET is a person's browser coming back from Didit, so it gets the same
+// redirect a successful callback gets - the app's billing tab polls
+// /auth/kyc/status for the real answer and never read anything from this
+// response. POST is Didit's webhook delivery, so it gets a 5xx: Didit retries
+// a failed delivery, and a retry a few minutes later is the cheapest chance of
+// applying the decision once the API answers again.
+func (h *DiditWebhookHandler) respondUnchanged(c *fiber.Ctx, sessionID, storedStatus, reason string) error {
+	if c.Method() == "GET" {
+		if redirected, err := h.redirectToApp(c, sessionID, storedStatus); redirected {
+			return err
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"ok": true, "status": storedStatus, "ignored": reason,
+		})
+	}
+	return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": reason})
+}
+
+// redirectToApp sends the callback's browser back to the frontend. It reports
+// false when no frontend URL is configured so the caller can answer in JSON.
+//
+// `kyc` carries the status we actually hold. It used to say "verified" on
+// every callback, including declined ones and ones we never checked. Nothing
+// in the frontend reads it, but a URL that claims a verification that did not
+// happen is the same mistake as the one above, made in the other direction.
+func (h *DiditWebhookHandler) redirectToApp(c *fiber.Ctx, sessionID, status string) (bool, error) {
+	successURL := h.cfg.GitHubOAuthSuccessRedirectURL
+	if successURL == "" && h.cfg.FrontendBaseURL != "" {
+		successURL = strings.TrimSuffix(h.cfg.FrontendBaseURL, "/")
+	}
+	if successURL == "" {
+		return false, nil
+	}
+	q := url.Values{}
+	q.Set("kyc", status)
+	q.Set("session_id", sessionID)
+	return true, c.Redirect(successURL+"?"+q.Encode(), fiber.StatusFound)
 }

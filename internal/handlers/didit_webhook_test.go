@@ -245,65 +245,45 @@ func TestDiditWebhookReceive_POSTMalformedJSONBadRequest(t *testing.T) {
 	diditWebhookSuiteAssertError(t, body, "invalid_json")
 }
 
-func TestDiditWebhookReceive_POSTUpdatesKYCStatusToVerified(t *testing.T) {
+// Without a Didit client the handler has no way to learn the real decision,
+// so a correctly signed delivery changes nothing and is answered 5xx for Didit
+// to redeliver. Both of these used to assert the opposite - that the body's
+// status was applied as-is - which is the fallback that let an unconfirmed
+// status through. The positive path (the decision fetched from Didit's API is
+// what gets written) is covered in didit_webhook_trust_test.go, which can
+// stand in a client for Didit.
+func TestDiditWebhookReceive_POSTWithoutDiditClientLeavesStatusUnchanged(t *testing.T) {
 	d := testDB(t)
 	cfg := config.Config{DiditWebhookSecret: diditWebhookSuiteSecret}
 	app := diditWebhookSuiteApp(cfg, d)
 
-	sessionID := "sess-verified-" + uuid.NewString()
-	userID := diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
+	for _, status := range []string{"approved", "declined"} {
+		t.Run(status, func(t *testing.T) {
+			sessionID := "sess-noclient-" + uuid.NewString()
+			userID := diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
 
-	payload := []byte(fmt.Sprintf(`{"event":"status.updated","session_id":%q,"status":"approved"}`, sessionID))
-	headers := diditWebhookSuiteSignedHeaders(diditWebhookSuiteSecret, payload, time.Now())
-	resp, body := diditWebhookSuiteDo(t, app, "POST", "/webhooks/didit", payload, headers)
-	if resp.StatusCode != fiber.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, fiber.StatusOK, body)
-	}
+			payload := []byte(fmt.Sprintf(`{"event":"status.updated","session_id":%q,"status":%q}`, sessionID, status))
+			headers := diditWebhookSuiteSignedHeaders(diditWebhookSuiteSecret, payload, time.Now())
+			resp, body := diditWebhookSuiteDo(t, app, "POST", "/webhooks/didit", payload, headers)
+			if resp.StatusCode != fiber.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, fiber.StatusServiceUnavailable, body)
+			}
+			diditWebhookSuiteAssertError(t, body, "didit_not_configured")
 
-	var decoded map[string]any
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("decode response %s: %v", body, err)
-	}
-	if decoded["ok"] != true {
-		t.Errorf("ok = %v, want true", decoded["ok"])
-	}
-	if decoded["status"] != "verified" {
-		t.Errorf("status = %v, want %q", decoded["status"], "verified")
-	}
-
-	row := diditWebhookSuiteReadUser(t, d, userID)
-	if row.KYCStatus != "verified" {
-		t.Errorf("kyc_status = %q, want %q", row.KYCStatus, "verified")
-	}
-	if row.KYCVerifiedAt == nil {
-		t.Error("kyc_verified_at = nil, want a timestamp once status is verified")
+			row := diditWebhookSuiteReadUser(t, d, userID)
+			if row.KYCStatus != "pending" {
+				t.Errorf("kyc_status = %q, want unchanged %q", row.KYCStatus, "pending")
+			}
+			if row.KYCVerifiedAt != nil {
+				t.Errorf("kyc_verified_at = %v, want nil", *row.KYCVerifiedAt)
+			}
+		})
 	}
 }
 
-func TestDiditWebhookReceive_POSTUpdatesKYCStatusToRejected(t *testing.T) {
-	d := testDB(t)
-	cfg := config.Config{DiditWebhookSecret: diditWebhookSuiteSecret}
-	app := diditWebhookSuiteApp(cfg, d)
-
-	sessionID := "sess-rejected-" + uuid.NewString()
-	userID := diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
-
-	payload := []byte(fmt.Sprintf(`{"event":"status.updated","session_id":%q,"status":"declined"}`, sessionID))
-	headers := diditWebhookSuiteSignedHeaders(diditWebhookSuiteSecret, payload, time.Now())
-	resp, body := diditWebhookSuiteDo(t, app, "POST", "/webhooks/didit", payload, headers)
-	if resp.StatusCode != fiber.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, fiber.StatusOK, body)
-	}
-
-	row := diditWebhookSuiteReadUser(t, d, userID)
-	if row.KYCStatus != "rejected" {
-		t.Errorf("kyc_status = %q, want %q", row.KYCStatus, "rejected")
-	}
-	if row.KYCVerifiedAt != nil {
-		t.Errorf("kyc_verified_at = %v, want nil for a rejected verification", *row.KYCVerifiedAt)
-	}
-}
-
+// The browser callback still lands the person back in the app, but the
+// status in its query string is never applied, and the redirect reports the
+// status we actually hold rather than claiming "verified".
 func TestDiditWebhookReceive_GETRedirectsWhenFrontendBaseURLConfigured(t *testing.T) {
 	d := testDB(t)
 	cfg := config.Config{FrontendBaseURL: "https://app.example.com/"}
@@ -316,14 +296,14 @@ func TestDiditWebhookReceive_GETRedirectsWhenFrontendBaseURLConfigured(t *testin
 	if resp.StatusCode != fiber.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusFound)
 	}
-	wantLocation := "https://app.example.com?kyc=verified&session_id=" + sessionID
+	wantLocation := "https://app.example.com?kyc=pending&session_id=" + sessionID
 	if got := resp.Header.Get("Location"); got != wantLocation {
 		t.Errorf("Location = %q, want %q", got, wantLocation)
 	}
 
 	row := diditWebhookSuiteReadUser(t, d, userID)
-	if row.KYCStatus != "verified" {
-		t.Errorf("kyc_status = %q, want %q", row.KYCStatus, "verified")
+	if row.KYCStatus != "pending" {
+		t.Errorf("kyc_status = %q, want unchanged %q - the URL's status=approved must not be applied", row.KYCStatus, "pending")
 	}
 }
 
@@ -344,8 +324,8 @@ func TestDiditWebhookReceive_GETFallsBackToJSONWhenNoRedirectConfigured(t *testi
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("decode response %s: %v", body, err)
 	}
-	if decoded["status"] != "verified" {
-		t.Errorf("status = %v, want %q", decoded["status"], "verified")
+	if decoded["status"] != "pending" {
+		t.Errorf("status = %v, want the stored %q, not the query's approved", decoded["status"], "pending")
 	}
 }
 
@@ -357,15 +337,17 @@ func TestDiditWebhookReceive_GETAlternateSessionIDQueryParam(t *testing.T) {
 	userID := diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
 
 	// Uses the "session_id" fallback query param instead of
-	// "verificationSessionId" (didit_webhook.go's alternate-name lookup).
+	// "verificationSessionId" (didit_webhook.go's alternate-name lookup). A
+	// 200 rather than session_not_found is the proof the lookup worked; the
+	// status is untouched because there is no Didit client to confirm it.
 	resp, body := diditWebhookSuiteDo(t, app, "GET", "/webhooks/didit?session_id="+sessionID+"&status=rejected", nil, nil)
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, fiber.StatusOK, body)
 	}
 
 	row := diditWebhookSuiteReadUser(t, d, userID)
-	if row.KYCStatus != "rejected" {
-		t.Errorf("kyc_status = %q, want %q", row.KYCStatus, "rejected")
+	if row.KYCStatus != "pending" {
+		t.Errorf("kyc_status = %q, want unchanged %q", row.KYCStatus, "pending")
 	}
 }
 
@@ -481,22 +463,23 @@ func TestDiditWebhookReceive_POSTSignatureVerification(t *testing.T) {
 		}
 	})
 
-	t.Run("correctly signed, fresh request is accepted", func(t *testing.T) {
+	t.Run("correctly signed, fresh request gets past the signature check", func(t *testing.T) {
 		cfg := config.Config{DiditWebhookSecret: diditWebhookSuiteSecret}
 		app := diditWebhookSuiteApp(cfg, d)
 		sessionID, _ := newSession(t)
-		userID := diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
+		diditWebhookSuiteInsertUser(t, d, sessionID, "pending")
 
+		// Accepted means "authenticated", not "applied": with no Didit
+		// client the decision cannot be confirmed, so the answer is
+		// didit_not_configured rather than invalid_signature. That the
+		// confirmed decision is then written is covered in
+		// didit_webhook_trust_test.go.
 		payload := []byte(fmt.Sprintf(`{"event":"status.updated","session_id":%q,"status":"approved"}`, sessionID))
 		headers := diditWebhookSuiteSignedHeaders(diditWebhookSuiteSecret, payload, time.Now())
 		resp, body := diditWebhookSuiteDo(t, app, "POST", "/webhooks/didit", payload, headers)
-		if resp.StatusCode != fiber.StatusOK {
-			t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, fiber.StatusOK, body)
+		if resp.StatusCode == fiber.StatusUnauthorized {
+			t.Fatalf("status = %d, a correctly signed request must not be rejected; body=%s", resp.StatusCode, body)
 		}
-
-		row := diditWebhookSuiteReadUser(t, d, userID)
-		if row.KYCStatus != "verified" {
-			t.Errorf("kyc_status = %q, want %q", row.KYCStatus, "verified")
-		}
+		diditWebhookSuiteAssertError(t, body, "didit_not_configured")
 	})
 }
