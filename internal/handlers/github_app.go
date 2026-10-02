@@ -415,9 +415,17 @@ SELECT id, status FROM projects WHERE github_full_name = $1
 			projectID := existingID
 
 			// Always verify the project (update github_repo_id and status, restore if deleted)
+			//
+			// An unverified row also changes hands. POST /projects asks for no
+			// proof, so anyone could register a repository first; verifying
+			// their row here left them owning a verified project with this
+			// maintainer's installation. The installer has just been checked
+			// against GitHub, so the row is theirs. A verified row keeps its
+			// owner: they proved the same thing first.
 			_, _ = h.db.Pool.Exec(ctx, `
 UPDATE projects
 SET github_repo_id = $2,
+    owner_user_id = CASE WHEN status = 'verified' THEN owner_user_id ELSE $5 END,
     status = 'verified',
     verified_at = COALESCE(verified_at, now()),
     verification_error = NULL,
@@ -427,7 +435,7 @@ SET github_repo_id = $2,
     deleted_at = NULL,
     updated_at = now()
 WHERE id = $1
-`, projectID, repo.ID, installationID, repo.Fork)
+`, projectID, repo.ID, installationID, repo.Fork, userID)
 
 			slog.Info("verified existing project from GitHub App installation",
 				"project_id", projectID,
@@ -485,7 +493,9 @@ VALUES ($1, 'sync_issues', 'pending', now()),
 INSERT INTO projects (owner_user_id, github_full_name, ecosystem_id, language, tags, description, status, github_app_installation_id, installation_repository_selection, needs_metadata)
 VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification', $7, NULLIF($8, ''), true)
 ON CONFLICT (github_full_name) DO UPDATE SET
-  owner_user_id = EXCLUDED.owner_user_id,
+  -- Reached only when the row appeared since the lookup above; same rule as
+  -- there, a verified project keeps the owner who verified it.
+  owner_user_id = CASE WHEN projects.status = 'verified' THEN projects.owner_user_id ELSE EXCLUDED.owner_user_id END,
   github_app_installation_id = EXCLUDED.github_app_installation_id,
   -- Refreshed on every sync, but never blanked: GitHub omits these for some
   -- repos, and overwriting a description a maintainer typed with an empty

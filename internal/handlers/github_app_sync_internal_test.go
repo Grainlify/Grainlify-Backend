@@ -163,3 +163,43 @@ func TestInstallationSync_UnreadablePermissionRegistersNothing(t *testing.T) {
 		t.Errorf("%s was registered although the installer's permission could not be read", repo)
 	}
 }
+
+// POST /projects needs no proof, so anyone can register a repository first
+// and sit on it unverified. When a real maintainer then installs the App, the
+// sync verified the squatter's row and left them its owner - a verified
+// project, with the maintainer's installation, belonging to someone who
+// proved nothing. An unverified row goes to the installer GitHub vouched for;
+// a verified one stays with the maintainer who verified it.
+func TestInstallationSync_ProvenInstallerTakesOverOnlyUnverifiedProjects(t *testing.T) {
+	d := dbtest.DB(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+	login := "maintainer-" + suffix
+	installer := seedInstallTestUser(t, d, login)
+	squatter := seedInstallTestUser(t, d, "squatter-"+suffix)
+	coMaintainer := seedInstallTestUser(t, d, "co-maintainer-"+suffix)
+
+	squatted, shared := "org-"+suffix+"/squatted", "org-"+suffix+"/shared"
+	for _, p := range []struct {
+		owner        uuid.UUID
+		repo, status string
+	}{{squatter, squatted, "pending_verification"}, {coMaintainer, shared, "verified"}} {
+		if _, err := d.Pool.Exec(ctx, `INSERT INTO projects (owner_user_id, github_full_name, status) VALUES ($1, $2, $3)`,
+			p.owner, p.repo, p.status); err != nil {
+			t.Fatalf("seed %s: %v", p.repo, err)
+		}
+	}
+	h := fakeInstallation(d, []github.InstallationRepository{publicRepo(squatted), publicRepo(shared)},
+		map[string]map[string]string{squatted: {login: "admin"}, shared: {login: "admin"}})
+
+	h.syncInstallationRepositories(ctx, installer, "own-installation")
+
+	if owner, status, _ := readProject(t, d, squatted); owner != installer || status != "verified" {
+		t.Errorf("%s: owner=%s status=%q, want verified and owned by the installer (%s), not the squatter (%s)",
+			squatted, owner, status, installer, squatter)
+	}
+	if owner, status, _ := readProject(t, d, shared); owner != coMaintainer || status != "verified" {
+		t.Errorf("%s: owner=%s status=%q, want it left with the maintainer who verified it (%s)",
+			shared, owner, status, coMaintainer)
+	}
+}
