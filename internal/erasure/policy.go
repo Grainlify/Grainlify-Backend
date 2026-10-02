@@ -77,12 +77,12 @@ var Retained = []Item{
 	{
 		What:  "Anything on a public blockchain: payout transactions and the addresses involved",
 		Why:   "A blockchain cannot be edited by anybody, including us",
-		Until: "Permanent",
+		Until: "permanently",
 	},
 	{
 		What:  "Public bounty ledger entries for payouts already made",
 		Why:   "The ledger is a public record of money paid, and is never edited silently. Your GitHub login is replaced with \"erased account\" where it is shown, and the ledger records publicly that an erasure took place",
-		Until: "Permanent",
+		Until: "permanently",
 	},
 	{
 		What:  "GrainHack verdicts, draws, assignments and appeals that decided a payout, with your GitHub login replaced",
@@ -97,7 +97,7 @@ var Retained = []Item{
 	{
 		What:  "Referral links, Founding Contributor Pool membership and shares, tied to the empty account record",
 		Why:   "Other people's shares and the pool's published wave counts are computed from them. They hold no personal details once the account is erased, and an erased account is never paid",
-		Until: "For the life of the pool",
+		Until: "for the life of the pool",
 	},
 	{
 		What:  "This deletion request: when it was made, what was erased and what was kept",
@@ -106,7 +106,7 @@ var Retained = []Item{
 	},
 	{
 		What: "Your public GitHub activity on repositories listed on Grainlify, which we mirror from GitHub, and comments posted on GitHub on your behalf",
-		Why:  "It is public on GitHub and belongs to the repositories. It still counts on the public leaderboard, as it does for people with no Grainlify account. Remove it on GitHub to remove it here",
+		Why:  "It is public on GitHub and belongs to the repositories. It still counts on the public leaderboard, as it does for people with no Grainlify account",
 	},
 	{
 		What: "Projects you listed as a maintainer",
@@ -115,12 +115,12 @@ var Retained = []Item{
 	{
 		What:  "Database backups made before the erasure",
 		Why:   "Backups cannot be edited row by row. They are deleted on their own schedule",
-		Until: "Until they age out (see Retention in the Privacy Policy)",
+		Until: "until they age out (see Retention in the Privacy Policy)",
 	},
 	{
 		What:  "Application logs written before the erasure",
 		Why:   "Logs cannot be edited. They are deleted on their own schedule",
-		Until: "Until they age out (see Retention in the Privacy Policy)",
+		Until: "until they age out (see Retention in the Privacy Policy)",
 	},
 	{
 		What: "Support messages already delivered to our team's Telegram and Discord, and the billing profile your browser keeps on your device",

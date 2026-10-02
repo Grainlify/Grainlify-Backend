@@ -363,7 +363,7 @@ func (e *Executor) complete(ctx context.Context, tx pgx.Tx, id uuid.UUID, attemp
 			retained = append(retained, Item{
 				What:  fmt.Sprintf("Identifiers needed to finish the %s step by hand", name),
 				Why:   "The " + name + " step could not be completed automatically (" + r.Outcome + "). They are kept only until an administrator finishes it",
-				Until: "Until the step is finished by hand",
+				Until: "until the step is finished by hand",
 			})
 		}
 	}
