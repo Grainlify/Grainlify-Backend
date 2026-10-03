@@ -67,6 +67,22 @@ func MoneyInFlight(ctx context.Context, pool Pool, userID uuid.UUID) ([]string, 
 			         AND sc.outcome IN ('submitted', 'refused_already_claimed')))`,
 		},
 		{
+			// A line of the latest GrainHack results statement, payable or held
+			// for identity verification, that the bounty agent has not reported
+			// paid. Held counts: like a settlement hold, it is the person's money
+			// waiting on something only they can do, and erasing the account
+			// would also erase the verification it waits for.
+			"a GrainHack payout in a results statement that has not been paid",
+			`SELECT EXISTS (
+			   SELECT 1 FROM grainhack_results_statement_lines l
+			   JOIN grainhack_results_statements s ON s.id = l.statement_id
+			   WHERE l.user_id = $1
+			     AND NOT EXISTS (SELECT 1 FROM grainhack_results_statements n WHERE n.supersedes = s.id)
+			     AND NOT EXISTS (SELECT 1 FROM grainhack_payment_reports r
+			                     WHERE r.hackathon_id = s.hackathon_id AND r.pool = s.pool
+			                       AND r.github_user_id = l.github_user_id))`,
+		},
+		{
 			// Work in progress can still earn a payout, and the assignment is
 			// how it would be matched to the person.
 			"a GrainHack issue you are still assigned to",
