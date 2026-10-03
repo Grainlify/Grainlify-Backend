@@ -9,10 +9,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
+
+// countingPool counts claim attempts, so a test can see how often an idle
+// worker touches the database.
+type countingPool struct {
+	db.DBPool
+	claims atomic.Int64
+}
+
+func (p *countingPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "SET status = 'running'") {
+		p.claims.Add(1)
+	}
+	return p.DBPool.QueryRow(ctx, sql, args...)
+}
 
 type queueFixture struct {
 	d       *db.DB
@@ -272,4 +288,66 @@ func TestClaim_SkipsAPairThatIsAlreadyRunning(t *testing.T) {
 	if _, ok, _ := w.claim(ctx); ok {
 		t.Error("claimed the blocked job while its pair is still running")
 	}
+}
+
+// The old loop queried every second whether or not there was anything to do.
+// Idle, the worker now backs off; a new job wakes it at once.
+func TestRun_BacksOffWhenIdleAndWakesForNewWork(t *testing.T) {
+	f := newQueueFixture(t)
+	pool := &countingPool{DBPool: f.d.Pool}
+	var ran atomic.Int64
+	w := testWorker(pool, queueTiming{minIdle: 10 * time.Millisecond, maxIdle: 200 * time.Millisecond},
+		func(ctx context.Context, j claimedJob) error { ran.Add(1); return nil })
+
+	for len(syncqueue.Wakeups()) > 0 {
+		<-syncqueue.Wakeups()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	time.Sleep(1500 * time.Millisecond)
+	idleClaims := pool.claims.Load()
+	// 10+20+40+80+160 ms, then every 200 ms: about a dozen polls in 1.5 s.
+	// A fixed 10 ms poll would be ~150.
+	if idleClaims > 20 {
+		t.Errorf("idle worker polled %d times in 1.5s; it is not backing off", idleClaims)
+	}
+	if idleClaims < 3 {
+		t.Errorf("idle worker polled only %d times; is it running at all?", idleClaims)
+	}
+
+	// Backed off to 200 ms now. An enqueue must not wait that out.
+	start := time.Now()
+	if _, err := syncqueue.Enqueue(context.Background(), f.d.Pool, f.project, 0, syncqueue.SyncIssues); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	for ran.Load() == 0 && time.Since(start) < 2*time.Second {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ran.Load() == 0 {
+		t.Fatal("enqueued job never ran")
+	}
+	if took := time.Since(start); took > 150*time.Millisecond {
+		t.Errorf("enqueued job started after %v; the wakeup did not cut the idle wait", took)
+	}
+
+	// A job queued for later is run when it is due, not a backoff later.
+	if _, err := syncqueue.Enqueue(context.Background(), f.d.Pool, f.project, 300*time.Millisecond, syncqueue.SyncPRs); err != nil {
+		t.Fatalf("Enqueue delayed: %v", err)
+	}
+	start = time.Now()
+	for ran.Load() < 2 && time.Since(start) < 3*time.Second {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ran.Load() < 2 {
+		t.Fatal("delayed job never ran")
+	}
+	if took := time.Since(start); took < 250*time.Millisecond || took > 600*time.Millisecond {
+		t.Errorf("delayed job (due in 300ms) ran after %v", took)
+	}
+
+	cancel()
+	<-done
 }

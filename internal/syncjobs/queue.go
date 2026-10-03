@@ -27,11 +27,13 @@ import (
 // running them, each locked_by a different container hostname, the oldest
 // since 2026-01-02.
 type queueTiming struct {
-	// minIdle is the poll interval.
-	minIdle      time.Duration
-	heartbeat    time.Duration
-	leaseTimeout time.Duration
-	reapEvery    time.Duration
+	// Idle polling backs off from minIdle, doubling to maxIdle, while there is
+	// nothing to claim, and drops back to "immediately" as soon as a job runs.
+	// It was a fixed one-second poll before: 86,400 empty queries a day.
+	minIdle, maxIdle time.Duration
+	heartbeat        time.Duration
+	leaseTimeout     time.Duration
+	reapEvery        time.Duration
 	// jobDeadline bounds a single job even while it heartbeats - a hung
 	// sync must not hold its (project, type) forever. 5x the longest
 	// observed job.
@@ -40,6 +42,7 @@ type queueTiming struct {
 
 var defaultTiming = queueTiming{
 	minIdle:      1 * time.Second,
+	maxIdle:      60 * time.Second,
 	heartbeat:    30 * time.Second,
 	leaseTimeout: 5 * time.Minute,
 	reapEvery:    1 * time.Minute,
@@ -56,6 +59,9 @@ func (w *Worker) t() queueTiming {
 	d := defaultTiming
 	if t.minIdle <= 0 {
 		t.minIdle = d.minIdle
+	}
+	if t.maxIdle <= 0 {
+		t.maxIdle = d.maxIdle
 	}
 	if t.heartbeat <= 0 {
 		t.heartbeat = d.heartbeat
@@ -90,15 +96,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("db not configured")
 	}
 	tm := w.t()
+	idle := tm.minIdle
 	var nextReap time.Time
-	t := time.NewTicker(tm.minIdle)
-	defer t.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-t.C:
+		case <-timer.C:
+		case <-syncqueue.Wakeups():
+			idle = tm.minIdle
 		}
 
 		if now := time.Now(); !now.Before(nextReap) {
@@ -110,10 +119,42 @@ func (w *Worker) Run(ctx context.Context) error {
 			nextReap = now.Add(tm.reapEvery)
 		}
 
-		if _, err := w.processOne(ctx); err != nil && ctx.Err() == nil {
+		ran, err := w.processOne(ctx)
+		if err != nil && ctx.Err() == nil {
 			slog.Error("sync worker error", "error", err)
 		}
+
+		wait := time.Duration(0)
+		if !ran {
+			wait = w.idleWait(ctx, idle)
+			idle = min(idle*2, tm.maxIdle)
+		} else {
+			idle = tm.minIdle
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(wait)
 	}
+}
+
+// idleWait is how long to sleep with nothing to claim: the backoff, or less
+// if a pending job becomes due sooner (webhook jobs are queued 30 s ahead).
+func (w *Worker) idleWait(ctx context.Context, backoff time.Duration) time.Duration {
+	var secs *float64
+	if err := w.pool.QueryRow(ctx, `
+SELECT extract(epoch FROM min(run_at) - now())::float8
+FROM sync_jobs WHERE status = 'pending' AND run_at > now()
+`).Scan(&secs); err != nil || secs == nil {
+		return backoff
+	}
+	if due := time.Duration(*secs*float64(time.Second)) + 50*time.Millisecond; due < backoff {
+		return due
+	}
+	return backoff
 }
 
 // claim takes the oldest due pending job, skipping any (project, type) that
