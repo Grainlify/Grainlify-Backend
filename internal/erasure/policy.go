@@ -86,8 +86,8 @@ const RetentionPeriodPlaceholder = "[retention period to be decided]"
 var Retained = []Item{
 	{
 		What:  "Records of payouts already made or owed to you: amount, date, transaction id and the address it was sent to",
-		Why:   "Needed to account for money paid out, for tax and anti-money-laundering obligations, and to answer disputes. They point at an empty account record, not at your name",
-		Until: RetentionPeriodPlaceholder,
+		Why:   "Needed to account for money paid out, for tax and anti-money-laundering obligations, and to answer disputes. They point at an empty account record, not at your name. When they are erased, each payout round keeps only its total",
+		Until: "5 years after the payment, then erased",
 	},
 	{
 		What:  "Anything on a public blockchain: payout transactions and the addresses involved",
@@ -102,7 +102,7 @@ var Retained = []Item{
 	{
 		What:  "GrainHack verdicts, draws, assignments and appeals that decided a payout, with your GitHub login replaced",
 		Why:   "They are the basis of payouts to you and to other people, and must still add up",
-		Until: RetentionPeriodPlaceholder,
+		Until: "5 years after the payment, then erased",
 	},
 	{
 		What:  "A record of identity-verification resets an administrator made: the date, the status before and the reason code, without your verification data",
