@@ -76,6 +76,10 @@ WHERE application_id IN (SELECT id FROM hackathon_issue_applications WHERE user_
 	// The points programme is frozen and never paid anybody; a balance that
 	// can never be redeemed is not a payout record.
 	{"point_ledger", `DELETE FROM point_ledger WHERE user_id = $1`},
+	// Which GrainHack payout notices the person was sent, kept only so the
+	// same one is not sent twice. Notices to an erased account are not sent
+	// at all (grainhack.Service), so the record of them has no use left.
+	{"grainhack_notices", `DELETE FROM grainhack_notices WHERE user_id = $1`},
 
 	// GrainHack records that decided payouts are kept, so the event still
 	// adds up; the login in them is replaced. user_id stays, pointing at the
@@ -150,30 +154,34 @@ func eraseRows(ctx context.Context, pool Pool, userID uuid.UUID) (map[string]int
 // every table with a foreign key into users; the test that checks it is what
 // makes a table added next year a decision rather than an omission.
 var keptTables = map[string]string{
-	"settlement_lines":               "payout record: what each person was allotted in a settlement",
-	"settlement_holds":               "payout record: an amount held back, and when it was released",
-	"sponsored_claims":               "payout record: the transaction that collected a claim",
-	"keeperhub_payout_legs":          "payout record: amount, address and transaction of a transfer",
-	"keeperhub_payout_exclusions":    "payout record: why a person was left out of a run",
-	"redemptions":                    "payout record (points redemptions; none were ever made)",
-	"hackathon_maintainer_payouts":   "payout record for a project's maintainers",
-	"founding_members":               "Founding Pool wave counts are public and computed from these; no personal data",
-	"founding_shares":                "other members' shares are computed alongside these; no personal data",
-	"referrals":                      "the other person's Founding Pool shares are computed from the link; no personal data",
-	"projects":                       "a project belongs to its repository, not to the account that listed it",
-	"hackathon_oob_assignments":      "a record about a maintainer's conduct, keyed by the maintainer",
-	"kyc_reset_audit":                "audit of an administrator decision; its personal fields are cleared by an erase step, the row by retention after 90 days",
-	"admin_role_audit":               "audit of a role change; its note is cleared by an erase step",
-	"chain_operations":               "audit of an administrator action (actor only)",
-	"config_audit":                   "audit of an administrator action (actor only)",
-	"hackathon_config_settings":      "who last changed a setting (actor only)",
-	"hackathons":                     "who created or changed an event (actor only)",
-	"hackathon_payout_runs":          "who computed a payout run (actor only)",
-	"keeperhub_dispatch_attempts":    "who dispatched a payout (actor only)",
-	"keeperhub_payout_runs":          "who released a payout run (actor only)",
-	"org_social_links":               "who last edited an organisation's links (actor only)",
-	"social_follow_decisions":        "who decided a submission (actor only); the person's own submissions are deleted",
-	"social_follow_submissions":      "deleted by an erase step when the person is the submitter; kept when they only decided one",
-	"hackathon_project_applications": "the project's application; the person's contact line is cleared by an erase step",
-	"account_deletion_requests":      "the record of this deletion",
+	"settlement_lines":                  "payout record: what each person was allotted in a settlement",
+	"settlement_holds":                  "payout record: an amount held back, and when it was released",
+	"sponsored_claims":                  "payout record: the transaction that collected a claim",
+	"keeperhub_payout_legs":             "payout record: amount, address and transaction of a transfer",
+	"keeperhub_payout_exclusions":       "payout record: why a person was left out of a run",
+	"redemptions":                       "payout record (points redemptions; none were ever made)",
+	"hackathon_maintainer_payouts":      "payout record for a project's maintainers",
+	"grainhack_results_statement_lines": "payout record: a winner's line in a signed GrainHack results statement; the login is inside the signed document, so it cannot be replaced, and the line and the document go together after five years (retention)",
+	"grainhack_payment_reports":         "payout record: a GrainHack payment the agent reported, with amount, transaction and address",
+	"grainhack_results_statements":      "who issued a GrainHack results statement (actor only); the people it names are in its lines",
+	"grainhack_broadcast_notices":       "who sent a one-time GrainHack notice (actor only)",
+	"founding_members":                  "Founding Pool wave counts are public and computed from these; no personal data",
+	"founding_shares":                   "other members' shares are computed alongside these; no personal data",
+	"referrals":                         "the other person's Founding Pool shares are computed from the link; no personal data",
+	"projects":                          "a project belongs to its repository, not to the account that listed it",
+	"hackathon_oob_assignments":         "a record about a maintainer's conduct, keyed by the maintainer",
+	"kyc_reset_audit":                   "audit of an administrator decision; its personal fields are cleared by an erase step, the row by retention after 90 days",
+	"admin_role_audit":                  "audit of a role change; its note is cleared by an erase step",
+	"chain_operations":                  "audit of an administrator action (actor only)",
+	"config_audit":                      "audit of an administrator action (actor only)",
+	"hackathon_config_settings":         "who last changed a setting (actor only)",
+	"hackathons":                        "who created or changed an event (actor only)",
+	"hackathon_payout_runs":             "who computed a payout run (actor only)",
+	"keeperhub_dispatch_attempts":       "who dispatched a payout (actor only)",
+	"keeperhub_payout_runs":             "who released a payout run (actor only)",
+	"org_social_links":                  "who last edited an organisation's links (actor only)",
+	"social_follow_decisions":           "who decided a submission (actor only); the person's own submissions are deleted",
+	"social_follow_submissions":         "deleted by an erase step when the person is the submitter; kept when they only decided one",
+	"hackathon_project_applications":    "the project's application; the person's contact line is cleared by an erase step",
+	"account_deletion_requests":         "the record of this deletion",
 }

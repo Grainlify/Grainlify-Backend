@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -223,21 +224,35 @@ const erasedAccounts = `SELECT id FROM users WHERE erased_at IS NOT NULL`
 
 // paidEvents is every GrainHack event whose payouts were all made more than
 // PayoutRecordYears ago ($1 is the cutoff), with the date that counts from
-// (paid_at): the last payment on either rail, or the end of the event if it
+// (paid_at): the last payment on any rail, or the end of the event if it
 // paid nothing, and nothing of it still open. An event with a payout still
 // unreleased or unconfirmed is never in it.
+//
+// The Solana rail (internal/grainhack): a payment is the agent's report of it
+// (grainhack_payment_reports.reported_at), and a line still payable in the
+// latest statement with no payment reported is open. A line held for KYC is
+// not: like a KeeperHub exclusion, it waits for the person, who may never
+// verify, and must not keep everyone else's records for ever.
 const paidEvents = `
 SELECT e.id, e.paid_at FROM (
   SELECT h.id, COALESCE(
            GREATEST(
              (SELECT max(s.released_at) FROM settlements s WHERE s.hackathon_id = h.id),
              (SELECT max(l.confirmed_at) FROM keeperhub_payout_legs l
-                JOIN keeperhub_payout_runs r ON r.id = l.run_id WHERE r.hackathon_id = h.id)),
+                JOIN keeperhub_payout_runs r ON r.id = l.run_id WHERE r.hackathon_id = h.id),
+             (SELECT max(g.reported_at) FROM grainhack_payment_reports g WHERE g.hackathon_id = h.id)),
            h.ends_at) AS paid_at
   FROM hackathons h
   WHERE NOT EXISTS (SELECT 1 FROM settlements s WHERE s.hackathon_id = h.id AND s.released_at IS NULL)
     AND NOT EXISTS (SELECT 1 FROM keeperhub_payout_legs l JOIN keeperhub_payout_runs r ON r.id = l.run_id
-                    WHERE r.hackathon_id = h.id AND l.status IN ('pending', 'dispatched', 'unknown'))) e
+                    WHERE r.hackathon_id = h.id AND l.status IN ('pending', 'dispatched', 'unknown'))
+    AND NOT EXISTS (SELECT 1 FROM grainhack_results_statements gs
+                    JOIN grainhack_results_statement_lines gl ON gl.statement_id = gs.id
+                    WHERE gs.hackathon_id = h.id AND gl.status = 'payable'
+                      AND NOT EXISTS (SELECT 1 FROM grainhack_results_statements n WHERE n.supersedes = gs.id)
+                      AND NOT EXISTS (SELECT 1 FROM grainhack_payment_reports g
+                                      WHERE g.hackathon_id = gs.hackathon_id AND g.pool = gs.pool
+                                        AND g.github_user_id = gl.github_user_id))) e
 WHERE e.paid_at < $1`
 
 // retentionStep is one table of the payout retention: which rows are due, and
@@ -374,7 +389,62 @@ SET pool = COALESCE((
                             THEN 'the winner deleted their account; its records were erased five years after the payout'
                             ELSE d.no_winner_reason END
 WHERE d.id = ANY($1)`},
+
+	// GrainHack on Solana (internal/grainhack). The payment the agent
+	// reported: amount, transaction and receiving address.
+	{name: "grainhack_payment_reports", sel: `
+SELECT g.id, pe.paid_at FROM grainhack_payment_reports g
+JOIN (` + paidEvents + `) pe ON pe.id = g.hackathon_id
+WHERE g.user_id IN (` + erasedAccounts + `)`},
+	// The person's lines in every signed results statement of the event. The
+	// statement tables refuse DELETE and UPDATE (GH010); the retention
+	// transaction is the one place allowed past that, for these rows and
+	// these two actions only (statementRetentionSetting).
+	{name: "grainhack_results_statement_lines", sel: `
+SELECT l.id, pe.paid_at FROM grainhack_results_statement_lines l
+JOIN grainhack_results_statements s ON s.id = l.statement_id
+JOIN (` + paidEvents + `) pe ON pe.id = s.hackathon_id
+WHERE l.user_id IN (` + erasedAccounts + `)`},
+	// The signed document still names whoever those lines named, so it is
+	// redacted: their lines are taken out of it and the signature, which was
+	// over the original bytes, is emptied. Every other winner's line stays,
+	// and so do the event pool, total, network and computation in the
+	// statement's own columns. After the lines step, so the lines left in the
+	// table are the ones the document keeps.
+	{name: "grainhack_results_statements", sel: `
+SELECT s.id, pe.paid_at FROM grainhack_results_statements s
+JOIN (` + paidEvents + `) pe ON pe.id = s.hackathon_id
+WHERE EXISTS (SELECT 1 FROM grainhack_results_statement_lines l
+              WHERE l.statement_id = s.id AND l.user_id IN (` + erasedAccounts + `))`,
+		act: `
+UPDATE grainhack_results_statements s
+SET canonical_json = jsonb_build_object(
+      'redacted', 'lines of erased accounts removed ` + PayoutRecordRedactionNote + `',
+      'statement', (COALESCE(s.canonical_json::jsonb -> 'statement', s.canonical_json::jsonb) - 'lines')
+        || jsonb_build_object('lines', COALESCE((
+             SELECT jsonb_agg(e ORDER BY ord)
+             FROM jsonb_array_elements(COALESCE(s.canonical_json::jsonb -> 'statement', s.canonical_json::jsonb) -> 'lines')
+                  WITH ORDINALITY AS t(e, ord)
+             WHERE EXISTS (SELECT 1 FROM grainhack_results_statement_lines l
+                           WHERE l.statement_id = s.id AND l.github_user_id = (e ->> 'github_user_id')::bigint)),
+           '[]'::jsonb)))::text,
+    signature = '',
+    redacted_at = now()
+WHERE s.id = ANY($1)`},
 }
+
+// PayoutRecordRedactionNote is what a redacted GrainHack results statement
+// says about itself, after "lines of erased accounts removed".
+const PayoutRecordRedactionNote = "five years after the payment, as the Terms say; the signature was over the original document and no longer applies"
+
+// statementRetentionSetting is the session-local setting that lets the
+// retention transaction past the GrainHack statements' immutability trigger
+// (migration 20261003120300). Set to the transaction's own id with
+// set_config(..., true): it ends with the transaction, and a value set any
+// other way does not match. The trigger still allows only the deletion of an
+// erased account's lines and the redaction of a statement, and logs each to
+// grainhack_results_retention_log.
+const statementRetentionSetting = "grainlify.grainhack_results_retention"
 
 // plannedStep is a payout retention step with the rows it selected.
 type plannedStep struct {
@@ -437,6 +507,16 @@ func (r *Retention) purgePayoutRecords(ctx context.Context) (map[string]int64, e
 	plan, err := planPayoutRecords(ctx, tx, cutoff)
 	if err != nil {
 		return nil, err
+	}
+	// Only this transaction, and only when it has GrainHack statement rows
+	// to act on, may pass the statements' immutability trigger.
+	for _, p := range plan {
+		if strings.HasPrefix(p.step.name, "grainhack_results_") && len(p.ids) > 0 {
+			if _, err := tx.Exec(ctx, `SELECT set_config($1, txid_current()::text, true)`, statementRetentionSetting); err != nil {
+				return nil, fmt.Errorf("retention: allow statement retention: %w", err)
+			}
+			break
+		}
 	}
 	out := make(map[string]int64, len(plan))
 	for _, p := range plan {
