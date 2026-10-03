@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -77,6 +78,46 @@ func (e *APIError) Error() string {
 		msg += fmt.Sprintf(", retry_after: %s", e.RetryAfter)
 	}
 	return msg
+}
+
+// RateLimitedUntil reports whether this failure is GitHub refusing for rate
+// limiting rather than for access, and if so when retrying makes sense.
+//
+// The sync worker's 403s in production were exactly this: the same projects
+// alternately completing and failing in bursts, because every sync fetched
+// comments for every commented issue and drained the owner's 5,000/hour
+// budget. Marking those jobs failed lost the sync; retrying them at once
+// would only fail again. A 403 that is not about rate limits (a revoked
+// grant, an org restricting OAuth apps) reports false.
+func (e *APIError) RateLimitedUntil(now time.Time) (time.Time, bool) {
+	if e == nil || (e.Status != http.StatusForbidden && e.Status != http.StatusTooManyRequests) {
+		return time.Time{}, false
+	}
+	const maxWait = time.Hour
+	clamp := func(t time.Time) time.Time {
+		if t.Before(now.Add(time.Second)) {
+			return now.Add(time.Minute)
+		}
+		if t.After(now.Add(maxWait)) {
+			return now.Add(maxWait)
+		}
+		return t
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(e.RetryAfter)); err == nil && secs >= 0 {
+		return clamp(now.Add(time.Duration(secs) * time.Second)), true
+	}
+	if strings.TrimSpace(e.RateLimitRemaining) == "0" {
+		if reset, err := strconv.ParseInt(strings.TrimSpace(e.RateLimitReset), 10, 64); err == nil {
+			return clamp(time.Unix(reset, 0).Add(5 * time.Second)), true
+		}
+		return now.Add(time.Minute), true
+	}
+	if e.Status == http.StatusTooManyRequests || strings.Contains(strings.ToLower(e.Body), "rate limit") {
+		// Secondary rate limit without a Retry-After: GitHub asks for at
+		// least a minute.
+		return now.Add(time.Minute), true
+	}
+	return time.Time{}, false
 }
 
 // newAPIError captures a failed response. Must be called before the body is

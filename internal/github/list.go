@@ -98,7 +98,7 @@ func (c *Client) ListIssuesPage(ctx context.Context, accessToken string, fullNam
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github list issues failed: status %d", resp.StatusCode)
+		return nil, newAPIError("list issues", resp)
 	}
 
 	var items []IssueListItem
@@ -137,7 +137,7 @@ func (c *Client) ListPRsPage(ctx context.Context, accessToken string, fullName s
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github list prs failed: status %d", resp.StatusCode)
+		return nil, newAPIError("list prs", resp)
 	}
 
 	var items []PRListItem
@@ -184,7 +184,7 @@ func (c *Client) ListIssueComments(ctx context.Context, accessToken string, full
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github list issue comments failed: status %d", resp.StatusCode)
+		return nil, newAPIError("list issue comments", resp)
 	}
 
 	var comments []IssueComment

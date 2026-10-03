@@ -3,6 +3,9 @@ package syncjobs
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,9 +13,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
@@ -351,3 +356,51 @@ func TestRun_BacksOffWhenIdleAndWakesForNewWork(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// 403s failed about half of all sync jobs in production, and they were
+// GitHub rate limiting the project owner's token. A rate-limited job now
+// waits for the reset instead of failing; a 403 that is about access still
+// fails.
+func TestFinish_RateLimitedJobWaitsForTheReset(t *testing.T) {
+	f := newQueueFixture(t)
+	ctx := context.Background()
+	reset := time.Now().Add(20 * time.Minute).Truncate(time.Second)
+
+	run := func(t *testing.T, status int, header http.Header, body string) jobRow {
+		t.Helper()
+		id := f.insert(t, newQueueProject(t, f.d), "sync_prs", "pending", 0, "", 0)
+		gh := &github.Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})}}
+		w := testWorker(f.d.Pool, queueTiming{}, nil)
+		w.gh, w.limiter = gh, rate.NewLimiter(rate.Inf, 1)
+		w.exec = func(ctx context.Context, j claimedJob) error { return w.syncPRs(ctx, j.ProjectID, "octo/rl", "tok") }
+		if ran, err := w.processOne(ctx); err != nil || !ran {
+			t.Fatalf("processOne = %v, %v", ran, err)
+		}
+		r := f.job(t, id)
+		var runAt time.Time
+		if err := f.d.Pool.QueryRow(ctx, `SELECT run_at FROM sync_jobs WHERE id = $1`, id).Scan(&runAt); err != nil {
+			t.Fatalf("run_at: %v", err)
+		}
+		if r.Status == "pending" && (runAt.Before(reset) || runAt.After(reset.Add(10*time.Second))) {
+			t.Errorf("requeued for %v, want just after the reset %v", runAt, reset)
+		}
+		return r
+	}
+
+	limited := run(t, 403, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {strconv.FormatInt(reset.Unix(), 10)}},
+		`{"message":"API rate limit exceeded"}`)
+	if limited.Status != "pending" || limited.Attempts != 1 || !strings.HasPrefix(limited.LastError, "rate limited, retrying: github list prs failed: status 403") {
+		t.Errorf("rate-limited job = %+v, want pending until the reset with the reason recorded", limited)
+	}
+
+	denied := run(t, 403, http.Header{"X-Ratelimit-Remaining": {"4999"}}, `{"message":"Resource not accessible by integration"}`)
+	if denied.Status != "failed" || !strings.Contains(denied.LastError, "Resource not accessible") {
+		t.Errorf("access-denied job = %+v, want failed with GitHub's message", denied)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

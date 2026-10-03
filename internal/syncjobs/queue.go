@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/jagadeesh/grainlify/backend/internal/github"
 	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
@@ -242,12 +243,27 @@ WHERE id = $1 AND status = 'running' AND locked_by = $2
 `, j.ID, w.workerID)
 		return err
 	}
+	if runAt, ok := retryAt(runErr, time.Now()); ok && j.Attempts+1 < maxAttempts {
+		slog.Warn("sync job rate limited by GitHub, retrying later",
+			"job_id", j.ID, "project_id", j.ProjectID, "job_type", j.JobType, "retry_at", runAt)
+		_, err := w.requeue(ctx, j.ID, runAt, "rate limited, retrying: "+runErr.Error(), 1, w.workerID, 0)
+		return err
+	}
 	_, err := w.pool.Exec(ctx, `
 UPDATE sync_jobs
 SET status = 'failed', attempts = attempts + 1, last_error = $3, updated_at = now()
 WHERE id = $1 AND status = 'running' AND locked_by = $2
 `, j.ID, w.workerID, runErr.Error())
 	return err
+}
+
+// retryAt reports whether runErr is GitHub rate limiting, and when to retry.
+func retryAt(runErr error, now time.Time) (time.Time, bool) {
+	var apiErr *github.APIError
+	if !errors.As(runErr, &apiErr) {
+		return time.Time{}, false
+	}
+	return apiErr.RateLimitedUntil(now)
 }
 
 // heartbeat renews the job's lease until ctx ends. If the renewal finds the
