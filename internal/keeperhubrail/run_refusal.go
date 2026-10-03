@@ -51,8 +51,38 @@ func (e *SettledOnAptosError) Unwrap() []error { return []error{ErrSettledOnApto
 // otherwise - whatever the error's text says.
 func runRefusal(err error, hackathonID, pool string) error {
 	var pg *pgconn.PgError
-	if !errors.As(err, &pg) || pg.Code != RunRefusalSQLState {
+	if !errors.As(err, &pg) {
 		return nil
 	}
-	return &SettledOnAptosError{HackathonID: hackathonID, Pool: pool, cause: err}
+	switch pg.Code {
+	case RunRefusalSQLState:
+		return &SettledOnAptosError{HackathonID: hackathonID, Pool: pool, cause: err}
+	case GrainHackRefusalSQLState:
+		return &PaidOnGrainHackError{HackathonID: hackathonID, Pool: pool, cause: err}
+	}
+	return nil
 }
+
+// GrainHackRefusalSQLState is the code the keeperhub_payout_runs trigger from
+// migration 20261003120100 raises when the event pool already has a GrainHack
+// results statement: the third rail, paid on Solana by the grainhack-signer.
+const GrainHackRefusalSQLState = "GH002"
+
+// PaidOnGrainHackError is that refusal. It matches errors.Is(err,
+// ErrPaidOnGrainHack).
+type PaidOnGrainHackError struct {
+	HackathonID string
+	Pool        string
+	cause       error
+}
+
+// Error is the sentence an operator reads, not the database's text.
+func (e *PaidOnGrainHackError) Error() string {
+	return fmt.Sprintf("refused: hackathon %s (%s pool) has a GrainHack results statement and is paid on Solana, "+
+		"so a KeeperHub run cannot be opened for it. An event is paid on one rail only - "+
+		"opening this run would pay the same people a second time. Nothing was written.",
+		e.HackathonID, e.Pool)
+}
+
+// Unwrap keeps the database error reachable for logs, behind the sentinel.
+func (e *PaidOnGrainHackError) Unwrap() []error { return []error{ErrPaidOnGrainHack, e.cause} }

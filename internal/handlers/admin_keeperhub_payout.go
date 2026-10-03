@@ -254,6 +254,8 @@ func keeperhubError(c *fiber.Ctx, err error, hid uuid.UUID) error {
 		})
 	case errors.Is(err, keeperhubrail.ErrSettledOnAptos):
 		status, name = fiber.StatusConflict, "settled_on_aptos_rail"
+	case errors.Is(err, keeperhubrail.ErrPaidOnGrainHack):
+		status, name = fiber.StatusConflict, "paid_on_grainhack_rail"
 	case errors.Is(err, keeperhubrail.ErrNothingUnpaid):
 		status, name = fiber.StatusConflict, "nothing_unpaid"
 	case errors.Is(err, keeperhubrail.ErrRunMismatch):

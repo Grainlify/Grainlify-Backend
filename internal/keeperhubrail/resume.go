@@ -191,6 +191,15 @@ func (s *Service) checkEvent(ctx context.Context, req ReleaseRequest) error {
 	if id, _ := hackathon.ExistingSettlementID(ctx, s.Pool, req.HackathonID, req.Pool); id != nil {
 		return fmt.Errorf("%w: settlement %s", ErrSettledOnAptos, id)
 	}
+	// Same for the GrainHack (Solana) rail; migration 20261003120100's GH002
+	// trigger is the half that holds for writers that skip this.
+	var statementID uuid.UUID
+	if err := s.Pool.QueryRow(ctx, `SELECT id FROM grainhack_results_statements WHERE hackathon_id = $1 AND pool = $2 LIMIT 1`,
+		req.HackathonID, req.Pool).Scan(&statementID); err == nil {
+		return fmt.Errorf("%w: statement %s", ErrPaidOnGrainHack, statementID)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("keeperhubrail: grainhack rail check: %w", err)
+	}
 	return nil
 }
 
@@ -227,6 +236,7 @@ const (
 	ReasonPayoutRunNotCurrent = "payout_run_not_current"
 	ReasonChainNotEVM         = "chain_not_evm"
 	ReasonSettledOnAptos      = "settled_on_aptos_rail"
+	ReasonPaidOnGrainHack     = "paid_on_grainhack_rail"
 	ReasonRunFailed           = "run_failed"
 	ReasonUnreconciledLegs    = "unreconciled_legs"
 	ReasonNothingUnpaid       = "nothing_unpaid"
@@ -249,6 +259,8 @@ func RefusalReason(err error) string {
 		return ReasonChainNotEVM
 	case errors.Is(err, ErrSettledOnAptos):
 		return ReasonSettledOnAptos
+	case errors.Is(err, ErrPaidOnGrainHack):
+		return ReasonPaidOnGrainHack
 	case errors.Is(err, ErrRunFailed):
 		return ReasonRunFailed
 	case errors.As(err, &unreconciled):

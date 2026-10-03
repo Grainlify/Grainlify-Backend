@@ -65,6 +65,7 @@ var (
 	ErrUnsupportedPool      = errors.New("keeperhubrail: only the contributor pool is paid on this rail")
 	ErrPayoutRunNotCurrent  = errors.New("keeperhubrail: payout run is not this hackathon's current computation")
 	ErrSettledOnAptos       = errors.New("keeperhubrail: this event and pool is already settled on the Aptos rail")
+	ErrPaidOnGrainHack      = errors.New("keeperhubrail: this event and pool has a GrainHack results statement (Solana rail)")
 	ErrRunMismatch          = errors.New("keeperhubrail: an existing run for this event pays a different chain or computation")
 	ErrNothingUnpaid        = errors.New("keeperhubrail: no pending or failed legs to dispatch")
 	ErrConcurrentRelease    = errors.New("keeperhubrail: another release changed these legs; nothing was sent")
