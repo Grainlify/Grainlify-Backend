@@ -53,6 +53,8 @@ WHERE lower(address) IN (
 	// status, under which reason code - because that is the fraud-relevant
 	// fact; what goes is the copy of the person's data, the session id, and
 	// the two free-text fields an administrator may have written a name into.
+	// The row then goes too, ResetRecordRetention after the reset, as it
+	// does for every account (retention.go).
 	{"kyc_reset_audit", `
 UPDATE kyc_reset_audit
 SET previous_kyc_data = NULL, previous_session_id = NULL, reason = NULL, note = NULL
@@ -160,7 +162,7 @@ var keptTables = map[string]string{
 	"referrals":                      "the other person's Founding Pool shares are computed from the link; no personal data",
 	"projects":                       "a project belongs to its repository, not to the account that listed it",
 	"hackathon_oob_assignments":      "a record about a maintainer's conduct, keyed by the maintainer",
-	"kyc_reset_audit":                "audit of an administrator decision; its personal fields are cleared by an erase step",
+	"kyc_reset_audit":                "audit of an administrator decision; its personal fields are cleared by an erase step, the row by retention after 90 days",
 	"admin_role_audit":               "audit of a role change; its note is cleared by an erase step",
 	"chain_operations":               "audit of an administrator action (actor only)",
 	"config_audit":                   "audit of an administrator action (actor only)",
