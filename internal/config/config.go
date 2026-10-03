@@ -204,6 +204,22 @@ type Config struct {
 	// not explained. With it off nobody can be erased, so skipping the
 	// erased-account check skips nothing.
 	AccountPrivacyEnabled bool
+	// GrainHack results statements (internal/grainhack). All three optional:
+	// unset, the statement endpoints answer 503 and the server still boots.
+	//
+	// GrainHackResultsSigningKey is base64 of a 32-byte ed25519 seed, the same
+	// encoding as BountyLinkSigningKey, used ONLY to sign results statements.
+	// The bounty agent and the grainhack-signer hold the public half
+	// (GRAINHACK_RESULTS_PUBKEY).
+	GrainHackResultsSigningKey string
+	// GrainHackPayoutNetwork is the network statements name: solana-devnet
+	// (the default) or solana-mainnet. The signer refuses a statement for a
+	// network that is not its own.
+	GrainHackPayoutNetwork string
+	// GrainHackStatementToken is the bearer token the bounty agent uses to
+	// fetch statements and report payments and missing wallets. Unset means
+	// those endpoints refuse everything (503), never that they are open.
+	GrainHackStatementToken string
 }
 
 func Load() Config {
@@ -285,6 +301,10 @@ func Load() Config {
 
 		RetentionJobEnabled:   os.Getenv("RETENTION_JOB_ENABLED") == "true",
 		AccountPrivacyEnabled: os.Getenv("ACCOUNT_PRIVACY_ENABLED") == "true",
+
+		GrainHackResultsSigningKey: getEnv("GRAINHACK_RESULTS_SIGNING_KEY", ""),
+		GrainHackPayoutNetwork:     getEnv("GRAINHACK_PAYOUT_NETWORK", "solana-devnet"),
+		GrainHackStatementToken:    getEnv("GRAINHACK_STATEMENT_TOKEN", ""),
 	}
 }
 

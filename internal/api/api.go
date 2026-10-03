@@ -300,6 +300,17 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	bountyEvents := handlers.NewBountyEventsHandler(deps.DB, notifSvc, cfg.BountyEventsSecret)
 	app.Post("/internal/bounty-events", bountyEvents.Receive)
 
+	// GrainHack results statements (USDC on Solana). The agent's routes are
+	// authenticated by the GRAINHACK_STATEMENT_TOKEN bearer inside the handler,
+	// not by a session; statements say who is held for KYC, so they are not
+	// public. The admin routes are mounted with the rest of adminGroup below.
+	grainhackPayout := handlers.NewGrainHackPayoutHandler(deps.DB, cfg, notifSvc)
+	app.Get("/grainhack/results-key", grainhackPayout.PublicKey)
+	app.Get("/grainhack/results-statements/:statement_id", grainhackPayout.AgentGetStatement)
+	app.Get("/grainhack/hackathons/:hackathon_id/results-statement", grainhackPayout.AgentLatestStatement)
+	app.Post("/grainhack/payments", grainhackPayout.AgentReportPayment)
+	app.Post("/grainhack/awaiting-wallet", grainhackPayout.AgentAwaitingWallet)
+
 	app.Get("/maintainer/bounties", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBounties)
 	app.Get("/maintainer/bounties/:bountyId/applications", auth.RequireAuth(cfg.JWTSecret), bountyDraw.GetMaintainerBountyView)
 
@@ -701,6 +712,15 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Post("/hackathons/:id/keeperhub/release", requireAdmin, adminKeeperHub.Release())
 	adminGroup.Post("/hackathons/:id/keeperhub/attempts/:attempt_id/intake", requireAdmin, adminKeeperHub.Intake())
 	adminGroup.Post("/hackathons/:id/keeperhub/legs/:leg_id/resolve", requireAdmin, adminKeeperHub.Resolve())
+
+	// GrainHack results statement: issue (or supersede) and read the latest.
+	// Issuing answers 503 until GRAINHACK_RESULTS_SIGNING_KEY is set.
+	adminGroup.Get("/hackathons/:id/results-statement", requireAdmin, grainhackPayout.LatestStatement())
+	adminGroup.Post("/hackathons/:id/results-statement", requireAdmin, grainhackPayout.IssueStatement())
+	// The one-time notice to Base Sepolia address owners that GrainHack now
+	// pays on Solana. Built, not sent: POST with {"confirm": true} sends it once.
+	adminGroup.Get("/grainhack/base-sepolia-notice", requireAdmin, grainhackPayout.BaseSepoliaNoticePreview())
+	adminGroup.Post("/grainhack/base-sepolia-notice", requireAdmin, grainhackPayout.BaseSepoliaNoticeSend())
 
 	adminHackathonApps := handlers.NewAdminHackathonApplicationsHandler(cfg, deps.DB, notifSvc)
 	adminGroup.Get("/hackathons/:id/applications", requireAdmin, adminHackathonApps.ListAdmin())
