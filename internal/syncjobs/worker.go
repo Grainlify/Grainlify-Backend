@@ -390,7 +390,7 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				}
 			}
 
-			_, _ = w.pool.Exec(ctx, `
+			if _, err := w.pool.Exec(ctx, `
 INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
@@ -408,7 +408,25 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
   updated_at_github = COALESCE(EXCLUDED.updated_at_github, github_issues.updated_at_github),
   closed_at_github = COALESCE(EXCLUDED.closed_at_github, github_issues.closed_at_github),
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt)
+-- Only rewrite a row that changed. Every sync used to rewrite every issue of
+-- the repository: 6.2M updates on 26k rows. A row that is locked but not
+-- updated leaves no new tuple, no index entries and nothing to vacuum. The
+-- cost is that last_seen_at now means "last changed", not "last listed"; it
+-- is read only as a fallback sort key for rows with no updated_at_github.
+WHERE (github_issues.number, github_issues.state, github_issues.title, github_issues.body,
+       github_issues.author_login, github_issues.url, github_issues.assignees, github_issues.labels,
+       github_issues.comments_count, github_issues.comments,
+       github_issues.created_at_github, github_issues.updated_at_github, github_issues.closed_at_github)
+  IS DISTINCT FROM
+      (EXCLUDED.number, EXCLUDED.state, EXCLUDED.title, EXCLUDED.body,
+       EXCLUDED.author_login, EXCLUDED.url, EXCLUDED.assignees, EXCLUDED.labels,
+       EXCLUDED.comments_count, EXCLUDED.comments,
+       COALESCE(EXCLUDED.created_at_github, github_issues.created_at_github),
+       COALESCE(EXCLUDED.updated_at_github, github_issues.updated_at_github),
+       COALESCE(EXCLUDED.closed_at_github, github_issues.closed_at_github))
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt); err != nil {
+				slog.Warn("upsert github issue failed", "project_id", projectID, "issue_number", it.Number, "error", err)
+			}
 		}
 	}
 
@@ -599,7 +617,7 @@ func (w *Worker) syncPRs(ctx context.Context, projectID uuid.UUID, fullName stri
 			// correctly) can't be regressed by a list sync arriving second.
 			merged := it.Merged || mergedAt != nil
 
-			_, _ = w.pool.Exec(ctx, `
+			if _, err := w.pool.Exec(ctx, `
 INSERT INTO github_pull_requests (project_id, github_pr_id, number, state, title, body, author_login, url, merged, created_at_github, updated_at_github, closed_at_github, merged_at_github, merge_commit_sha, head_sha, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
@@ -621,7 +639,25 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
   head_sha = COALESCE(NULLIF(EXCLUDED.head_sha, ''), github_pull_requests.head_sha),
   merged_at_github = EXCLUDED.merged_at_github,
   last_seen_at = now()
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA, it.Head.SHA)
+-- Only rewrite a row that changed (see the github_issues upsert above; 4.0M
+-- updates on 17.5k pull requests).
+WHERE (github_pull_requests.number, github_pull_requests.state, github_pull_requests.title,
+       github_pull_requests.body, github_pull_requests.author_login, github_pull_requests.url,
+       github_pull_requests.merged, github_pull_requests.created_at_github,
+       github_pull_requests.updated_at_github, github_pull_requests.closed_at_github,
+       github_pull_requests.merge_commit_sha, github_pull_requests.head_sha,
+       github_pull_requests.merged_at_github)
+  IS DISTINCT FROM
+      (EXCLUDED.number, EXCLUDED.state, EXCLUDED.title,
+       EXCLUDED.body, EXCLUDED.author_login, EXCLUDED.url,
+       github_pull_requests.merged OR EXCLUDED.merged, EXCLUDED.created_at_github,
+       EXCLUDED.updated_at_github, EXCLUDED.closed_at_github,
+       COALESCE(EXCLUDED.merge_commit_sha, github_pull_requests.merge_commit_sha),
+       COALESCE(NULLIF(EXCLUDED.head_sha, ''), github_pull_requests.head_sha),
+       EXCLUDED.merged_at_github)
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, merged, createdAt, updatedAt, closedAt, mergedAt, it.MergeCommitSHA, it.Head.SHA); err != nil {
+				slog.Warn("upsert github pull request failed", "project_id", projectID, "pr_number", it.Number, "error", err)
+			}
 		}
 	}
 
