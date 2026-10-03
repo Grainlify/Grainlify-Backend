@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -159,6 +160,66 @@ func TestGolden(t *testing.T) {
 		if !Verify(pub, w.Statement, w.Signature) {
 			t.Errorf("%s: the golden signature does not verify", w.Name)
 		}
+	}
+}
+
+// The bounty agent's own vector (grainlify-bounty-agent,
+// packages/gate/test/grainhack-statement.test.ts): a statement built and
+// signed in JavaScript with its test key (seed 0x01..0x20). This package must
+// produce the same canonical bytes from the same facts, and its verifier must
+// accept the agent's signature - the other direction of the golden file.
+func TestAgentVector(t *testing.T) {
+	const (
+		seedHex   = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+		pubkey    = "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="
+		signature = "/r8tXPWjpvDEpFqiPd9qFaWl8wFwzrskRWEMzjxlMxsCGVfX6SGXgQUnzagsnAsliotoH3xNwWFPxFfYrhu3Cg=="
+		sha       = "269b1485cee41394d882fd3b7728ac80e6a65ca036118136328784b0f7a9752d"
+		statement = `{"computation_id":"9b2f4e6a-1c3d-4e5f-8a7b-6c5d4e3f2a1b","currency":"USDC","hackathon_id":"0d6e8a3c-7b1f-4c5e-9a2d-4e5f6a7b8c9d",` +
+			`"hackathon_name":"GrainHack Test Event","issued_at":"2026-10-03T08:00:00Z","kind":"grainhack_results","lines":[` +
+			`{"amount_minor":"4000000","github_user_id":101,"login":"alice","status":"payable"},` +
+			`{"amount_minor":"3500000","github_user_id":202,"login":"bob","status":"held_kyc"},` +
+			`{"amount_minor":"2500000","github_user_id":303,"login":"carol","status":"payable"}],` +
+			`"network":"solana-devnet","pool":"contributor","pool_minor":"10000000","statement_id":"6f9a1c52-6a4e-4f4b-9b8e-1d2c3b4a5f60","supersedes":null,"v":1}`
+	)
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ed25519.NewKeyFromSeed(seed)
+	if PublicKeyB64(key) != pubkey {
+		t.Fatalf("public key %s, the agent says %s", PublicKeyB64(key), pubkey)
+	}
+	st := Statement{
+		StatementID:   mustUUID("6f9a1c52-6a4e-4f4b-9b8e-1d2c3b4a5f60"),
+		HackathonID:   mustUUID("0d6e8a3c-7b1f-4c5e-9a2d-4e5f6a7b8c9d"),
+		HackathonName: "GrainHack Test Event",
+		Pool:          PoolContributor,
+		ComputationID: mustUUID("9b2f4e6a-1c3d-4e5f-8a7b-6c5d4e3f2a1b"),
+		Currency:      CurrencyUSDC,
+		Network:       NetworkSolanaDevnet,
+		PoolMinor:     big.NewInt(10_000_000),
+		Lines: []Line{
+			{GitHubUserID: 303, Login: "carol", AmountMinor: big.NewInt(2_500_000), Status: StatusPayable},
+			{GitHubUserID: 101, Login: "alice", AmountMinor: big.NewInt(4_000_000), Status: StatusPayable},
+			{GitHubUserID: 202, Login: "bob", AmountMinor: big.NewInt(3_500_000), Status: StatusHeldKYC},
+		},
+		IssuedAt: time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC),
+	}
+	canonical, err := st.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical != statement {
+		t.Fatalf("canonical form differs from the agent's\n got %s\nwant %s", canonical, statement)
+	}
+	if !Verify(key.Public().(ed25519.PublicKey), statement, signature) {
+		t.Fatal("the agent's signature does not verify here")
+	}
+	if Sign(key, statement) != signature {
+		t.Fatal("signing the same bytes with the same key gives a different signature")
+	}
+	if SHA256Hex(statement) != sha {
+		t.Fatalf("sha256 %s, the agent says %s", SHA256Hex(statement), sha)
 	}
 }
 
