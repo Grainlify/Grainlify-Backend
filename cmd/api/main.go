@@ -342,6 +342,12 @@ func main() {
 		notifications.New(database, erasureMailer, cfg.FrontendBaseURL),
 		cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
 
+	// Erase what the Terms say is kept only for a fixed time, once that time
+	// is up (internal/erasure/retention.go). Daily: every period is counted in
+	// days or years. Outside the worker branch for the same reason as the
+	// executor above.
+	go erasure.NewRetention(database.Pool, erasureServices, 24*time.Hour).Run(context.Background())
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("starting http server", "step", "9", "action", "starting_http_server",

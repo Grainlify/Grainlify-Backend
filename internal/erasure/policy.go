@@ -107,7 +107,7 @@ var Retained = []Item{
 	{
 		What:  "A record of identity-verification resets an administrator made: the date, the status before and the reason code, without your verification data",
 		Why:   "Fraud prevention: it is the record of what was decided and by whom",
-		Until: RetentionPeriodPlaceholder,
+		Until: "90 days after the reset, then erased",
 	},
 	{
 		What:  "Referral links, Founding Contributor Pool membership and shares, tied to the empty account record",
