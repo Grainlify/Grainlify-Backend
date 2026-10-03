@@ -404,3 +404,26 @@ func TestFinish_RateLimitedJobWaitsForTheReset(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A job that finished as shutdown began is recorded as completed, not handed
+// back to run again.
+func TestRun_JobThatFinishesDuringShutdownIsCompleted(t *testing.T) {
+	f := newQueueFixture(t)
+	id := f.insert(t, f.project, "sync_prs", "pending", 0, "", 0)
+
+	started := make(chan struct{})
+	w := testWorker(f.d.Pool, queueTiming{minIdle: 10 * time.Millisecond}, func(ctx context.Context, j claimedJob) error {
+		close(started)
+		<-ctx.Done()
+		return nil // finished its last write anyway
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	<-started
+	cancel()
+	<-done
+	if r := f.job(t, id); r.Status != "completed" {
+		t.Errorf("job = %+v, want completed", r)
+	}
+}

@@ -230,17 +230,17 @@ func (w *Worker) finish(ctx context.Context, j claimedJob, runErr, cause error, 
 		// overwrite theirs.
 		slog.Warn("sync job lost its lease while running", "job_id", j.ID, "project_id", j.ProjectID, "job_type", j.JobType)
 		return nil
-	case shuttingDown:
-		// Not the job's fault: put it back as it was, without spending an
-		// attempt, so the next instance picks it up at once.
-		_, err := w.requeue(ctx, j.ID, time.Now(), "released: worker shut down mid-job", 0, w.workerID, 0)
-		return err
 	case runErr == nil:
 		_, err := w.pool.Exec(ctx, `
 UPDATE sync_jobs
 SET status = 'completed', attempts = attempts + 1, last_error = NULL, updated_at = now()
 WHERE id = $1 AND status = 'running' AND locked_by = $2
 `, j.ID, w.workerID)
+		return err
+	case shuttingDown:
+		// Not the job's fault: put it back as it was, without spending an
+		// attempt, so the next instance picks it up at once.
+		_, err := w.requeue(ctx, j.ID, time.Now(), "released: worker shut down mid-job", 0, w.workerID, 0)
 		return err
 	}
 	if runAt, ok := retryAt(runErr, time.Now()); ok && j.Attempts+1 < maxAttempts {
