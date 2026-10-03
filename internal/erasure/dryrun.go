@@ -37,8 +37,8 @@ type DryRunCategory struct {
 	Tables        []DryRunTable `json:"tables"`
 	// DueTotal and BatchLimit: a category that takes a batch per pass has
 	// DueTotal rows past the cutoff, of which one pass handles BatchLimit.
-	DueTotal   int `json:"due_total,omitempty"`
-	BatchLimit int `json:"batch_limit,omitempty"`
+	DueTotal   *int `json:"due_total,omitempty"`
+	BatchLimit int  `json:"batch_limit,omitempty"`
 	// Resets lists each reset record the pass would take on.
 	Resets []DryRunReset `json:"resets,omitempty"`
 }
@@ -174,16 +174,18 @@ func category(ctx context.Context, tx pgx.Tx, c *DryRunCategory, f func(pgx.Tx) 
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42703") { // undefined table, undefined column
 		c.NotApplicable = "not applicable before this release: " + pgErr.Message
-		c.Tables, c.Resets, c.DueTotal = nil, nil, 0
+		c.Tables, c.Resets, c.DueTotal = nil, nil, nil
 		return nil
 	}
 	return fmt.Errorf("retention dry run: %s: %w", c.Name, err)
 }
 
 func dryRunResets(ctx context.Context, q pgx.Tx, c *DryRunCategory, diditConfigured bool) error {
-	if err := q.QueryRow(ctx, `SELECT count(*) FROM kyc_reset_audit a WHERE a.created_at < $1`, c.Cutoff).Scan(&c.DueTotal); err != nil {
+	var due int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM kyc_reset_audit a WHERE a.created_at < $1`, c.Cutoff).Scan(&due); err != nil {
 		return fmt.Errorf("retention: count reset records: %w", err)
 	}
+	c.DueTotal = &due
 	list, err := selectResetRecords(ctx, q, c.Cutoff)
 	if err != nil {
 		return err
@@ -246,8 +248,8 @@ func (rep *DryRunReport) WriteText(w io.Writer) {
 			fmt.Fprintf(w, "    %s\n", c.NotApplicable)
 			continue
 		}
-		if c.BatchLimit > 0 {
-			fmt.Fprintf(w, "    past the cutoff: %d (one pass takes at most %d)\n", c.DueTotal, c.BatchLimit)
+		if c.DueTotal != nil {
+			fmt.Fprintf(w, "    past the cutoff: %d (one pass takes at most %d)\n", *c.DueTotal, c.BatchLimit)
 		}
 		var total int
 		fmt.Fprintf(w, "    %-30s %-7s %6s  %-10s  %-10s\n", "table", "action", "rows", "oldest", "newest")
