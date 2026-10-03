@@ -212,6 +212,21 @@ type winner struct {
 	login        string
 	kycVerified  bool
 	amount       *big.Int
+	// frozenStatus is set for an erased account: its line is carried from the
+	// previous statement unchanged (erasedWinnerLine).
+	frozenStatus string
+}
+
+// status is the line status this winner gets in a new statement.
+func (w winner) status() string {
+	switch {
+	case w.frozenStatus != "":
+		return w.frozenStatus
+	case w.kycVerified:
+		return StatusPayable
+	default:
+		return StatusHeldKYC
+	}
 }
 
 // Issue issues the event pool's statement, or the one that supersedes the
@@ -266,7 +281,7 @@ func (s *Service) Issue(ctx context.Context, req IssueRequest) (*Issued, error) 
 	if err != nil {
 		return nil, err
 	}
-	winners, err := s.loadWinners(ctx, req.HackathonID, res.PayableLines())
+	winners, err := s.loadWinners(ctx, req.HackathonID, req.Pool, res.PayableLines())
 	if err != nil {
 		return nil, err
 	}
@@ -308,11 +323,7 @@ func (s *Service) Issue(ctx context.Context, req IssueRequest) (*Issued, error) 
 
 	lines := make([]Line, 0, len(winners))
 	for _, w := range winners {
-		status := StatusPayable
-		if !w.kycVerified {
-			status = StatusHeldKYC
-		}
-		lines = append(lines, Line{GitHubUserID: w.githubUserID, Login: w.login, AmountMinor: w.amount, Status: status})
+		lines = append(lines, Line{GitHubUserID: w.githubUserID, Login: w.login, AmountMinor: w.amount, Status: w.status()})
 	}
 
 	var supersedes *uuid.UUID
@@ -355,10 +366,7 @@ func (s *Service) Issue(ctx context.Context, req IssueRequest) (*Issued, error) 
 		return nil, s.insertError(err, req.HackathonID, req.Pool)
 	}
 	for _, w := range winners {
-		status := StatusPayable
-		if !w.kycVerified {
-			status = StatusHeldKYC
-		}
+		status := w.status()
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO grainhack_results_statement_lines (statement_id, github_user_id, user_id, login, amount_minor, status)
 			VALUES ($1, $2, $3, $4, $5::numeric, $6)`,
@@ -415,13 +423,21 @@ func (s *Service) insertError(err error, hid uuid.UUID, pool string) error {
 
 // loadWinners joins each paid line to the person's GitHub account and KYC
 // status, and refuses if anyone has no GitHub account.
-func (s *Service) loadWinners(ctx context.Context, hid uuid.UUID, lines []settlement.Line) ([]winner, error) {
+//
+// An erased account has neither any more (internal/erasure deletes the GitHub
+// connection and the verification). Its line in the event pool's previous
+// statement is a payout record that erasure keeps, so a later statement - a
+// different winner's KYC clearing - carries that line over unchanged instead
+// of refusing to issue (erasedWinnerLine). Only with no previous line does an
+// erased winner block issuing, named like any winner without GitHub.
+func (s *Service) loadWinners(ctx context.Context, hid uuid.UUID, pool string, lines []settlement.Line) ([]winner, error) {
 	ids := make([]uuid.UUID, 0, len(lines))
 	for _, l := range lines {
 		ids = append(ids, l.UserID)
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT u.id, g.github_user_id, COALESCE(g.login, ''), COALESCE(usr.kyc_status, '') = 'verified'
+		SELECT u.id, g.github_user_id, COALESCE(g.login, ''), COALESCE(usr.kyc_status, '') = 'verified',
+		       usr.erased_at IS NOT NULL
 		FROM unnest($1::uuid[]) AS u(id)
 		LEFT JOIN users usr ON usr.id = u.id
 		LEFT JOIN github_accounts g ON g.user_id = u.id`, ids)
@@ -432,12 +448,13 @@ func (s *Service) loadWinners(ctx context.Context, hid uuid.UUID, lines []settle
 		ghID     *int64
 		login    string
 		verified bool
+		erased   bool
 	}
 	people := map[uuid.UUID]ident{}
 	for rows.Next() {
 		var id uuid.UUID
 		var p ident
-		if err := rows.Scan(&id, &p.ghID, &p.login, &p.verified); err != nil {
+		if err := rows.Scan(&id, &p.ghID, &p.login, &p.verified, &p.erased); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("grainhack: scan identity: %w", err)
 		}
@@ -452,6 +469,17 @@ func (s *Service) loadWinners(ctx context.Context, hid uuid.UUID, lines []settle
 	var missing []WinnerWithoutGitHub
 	for _, l := range lines {
 		p := people[l.UserID]
+		if p.erased {
+			prev, err := s.erasedWinnerLine(ctx, hid, pool, l.UserID)
+			if err != nil {
+				return nil, err
+			}
+			if prev != nil {
+				out = append(out, winner{userID: l.UserID, githubUserID: prev.GitHubUserID, login: prev.Login,
+					amount: new(big.Int).Set(l.AmountMinor), frozenStatus: prev.Status})
+				continue
+			}
+		}
 		if p.ghID == nil || *p.ghID <= 0 || p.login == "" {
 			missing = append(missing, WinnerWithoutGitHub{UserID: l.UserID, AmountMinor: l.AmountMinor.String()})
 			continue
@@ -467,6 +495,35 @@ func (s *Service) loadWinners(ctx context.Context, hid uuid.UUID, lines []settle
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].githubUserID < out[j].githubUserID })
 	return out, nil
+}
+
+// erasedWinnerLine is an erased account's line in the latest statement of the
+// event pool that has one, or nil.
+func (s *Service) erasedWinnerLine(ctx context.Context, hid uuid.UUID, pool string, uid uuid.UUID) (*Line, error) {
+	var l Line
+	err := s.Pool.QueryRow(ctx, `
+		SELECT l.github_user_id, l.login, l.status
+		FROM grainhack_results_statement_lines l
+		JOIN grainhack_results_statements st ON st.id = l.statement_id
+		WHERE st.hackathon_id = $1 AND st.pool = $2 AND l.user_id = $3
+		ORDER BY st.issued_at DESC, st.id DESC LIMIT 1`, hid, pool, uid).Scan(&l.GitHubUserID, &l.Login, &l.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("grainhack: erased winner's line: %w", err)
+	}
+	return &l, nil
+}
+
+// erased reports whether the account was erased at its owner's request.
+// Nobody is notified at an erased account: it has no owner any more.
+func (s *Service) erased(ctx context.Context, uid uuid.UUID) bool {
+	var erased bool
+	if err := s.Pool.QueryRow(ctx, `SELECT erased_at IS NOT NULL FROM users WHERE id = $1`, uid).Scan(&erased); err != nil {
+		return false
+	}
+	return erased
 }
 
 func (s *Service) verdictLogins(ctx context.Context, hid, uid uuid.UUID) []string {
@@ -670,7 +727,7 @@ func (s *Service) releaseNotice(ctx context.Context, is *Issued, l IssuedLine, k
 
 // send delivers one claimed notice. Returns whether it was created.
 func (s *Service) send(ctx context.Context, is *Issued, l IssuedLine, kind string, t notifications.Type, title, body string, link notifications.Link) bool {
-	if s.Notify == nil {
+	if s.Notify == nil || s.erased(ctx, l.UserID) {
 		return false
 	}
 	if !s.claimNotice(ctx, is, l, kind) {

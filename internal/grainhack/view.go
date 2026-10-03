@@ -40,12 +40,15 @@ func (s *Service) AdminView(ctx context.Context, is *Issued) (*AdminView, error)
 	for _, l := range is.Lines {
 		al := AdminLine{IssuedLine: l}
 		var kyc string
-		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(kyc_status, '') FROM users WHERE id = $1`, l.UserID).Scan(&kyc); err != nil &&
-			!errors.Is(err, pgx.ErrNoRows) {
+		var erased bool
+		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(kyc_status, ''), erased_at IS NOT NULL FROM users WHERE id = $1`, l.UserID).
+			Scan(&kyc, &erased); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("grainhack: kyc now: %w", err)
 		}
 		al.KYCVerifiedNow = kyc == "verified"
-		if (l.Status == StatusHeldKYC) == al.KYCVerifiedNow {
+		// An erased account's line is carried over unchanged by a new
+		// statement (loadWinners), so it never makes one available.
+		if !erased && (l.Status == StatusHeldKYC) == al.KYCVerifiedNow {
 			v.SupersedeAvailable = true
 		}
 		var tx string

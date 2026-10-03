@@ -147,7 +147,7 @@ type WalletReport struct {
 // WalletSkip says why one winner was not asked.
 type WalletSkip struct {
 	GitHubUserID int64  `json:"github_user_id"`
-	Reason       string `json:"reason"` // already_notified | held_kyc | already_paid | preference_off
+	Reason       string `json:"reason"` // already_notified | held_kyc | already_paid | preference_off | account_erased
 }
 
 // WalletResult lists who was asked and who was not.
@@ -200,6 +200,10 @@ func (s *Service) RemindLinkWallet(ctx context.Context, r WalletReport) (*Wallet
 		}
 		seen[id] = true
 		line, _ := statementLine(is, id)
+		if s.erased(ctx, line.UserID) {
+			out.Skipped = append(out.Skipped, WalletSkip{id, "account_erased"})
+			continue
+		}
 		if line.Status != StatusPayable {
 			out.Skipped = append(out.Skipped, WalletSkip{id, "held_kyc"})
 			continue
