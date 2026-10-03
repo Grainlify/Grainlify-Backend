@@ -100,9 +100,9 @@ var Retained = []Item{
 		Until: "5 years after the payment, then erased",
 	},
 	{
-		What:  "GrainHack results statements that name you: your GitHub login, GitHub id and share, in a document Grainlify signed so the payout could be checked",
-		Why:   "A signed document cannot be edited without breaking its signature, so your GitHub login stays in it while it is kept; it is not shown publicly. When it is erased, your lines are removed and the rest of the statement no longer carries a valid signature",
-		Until: "5 years after the payment, then erased",
+		What:  "GrainHack results statements that name you: your GitHub login, GitHub id and share, in a document we signed so the payout can be checked",
+		Why:   "A signed document cannot be edited without breaking its signature, so your login stays in it while it is kept; it is not shown publicly",
+		Until: "5 years after the payment; then your lines are removed and the rest of the statement no longer carries a valid signature",
 	},
 	{
 		What:  "For payouts collected by claim, the published claim list: each address and amount, whose fingerprint was published on the blockchain",
