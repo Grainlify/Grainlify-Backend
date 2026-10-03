@@ -233,3 +233,30 @@ func TestAPICORSAllowOriginsFunc_FrontendBaseURLFallback(t *testing.T) {
 		}
 	})
 }
+
+// The Terms-version and account-deletion routes exist only once
+// ACCOUNT_PRIVACY_ENABLED is switched on with the frontend that explains
+// them: before that, nobody can accept unpublished Terms or request a
+// deletion through the API.
+func TestAPIAccountPrivacyRoutes_OnlyWhenEnabled(t *testing.T) {
+	paths := []struct{ method, path string }{
+		{"GET", "/me/terms"}, {"POST", "/me/terms/accept"},
+		{"GET", "/me/deletion"}, {"POST", "/me/deletion"}, {"POST", "/me/deletion/cancel"},
+	}
+
+	off := apiWiringSuiteApp(apiWiringSuiteConfig())
+	for _, p := range paths {
+		if status, _ := apiWiringSuiteDo(t, off, p.method, p.path); status != 404 {
+			t.Errorf("switched off: %s %s = %d, want 404 (not registered)", p.method, p.path, status)
+		}
+	}
+
+	cfg := apiWiringSuiteConfig()
+	cfg.AccountPrivacyEnabled = true
+	on := apiWiringSuiteApp(cfg)
+	for _, p := range paths {
+		if status, _ := apiWiringSuiteDo(t, on, p.method, p.path); status != 401 {
+			t.Errorf("switched on: %s %s = %d, want 401 (registered, needs sign-in)", p.method, p.path, status)
+		}
+	}
+}

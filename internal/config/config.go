@@ -194,6 +194,16 @@ type Config struct {
 	// Account deletion on request (erasure.Executor) does not read this; a
 	// person's own deletion request is carried out either way.
 	RetentionJobEnabled bool
+
+	// AccountPrivacyEnabled switches on the Terms-version and account-deletion
+	// routes (/me/terms, /me/deletion), the deletion executor and the
+	// erased-account check. It is on only when ACCOUNT_PRIVACY_ENABLED is
+	// exactly "true", and is switched on with the frontend that shows the
+	// 2026-10-03 Terms and the deletion screen: until then nobody can accept
+	// a version that is not published, or request a deletion the screen has
+	// not explained. With it off nobody can be erased, so skipping the
+	// erased-account check skips nothing.
+	AccountPrivacyEnabled bool
 }
 
 func Load() Config {
@@ -273,7 +283,8 @@ func Load() Config {
 		BountyAgentURL:       getEnv("BOUNTY_AGENT_URL", "https://agent.grainlify.com"),
 		BountyEventsSecret:   getEnv("BOUNTY_EVENTS_SECRET", ""),
 
-		RetentionJobEnabled: os.Getenv("RETENTION_JOB_ENABLED") == "true",
+		RetentionJobEnabled:   os.Getenv("RETENTION_JOB_ENABLED") == "true",
+		AccountPrivacyEnabled: os.Getenv("ACCOUNT_PRIVACY_ENABLED") == "true",
 	}
 }
 

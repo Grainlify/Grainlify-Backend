@@ -185,7 +185,12 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	// An erased account's unexpired tokens stop working at once, rather than
 	// when they expire (internal/handlers/account_deletion.go). After CORS so
 	// the refusal still carries the headers a browser needs to read it.
-	app.Use(handlers.RefuseErasedAccounts(cfg.JWTSecret, deps.DB))
+	// Only while account deletion is switched on (cfg.AccountPrivacyEnabled):
+	// with it off nobody can be erased, and the check would be a query on
+	// every signed-in request for nothing.
+	if cfg.AccountPrivacyEnabled {
+		app.Use(handlers.RefuseErasedAccounts(cfg.JWTSecret, deps.DB))
+	}
 
 	// Routes.
 	// Root handler - also handle POST requests to catch misconfigured webhooks
@@ -238,20 +243,26 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	app.Put("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Put)
 	app.Delete("/me/email", auth.RequireAuth(cfg.JWTSecret), userEmail.Delete)
 
-	// Which version of the Terms the caller accepted (internal/terms). The
-	// frontend asks before letting somebody continue when it is older than
-	// the text it is showing.
-	termsH := handlers.NewTermsHandler(deps.DB)
-	app.Get("/me/terms", auth.RequireAuth(cfg.JWTSecret), termsH.Get)
-	app.Post("/me/terms/accept", auth.RequireAuth(cfg.JWTSecret), termsH.Accept)
+	// Registered only with cfg.AccountPrivacyEnabled (ACCOUNT_PRIVACY_ENABLED
+	// exactly "true"), switched on with the frontend that shows the Terms
+	// these record and the screen that explains deletion. Until then they
+	// answer 404.
+	if cfg.AccountPrivacyEnabled {
+		// Which version of the Terms the caller accepted (internal/terms). The
+		// frontend asks before letting somebody continue when it is older than
+		// the text it is showing.
+		termsH := handlers.NewTermsHandler(deps.DB)
+		app.Get("/me/terms", auth.RequireAuth(cfg.JWTSecret), termsH.Get)
+		app.Post("/me/terms/accept", auth.RequireAuth(cfg.JWTSecret), termsH.Accept)
 
-	// Deleting your own account (internal/erasure): request, see, cancel.
-	// The erasure itself runs later, in the background, after the grace
-	// period - see cmd/api/main.go.
-	deletion := handlers.NewAccountDeletionHandler(deps.DB, notifSvc)
-	app.Get("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Get)
-	app.Post("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Request)
-	app.Post("/me/deletion/cancel", auth.RequireAuth(cfg.JWTSecret), deletion.Cancel)
+		// Deleting your own account (internal/erasure): request, see, cancel.
+		// The erasure itself runs later, in the background, after the grace
+		// period - see cmd/api/main.go.
+		deletion := handlers.NewAccountDeletionHandler(deps.DB, notifSvc)
+		app.Get("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Get)
+		app.Post("/me/deletion", auth.RequireAuth(cfg.JWTSecret), deletion.Request)
+		app.Post("/me/deletion/cancel", auth.RequireAuth(cfg.JWTSecret), deletion.Cancel)
+	}
 
 	// Payout: where a reward is sent, and how somebody claims it.
 	//

@@ -338,9 +338,16 @@ func main() {
 	if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
 		erasureMailer = m
 	}
-	go erasure.NewExecutor(database.Pool, erasureServices,
-		notifications.New(database, erasureMailer, cfg.FrontendBaseURL),
-		cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
+	// With ACCOUNT_PRIVACY_ENABLED off no request can be made (the routes are
+	// not registered), so there is nothing for the executor to carry out.
+	if cfg.AccountPrivacyEnabled {
+		slog.Info("account deletion: on (ACCOUNT_PRIVACY_ENABLED=true)")
+		go erasure.NewExecutor(database.Pool, erasureServices,
+			notifications.New(database, erasureMailer, cfg.FrontendBaseURL),
+			cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
+	} else {
+		slog.Info("account deletion: off (ACCOUNT_PRIVACY_ENABLED is not \"true\"); /me/terms and /me/deletion are not registered")
+	}
 
 	// Erase what the Terms say is kept only for a fixed time, once that time
 	// is up (internal/erasure/retention.go). Daily: every period is counted in
