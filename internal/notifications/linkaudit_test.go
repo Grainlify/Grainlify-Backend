@@ -107,6 +107,8 @@ func TestEveryConstructorProducesAKnownRoute(t *testing.T) {
 		MaintainerApplicationLink("p", 1),
 		MyApplicationsLink(),
 		IssueLink("p", 1),
+		WalletLinkLink(),
+		BountyLedgerLink(),
 	}
 	known := map[string]bool{}
 	for _, r := range KnownRoutes {

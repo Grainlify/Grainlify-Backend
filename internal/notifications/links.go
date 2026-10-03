@@ -160,3 +160,15 @@ func BountiesLink() Link {
 func BountyRulesLink() Link {
 	return Link{"/bounties/rules"}
 }
+
+// WalletLinkLink is the page where a contributor links a Solana wallet once,
+// used for Bounties and GrainHack payouts alike.
+func WalletLinkLink() Link {
+	return Link{"/bounties/link"}
+}
+
+// BountyLedgerLink is the public payout ledger, where GrainHack payouts are
+// listed beside bounty payouts with their transactions.
+func BountyLedgerLink() Link {
+	return Link{"/bounties/ledger"}
+}

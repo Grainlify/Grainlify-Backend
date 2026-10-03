@@ -42,6 +42,8 @@ var KnownRoutes = []string{
 	"/auth/callback",
 	"/support",
 	"/dashboard",
+	"/bounties/link",
+	"/bounties/ledger",
 }
 
 // UnknownLink is one notification pointing somewhere the app does not serve.

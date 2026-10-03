@@ -192,6 +192,23 @@ const (
 	// session can be somebody else's: this message is how the real owner finds
 	// out in time to cancel during the grace period (internal/erasure).
 	TypeAccountDeletion Type = "account_deletion"
+
+	// --------------------------------------------------- GrainHack payouts
+	//
+	// The Solana payout path (internal/grainhack). In-app only: sent with
+	// NotifyInApp, for the reason given there.
+
+	// TypeGrainHackPayoutHeldKYC tells a winner, when a results statement is
+	// issued, that their share is held until they verify their identity -
+	// held, not dropped, and released by a later statement once it clears.
+	TypeGrainHackPayoutHeldKYC Type = "grainhack_payout_held_kyc"
+	// TypeGrainHackLinkWallet asks a payable winner to link a Solana wallet,
+	// which the bounty agent reports they have not. Also carries the one-time
+	// notice to Base Sepolia address owners that GrainHack now pays on Solana.
+	TypeGrainHackLinkWallet Type = "grainhack_link_wallet"
+	// TypeGrainHackPaid confirms a GrainHack payout the agent reports as
+	// confirmed on chain, with the transaction.
+	TypeGrainHackPaid Type = "grainhack_paid"
 )
 
 // AllTypes is the canonical list iterated by the preferences API. Keep in
@@ -233,6 +250,10 @@ var AllTypes = []Type{
 	TypeBountyUnassignRefused,
 
 	TypeAccountDeletion,
+
+	TypeGrainHackPayoutHeldKYC,
+	TypeGrainHackLinkWallet,
+	TypeGrainHackPaid,
 }
 
 func (t Type) Valid() bool {
