@@ -101,6 +101,65 @@ func (r *Retention) RunOnce(ctx context.Context) (map[string]int64, error) {
 	return out, firstErr
 }
 
+// querier is what the selections below need: the pool, or a transaction. The
+// pass and its dry run (dryrun.go) select through the same functions, so what
+// the dry run reports is what the pass would act on.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (r *Retention) resetCutoff(now time.Time) time.Time { return now.Add(-ResetRecordRetention) }
+
+func (r *Retention) payoutCutoff(now time.Time) time.Time {
+	return now.AddDate(-PayoutRecordYears, 0, 0)
+}
+
+// resetBatch is how many reset records one pass takes on.
+const resetBatch = 500
+
+// resetRecordsDue lists the reset records past ResetRecordRetention ($1 is the
+// cutoff), oldest first, at most resetBatch of them. stillUsed is whether the
+// session is still somebody's current one or named by a newer reset.
+const resetRecordsDue = `
+SELECT a.id, a.created_at, COALESCE(a.reason_code, ''), COALESCE(a.previous_session_id, ''),
+       COALESCE(a.previous_session_id, '') <> '' AND (
+         EXISTS (SELECT 1 FROM users u WHERE u.kyc_session_id = a.previous_session_id)
+         OR EXISTS (SELECT 1 FROM kyc_reset_audit o
+                    WHERE o.previous_session_id = a.previous_session_id AND o.id <> a.id AND o.created_at >= $1))
+FROM kyc_reset_audit a
+WHERE a.created_at < $1
+ORDER BY a.created_at, a.id
+LIMIT 500`
+
+// dueReset is one reset record past its period.
+type dueReset struct {
+	id         uuid.UUID
+	at         time.Time
+	reasonCode string
+	session    string
+	stillUsed  bool
+}
+
+// needsDidit is whether erasing the record first needs Didit to delete its
+// session.
+func (d dueReset) needsDidit() bool { return d.session != "" && !d.stillUsed }
+
+func selectResetRecords(ctx context.Context, q querier, cutoff time.Time) ([]dueReset, error) {
+	rows, err := q.Query(ctx, resetRecordsDue, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("retention: list reset records: %w", err)
+	}
+	list, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (dueReset, error) {
+		var d dueReset
+		err := row.Scan(&d.id, &d.at, &d.reasonCode, &d.session, &d.stillUsed)
+		return d, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retention: list reset records: %w", err)
+	}
+	return list, nil
+}
+
 // purgeResetRecords deletes kyc_reset_audit rows older than
 // ResetRecordRetention.
 //
@@ -119,39 +178,16 @@ func (r *Retention) RunOnce(ctx context.Context) (map[string]int64, error) {
 // next pass tries again: a record kept a day late is a smaller harm than a
 // session nobody can find again.
 func (r *Retention) purgeResetRecords(ctx context.Context) (int64, error) {
-	cutoff := r.now().Add(-ResetRecordRetention)
-	rows, err := r.pool.Query(ctx, `
-SELECT a.id, COALESCE(a.previous_session_id, ''),
-       COALESCE(a.previous_session_id, '') <> '' AND (
-         EXISTS (SELECT 1 FROM users u WHERE u.kyc_session_id = a.previous_session_id)
-         OR EXISTS (SELECT 1 FROM kyc_reset_audit o
-                    WHERE o.previous_session_id = a.previous_session_id AND o.id <> a.id AND o.created_at >= $1))
-FROM kyc_reset_audit a
-WHERE a.created_at < $1
-ORDER BY a.created_at
-LIMIT 500
-`, cutoff)
+	cutoff := r.resetCutoff(r.now())
+	list, err := selectResetRecords(ctx, r.pool, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("retention: list reset records: %w", err)
-	}
-	type due struct {
-		id        uuid.UUID
-		session   string
-		stillUsed bool
-	}
-	list, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (due, error) {
-		var d due
-		err := row.Scan(&d.id, &d.session, &d.stillUsed)
-		return d, err
-	})
-	if err != nil {
-		return 0, fmt.Errorf("retention: list reset records: %w", err)
+		return 0, err
 	}
 
 	var erase []uuid.UUID
 	var firstErr error
 	for _, d := range list {
-		if d.session != "" && !d.stillUsed {
+		if d.needsDidit() {
 			err := r.ext.DeleteDiditSession(ctx, d.session)
 			switch {
 			case err == nil, errors.Is(err, didit.ErrSessionNotFound):
@@ -186,23 +222,54 @@ LIMIT 500
 const erasedAccounts = `SELECT id FROM users WHERE erased_at IS NOT NULL`
 
 // paidEvents is every GrainHack event whose payouts were all made more than
-// PayoutRecordYears ago ($1 is the cutoff): the last payment on either rail,
-// or the end of the event if it paid nothing, and nothing of it still open.
-// An event with a payout still unreleased or unconfirmed is never in it.
+// PayoutRecordYears ago ($1 is the cutoff), with the date that counts from
+// (paid_at): the last payment on either rail, or the end of the event if it
+// paid nothing, and nothing of it still open. An event with a payout still
+// unreleased or unconfirmed is never in it.
 const paidEvents = `
-SELECT h.id FROM hackathons h
-WHERE COALESCE(
-        GREATEST(
-          (SELECT max(s.released_at) FROM settlements s WHERE s.hackathon_id = h.id),
-          (SELECT max(l.confirmed_at) FROM keeperhub_payout_legs l
-             JOIN keeperhub_payout_runs r ON r.id = l.run_id WHERE r.hackathon_id = h.id)),
-        h.ends_at) < $1
-  AND NOT EXISTS (SELECT 1 FROM settlements s WHERE s.hackathon_id = h.id AND s.released_at IS NULL)
-  AND NOT EXISTS (SELECT 1 FROM keeperhub_payout_legs l JOIN keeperhub_payout_runs r ON r.id = l.run_id
-                  WHERE r.hackathon_id = h.id AND l.status IN ('pending', 'dispatched', 'unknown'))`
+SELECT e.id, e.paid_at FROM (
+  SELECT h.id, COALESCE(
+           GREATEST(
+             (SELECT max(s.released_at) FROM settlements s WHERE s.hackathon_id = h.id),
+             (SELECT max(l.confirmed_at) FROM keeperhub_payout_legs l
+                JOIN keeperhub_payout_runs r ON r.id = l.run_id WHERE r.hackathon_id = h.id)),
+           h.ends_at) AS paid_at
+  FROM hackathons h
+  WHERE NOT EXISTS (SELECT 1 FROM settlements s WHERE s.hackathon_id = h.id AND s.released_at IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM keeperhub_payout_legs l JOIN keeperhub_payout_runs r ON r.id = l.run_id
+                    WHERE r.hackathon_id = h.id AND l.status IN ('pending', 'dispatched', 'unknown'))) e
+WHERE e.paid_at < $1`
+
+// retentionStep is one table of the payout retention: which rows are due, and
+// what is done to them.
+type retentionStep struct {
+	// name is the table, and the key in RunOnce's counts.
+	name string
+	// sel selects the rows due, as (id, the date their period counts from),
+	// with $1 = the cutoff. The pass and the dry run both select through it.
+	sel string
+	// act is what the pass does to the selected rows, with $1 = their ids.
+	// Empty means delete them.
+	act string
+}
+
+func (s retentionStep) action() string {
+	if s.act == "" {
+		return "DELETE FROM " + s.name + " WHERE id = ANY($1)"
+	}
+	return s.act
+}
+
+// verb is what the pass does to a selected row, in the dry run's words.
+func (s retentionStep) verb() string {
+	if s.act == "" {
+		return "delete"
+	}
+	return "update"
+}
 
 // payoutRetentionSteps erase an erased account's payout records once the
-// payment is PayoutRecordYears old. Each runs with $1 = the cutoff.
+// payment is PayoutRecordYears old.
 //
 // # What "erased" means for a payout record
 //
@@ -228,50 +295,74 @@ WHERE COALESCE(
 // Only what has finished is erased: a leg still pending, a hold not released,
 // a settlement not released, a redemption not decided, or an event with any
 // of those, stays until it has finished and then for PayoutRecordYears.
-var payoutRetentionSteps = []step{
-	{"sponsored_claims", `
-DELETE FROM sponsored_claims WHERE user_id IN (` + erasedAccounts + `) AND created_at < $1`},
+//
+// Every step's rows are selected before any is acted on (purgePayoutRecords),
+// so no step's selection depends on what an earlier one deleted. A row a step
+// deletes must not also be taken by the cascade of an earlier step, or the
+// pass would erase fewer rows than it selected and refuse to commit; hence
+// appeals before their verdicts.
+var payoutRetentionSteps = []retentionStep{
+	{name: "sponsored_claims", sel: `
+SELECT c.id, c.created_at FROM sponsored_claims c
+WHERE c.user_id IN (` + erasedAccounts + `) AND c.created_at < $1`},
 	// A failed leg nobody resolved may still be owed; it stays.
-	{"keeperhub_payout_legs", `
-DELETE FROM keeperhub_payout_legs
-WHERE user_id IN (` + erasedAccounts + `)
-  AND (status = 'confirmed' OR (status = 'failed' AND resolution_note IS NOT NULL))
-  AND COALESCE(confirmed_at, updated_at) < $1`},
-	{"keeperhub_payout_exclusions", `
-DELETE FROM keeperhub_payout_exclusions WHERE user_id IN (` + erasedAccounts + `) AND created_at < $1`},
-	{"settlement_holds", `
-DELETE FROM settlement_holds WHERE user_id IN (` + erasedAccounts + `) AND released_at < $1`},
-	{"settlement_lines", `
-DELETE FROM settlement_lines l USING settlements s
-WHERE s.id = l.settlement_id AND l.user_id IN (` + erasedAccounts + `) AND s.released_at < $1`},
-	{"redemptions", `
-DELETE FROM redemptions
-WHERE user_id IN (` + erasedAccounts + `) AND status <> 'pending' AND COALESCE(reviewed_at, created_at) < $1`},
+	{name: "keeperhub_payout_legs", sel: `
+SELECT l.id, COALESCE(l.confirmed_at, l.updated_at) FROM keeperhub_payout_legs l
+WHERE l.user_id IN (` + erasedAccounts + `)
+  AND (l.status = 'confirmed' OR (l.status = 'failed' AND l.resolution_note IS NOT NULL))
+  AND COALESCE(l.confirmed_at, l.updated_at) < $1`},
+	{name: "keeperhub_payout_exclusions", sel: `
+SELECT x.id, x.created_at FROM keeperhub_payout_exclusions x
+WHERE x.user_id IN (` + erasedAccounts + `) AND x.created_at < $1`},
+	{name: "settlement_holds", sel: `
+SELECT h.id, h.released_at FROM settlement_holds h
+WHERE h.user_id IN (` + erasedAccounts + `) AND h.released_at < $1`},
+	{name: "settlement_lines", sel: `
+SELECT l.id, s.released_at FROM settlement_lines l JOIN settlements s ON s.id = l.settlement_id
+WHERE l.user_id IN (` + erasedAccounts + `) AND s.released_at < $1`},
+	{name: "redemptions", sel: `
+SELECT r.id, COALESCE(r.reviewed_at, r.created_at) FROM redemptions r
+WHERE r.user_id IN (` + erasedAccounts + `) AND r.status <> 'pending' AND COALESCE(r.reviewed_at, r.created_at) < $1`},
 	// The payout belongs to the project; only who received it goes.
-	{"hackathon_maintainer_payouts", `
-UPDATE hackathon_maintainer_payouts SET maintainer_user_id = NULL, updated_at = now()
-WHERE maintainer_user_id IN (` + erasedAccounts + `)
-  AND holdback_status <> 'pending' AND COALESCE(holdback_resolved_at, created_at) < $1`},
+	{name: "hackathon_maintainer_payouts", sel: `
+SELECT p.id, COALESCE(p.holdback_resolved_at, p.created_at) FROM hackathon_maintainer_payouts p
+WHERE p.maintainer_user_id IN (` + erasedAccounts + `)
+  AND p.holdback_status <> 'pending' AND COALESCE(p.holdback_resolved_at, p.created_at) < $1`,
+		act: `UPDATE hackathon_maintainer_payouts SET maintainer_user_id = NULL, updated_at = now() WHERE id = ANY($1)`},
 
 	// GrainHack: the records that decided the payout, login already replaced
 	// at erasure. Model calls first: they carry the pull request the verdict
 	// judged, and their link to the verdict is SET NULL, so deleting the
-	// verdict alone would orphan them. Appeals and clarity ratings go with
-	// their verdict and assignment (ON DELETE CASCADE).
-	{"hackathon_model_calls", `
-DELETE FROM hackathon_model_calls
-WHERE verdict_id IN (SELECT id FROM hackathon_verdicts
-                     WHERE user_id IN (` + erasedAccounts + `) AND hackathon_id IN (` + paidEvents + `))`},
-	{"hackathon_verdicts", `
-DELETE FROM hackathon_verdicts WHERE user_id IN (` + erasedAccounts + `) AND hackathon_id IN (` + paidEvents + `)`},
-	{"hackathon_appeals", `
-DELETE FROM hackathon_appeals WHERE user_id IN (` + erasedAccounts + `) AND hackathon_id IN (` + paidEvents + `)`},
-	{"hackathon_assignments", `
-DELETE FROM hackathon_assignments WHERE user_id IN (` + erasedAccounts + `) AND hackathon_id IN (` + paidEvents + `)`},
+	// verdict alone would orphan them. Appeals before their verdict, which
+	// would otherwise take them by cascade; clarity ratings go with their
+	// assignment (ON DELETE CASCADE).
+	{name: "hackathon_model_calls", sel: `
+SELECT m.id, pe.paid_at FROM hackathon_model_calls m
+JOIN hackathon_verdicts v ON v.id = m.verdict_id
+JOIN (` + paidEvents + `) pe ON pe.id = v.hackathon_id
+WHERE v.user_id IN (` + erasedAccounts + `)`},
+	{name: "hackathon_appeals", sel: `
+SELECT a.id, pe.paid_at FROM hackathon_appeals a
+JOIN (` + paidEvents + `) pe ON pe.id = a.hackathon_id
+WHERE a.user_id IN (` + erasedAccounts + `)`},
+	{name: "hackathon_verdicts", sel: `
+SELECT v.id, pe.paid_at FROM hackathon_verdicts v
+JOIN (` + paidEvents + `) pe ON pe.id = v.hackathon_id
+WHERE v.user_id IN (` + erasedAccounts + `)`},
+	{name: "hackathon_assignments", sel: `
+SELECT a.id, pe.paid_at FROM hackathon_assignments a
+JOIN (` + paidEvents + `) pe ON pe.id = a.hackathon_id
+WHERE a.user_id IN (` + erasedAccounts + `)`},
 	// A draw is also the record of everybody else who entered it, so it is
 	// kept; the person's entry loses its account id (the nil id, which every
 	// reader parses), and a draw they won records why it names no winner.
-	{"hackathon_draws", `
+	{name: "hackathon_draws", sel: `
+SELECT d.id, pe.paid_at FROM hackathon_draws d
+JOIN (` + paidEvents + `) pe ON pe.id = d.hackathon_id
+WHERE d.winner_user_id IN (` + erasedAccounts + `)
+   OR EXISTS (SELECT 1 FROM jsonb_array_elements(d.pool) e
+              WHERE e->>'user_id' IN (SELECT id::text FROM users WHERE erased_at IS NOT NULL))`,
+		act: `
 UPDATE hackathon_draws d
 SET pool = COALESCE((
       SELECT jsonb_agg(CASE WHEN e->>'user_id' IN (SELECT id::text FROM users WHERE erased_at IS NOT NULL)
@@ -282,28 +373,86 @@ SET pool = COALESCE((
     no_winner_reason = CASE WHEN d.winner_user_id IN (` + erasedAccounts + `)
                             THEN 'the winner deleted their account; its records were erased five years after the payout'
                             ELSE d.no_winner_reason END
-WHERE d.hackathon_id IN (` + paidEvents + `)
-  AND (d.winner_user_id IN (` + erasedAccounts + `)
-       OR EXISTS (SELECT 1 FROM jsonb_array_elements(d.pool) e
-                  WHERE e->>'user_id' IN (SELECT id::text FROM users WHERE erased_at IS NOT NULL)))`},
+WHERE d.id = ANY($1)`},
+}
+
+// plannedStep is a payout retention step with the rows it selected.
+type plannedStep struct {
+	step           retentionStep
+	ids            []uuid.UUID
+	oldest, newest *time.Time
+}
+
+// planPayoutRecords selects every payout retention step's rows, before any is
+// acted on.
+func planPayoutRecords(ctx context.Context, q querier, cutoff time.Time) ([]plannedStep, error) {
+	out := make([]plannedStep, 0, len(payoutRetentionSteps))
+	for _, st := range payoutRetentionSteps {
+		rows, err := q.Query(ctx, st.sel, cutoff)
+		if err != nil {
+			return nil, fmt.Errorf("retention: select %s: %w", st.name, err)
+		}
+		p := plannedStep{step: st}
+		for rows.Next() {
+			var id uuid.UUID
+			var at *time.Time
+			if err := rows.Scan(&id, &at); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("retention: select %s: %w", st.name, err)
+			}
+			p.ids = append(p.ids, id)
+			if at != nil {
+				if p.oldest == nil || at.Before(*p.oldest) {
+					p.oldest = at
+				}
+				if p.newest == nil || at.After(*p.newest) {
+					p.newest = at
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("retention: select %s: %w", st.name, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // purgePayoutRecords runs payoutRetentionSteps in one transaction: a round's
 // records go together or not at all.
+//
+// It selects first (planPayoutRecords, the dry run's selection) and then acts
+// on exactly the rows selected. Repeatable read, so every selection sees the
+// same snapshot and a row changed by somebody else meanwhile fails the pass
+// rather than being acted on from a stale read. If any step would touch a
+// different number of rows than it selected, nothing is committed: the dry
+// run would then have said something the pass did not do.
 func (r *Retention) purgePayoutRecords(ctx context.Context) (map[string]int64, error) {
-	cutoff := r.now().AddDate(-PayoutRecordYears, 0, 0)
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	cutoff := r.payoutCutoff(r.now())
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return nil, fmt.Errorf("retention: begin: %w", err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
-	out := make(map[string]int64, len(payoutRetentionSteps))
-	for _, st := range payoutRetentionSteps {
-		tag, err := tx.Exec(ctx, st.sql, cutoff)
-		if err != nil {
-			return nil, fmt.Errorf("retention: %s: %w", st.name, err)
+	plan, err := planPayoutRecords(ctx, tx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(plan))
+	for _, p := range plan {
+		out[p.step.name] = 0
+		if len(p.ids) == 0 {
+			continue
 		}
-		out[st.name] = tag.RowsAffected()
+		tag, err := tx.Exec(ctx, p.step.action(), p.ids)
+		if err != nil {
+			return nil, fmt.Errorf("retention: %s: %w", p.step.name, err)
+		}
+		if tag.RowsAffected() != int64(len(p.ids)) {
+			return nil, fmt.Errorf("retention: %s: selected %d rows but %s %d; nothing committed",
+				p.step.name, len(p.ids), p.step.verb()+"d", tag.RowsAffected())
+		}
+		out[p.step.name] = tag.RowsAffected()
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("retention: commit: %w", err)
