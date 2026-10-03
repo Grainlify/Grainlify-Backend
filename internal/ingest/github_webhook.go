@@ -77,6 +77,20 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 `, *projectID, issue.ID, issue.Number, issue.State, issue.Title, issue.Body, issue.User.Login, issue.HTMLURL, issue.CreatedAt, issue.UpdatedAt, issue.ClosedAt)
 		}
 
+		// A comment was added, edited or deleted. The sync skips re-fetching
+		// comments for an issue whose updated_at and comment count are what
+		// they were at the last fetch, and an edit or deletion need not move
+		// either - so forget the fetch, and the next sync re-reads this
+		// issue's comments.
+		if e.Event == "issue_comment" && env.Issue != nil && env.Issue.Number > 0 {
+			if _, err := i.Pool.Exec(ctx, `
+UPDATE github_issues SET comments_synced_for = NULL
+WHERE project_id = $1::uuid AND number = $2 AND comments_synced_for IS NOT NULL
+`, *projectID, env.Issue.Number); err != nil {
+				slog.Warn("invalidate synced comments failed", "project_id", *projectID, "issue_number", env.Issue.Number, "error", err)
+			}
+		}
+
 		if (e.Event == "pull_request" || e.Event == "pull_request_review") && env.PullRequest != nil {
 			pr := env.PullRequest
 

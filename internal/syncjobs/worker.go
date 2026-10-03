@@ -204,6 +204,10 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 		if len(items) == 0 {
 			return nil
 		}
+		stored, err := loadCommentState(ctx, w.pool, projectID, items)
+		if err != nil {
+			return err
+		}
 
 		for _, it := range items {
 			// Skip PRs from the issues endpoint.
@@ -375,24 +379,46 @@ func (w *Worker) syncIssues(ctx context.Context, projectID uuid.UUID, fullName s
 				}
 			}
 
-			// Fetch comments for this issue (if comments_count > 0, or if the
-			// reconciliation step above just posted a new one - it.Comments
-			// is the count from before that comment existed, so relying on
-			// it alone here would let the bulk UPSERT below clobber the
-			// comment just posted with the stale empty default).
-			var commentsJSON []byte = []byte("[]")
+			// Fetch comments for this issue only if they can have changed since
+			// the last fetch (see commentsNeedFetch) - or if the reconciliation
+			// step above just posted one: it.Comments is the count from before
+			// that comment existed.
+			//
+			// commentsKnown is false when the stored comments are to be kept:
+			// unchanged, or the fetch failed. A failed fetch used to write "[]",
+			// wiping the comments already stored.
+			commentsJSON := []byte("[]")
+			commentsKnown := true
 			if it.Comments > 0 || commentPosted {
-				if err := w.limiter.Wait(ctx); err == nil {
+				commentsKnown = false
+				if commentPosted || commentsNeedFetch(stored[it.ID], it.Comments, updatedAt) {
+					if err := w.limiter.Wait(ctx); err != nil {
+						return err
+					}
 					comments, err := w.gh.ListIssueComments(ctx, token, fullName, it.Number)
-					if err == nil {
+					if _, limited := retryAt(err, time.Now()); limited {
+						// The rest of this sync would only be refused too;
+						// the job is retried after the reset, and what this
+						// sync already wrote stays written.
+						return err
+					}
+					if err != nil {
+						slog.Warn("fetch issue comments failed, keeping stored comments",
+							"project_id", projectID, "issue_number", it.Number, "error", err)
+					} else {
 						commentsJSON, _ = json.Marshal(comments)
+						commentsKnown = true
 					}
 				}
 			}
+			var commentsSyncedFor *time.Time
+			if commentsKnown {
+				commentsSyncedFor = updatedAt
+			}
 
 			if _, err := w.pool.Exec(ctx, `
-INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, last_seen_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+INSERT INTO github_issues (project_id, github_issue_id, number, state, title, body, author_login, url, assignees, labels, comments_count, comments, created_at_github, updated_at_github, closed_at_github, comments_synced_for, last_seen_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
 ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
   number = EXCLUDED.number,
   state = EXCLUDED.state,
@@ -403,7 +429,8 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
   assignees = EXCLUDED.assignees,
   labels = EXCLUDED.labels,
   comments_count = EXCLUDED.comments_count,
-  comments = EXCLUDED.comments,
+  comments = CASE WHEN $17::bool THEN EXCLUDED.comments ELSE github_issues.comments END,
+  comments_synced_for = CASE WHEN $17::bool THEN EXCLUDED.comments_synced_for ELSE github_issues.comments_synced_for END,
   created_at_github = COALESCE(EXCLUDED.created_at_github, github_issues.created_at_github),
   updated_at_github = COALESCE(EXCLUDED.updated_at_github, github_issues.updated_at_github),
   closed_at_github = COALESCE(EXCLUDED.closed_at_github, github_issues.closed_at_github),
@@ -415,16 +442,19 @@ ON CONFLICT (project_id, github_issue_id) DO UPDATE SET
 -- is read only as a fallback sort key for rows with no updated_at_github.
 WHERE (github_issues.number, github_issues.state, github_issues.title, github_issues.body,
        github_issues.author_login, github_issues.url, github_issues.assignees, github_issues.labels,
-       github_issues.comments_count, github_issues.comments,
+       github_issues.comments_count, github_issues.comments, github_issues.comments_synced_for,
        github_issues.created_at_github, github_issues.updated_at_github, github_issues.closed_at_github)
   IS DISTINCT FROM
       (EXCLUDED.number, EXCLUDED.state, EXCLUDED.title, EXCLUDED.body,
        EXCLUDED.author_login, EXCLUDED.url, EXCLUDED.assignees, EXCLUDED.labels,
-       EXCLUDED.comments_count, EXCLUDED.comments,
+       EXCLUDED.comments_count,
+       CASE WHEN $17::bool THEN EXCLUDED.comments ELSE github_issues.comments END,
+       CASE WHEN $17::bool THEN EXCLUDED.comments_synced_for ELSE github_issues.comments_synced_for END,
        COALESCE(EXCLUDED.created_at_github, github_issues.created_at_github),
        COALESCE(EXCLUDED.updated_at_github, github_issues.updated_at_github),
        COALESCE(EXCLUDED.closed_at_github, github_issues.closed_at_github))
-`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt); err != nil {
+`, projectID, it.ID, it.Number, it.State, it.Title, it.Body, it.User.Login, it.HTMLURL, assigneesJSON, labelsJSON, it.Comments, commentsJSON, createdAt, updatedAt, closedAt,
+				commentsSyncedFor, commentsKnown); err != nil {
 				slog.Warn("upsert github issue failed", "project_id", projectID, "issue_number", it.Number, "error", err)
 			}
 		}
@@ -436,6 +466,60 @@ WHERE (github_issues.number, github_issues.state, github_issues.title, github_is
 		"total_issues", totalIssues,
 	)
 	return nil
+}
+
+// storedComments is what github_issues holds about an issue's comments.
+type storedComments struct {
+	count     int
+	syncedFor *time.Time
+}
+
+// loadCommentState reads the stored comment state of one listing page's
+// issues, keyed by GitHub issue id. Absent issues are not in the map.
+func loadCommentState(ctx context.Context, pool db.DBPool, projectID uuid.UUID, items []github.IssueListItem) (map[int64]storedComments, error) {
+	ids := make([]int64, 0, len(items))
+	for _, it := range items {
+		if it.PullRequest == nil {
+			ids = append(ids, it.ID)
+		}
+	}
+	out := make(map[int64]storedComments, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := pool.Query(ctx, `
+SELECT github_issue_id, COALESCE(comments_count, 0), comments_synced_for
+FROM github_issues
+WHERE project_id = $1 AND github_issue_id = ANY($2)
+`, projectID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var sc storedComments
+		if err := rows.Scan(&id, &sc.count, &sc.syncedFor); err != nil {
+			return nil, err
+		}
+		out[id] = sc
+	}
+	return out, rows.Err()
+}
+
+// commentsNeedFetch reports whether an issue's comments can have changed
+// since they were last fetched.
+//
+// Fetching them for every commented issue on every sync is what spent the
+// owners' GitHub budgets: 1.0M comment calls in a week for 22.6k commented
+// issues. Adding a comment bumps the issue's updated_at and comments count;
+// the issue_comment webhook clears syncedFor for edits and deletions. An
+// issue never fetched, or listed without updated_at, is always fetched.
+func commentsNeedFetch(prev storedComments, listedCount int, listedUpdatedAt *time.Time) bool {
+	if prev.syncedFor == nil || listedUpdatedAt == nil {
+		return true
+	}
+	return prev.count != listedCount || !prev.syncedFor.Equal(*listedUpdatedAt)
 }
 
 // grainHackLabel is the GitHub label that marks an issue as part of the

@@ -1,0 +1,22 @@
+-- github_issues_comments_synced_for
+--
+-- syncIssues fetched the comments of every issue with comments_count > 0 on
+-- every sync - one API call per commented issue. 22,614 of production's 26,091
+-- issues have comments, and the last week's syncs made 1.0M comment calls.
+-- That is what drains each project owner's 5,000-requests-an-hour GitHub
+-- budget, and the 403s it produces fail about half of all sync jobs.
+--
+-- comments_synced_for records the issue's updated_at_github as of the last
+-- successful comment fetch. GitHub bumps an issue's updated_at when a comment
+-- is added, so a sync re-fetches only when it differs, when comments_count
+-- differs, or when it is NULL - which the issue_comment webhook sets it to,
+-- for the edits and deletions updated_at might not reflect.
+--
+-- Not updated_at_github itself: the issues webhook writes that column from its
+-- payload without touching comments, so it can move past the last fetch.
+--
+-- Additive and nullable: no rewrite, no backfill. Every existing row starts
+-- NULL, so each issue's comments are fetched once more after the deploy (what
+-- every sync did until now) and then only on change.
+
+ALTER TABLE github_issues ADD COLUMN IF NOT EXISTS comments_synced_for TIMESTAMPTZ;

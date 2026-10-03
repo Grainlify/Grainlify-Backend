@@ -8,12 +8,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/ingest"
 )
 
 // fakeRepo serves a repository's issues, pull requests and comments the way
@@ -25,6 +28,10 @@ type fakeRepo struct {
 	prs      []string
 	comments map[int]string // issue number -> JSON array
 	calls    map[string]int
+	// commentFailure, when set, answers comment fetches with this status,
+	// headers and body instead.
+	commentFailure  *http.Response
+	commentFailBody string
 }
 
 func newFakeRepo(repo string, n int) *fakeRepo {
@@ -70,6 +77,10 @@ func (f *fakeRepo) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	case strings.HasPrefix(path, "/repos/"+f.repo+"/issues/") && strings.HasSuffix(path, "/comments"):
 		f.calls["list comments"]++
+		if f.commentFailure != nil {
+			return &http.Response{StatusCode: f.commentFailure.StatusCode, Header: f.commentFailure.Header,
+				Body: io.NopCloser(strings.NewReader(f.commentFailBody)), Request: r}, nil
+		}
 		var n int
 		fmt.Sscanf(strings.TrimPrefix(path, "/repos/"+f.repo+"/issues/"), "%d", &n)
 		body, code = f.comments[n], http.StatusOK
@@ -210,4 +221,100 @@ func TestSync_UnchangedRepositoryRewritesNoRows(t *testing.T) {
 	}
 
 	t.Logf("%d issues + %d PRs: first sync wrote %d bytes of WAL, an unchanged re-sync %d bytes", n, n, firstWAL, againWAL)
+}
+
+func storedCommentBodies(t *testing.T, d *db.DB, project uuid.UUID, number int) string {
+	t.Helper()
+	var c string
+	if err := d.Pool.QueryRow(context.Background(), `SELECT comments::text FROM github_issues WHERE project_id = $1 AND number = $2`, project, number).Scan(&c); err != nil {
+		t.Fatalf("stored comments: %v", err)
+	}
+	return c
+}
+
+// One comment call per commented issue per sync - 1.0M in a week in
+// production - is what drained the owners' GitHub budgets. Comments are now
+// fetched when they can have changed, and only then.
+func TestSyncIssues_FetchesCommentsOnlyWhenTheyCanHaveChanged(t *testing.T) {
+	const n = 40
+	s := newSyncFixture(t, n)
+	ctx := context.Background()
+	sync := func() map[string]int {
+		t.Helper()
+		if err := s.w.syncIssues(ctx, s.project, s.repo, "tok", ""); err != nil {
+			t.Fatalf("syncIssues: %v", err)
+		}
+		return s.gh.takeCalls()
+	}
+
+	if c := sync(); c["list comments"] != n {
+		t.Fatalf("first sync made %d comment calls, want %d (one per commented issue)", c["list comments"], n)
+	}
+	if c := sync(); c["list comments"] != 0 {
+		t.Errorf("unchanged re-sync made %d comment calls, want 0", c["list comments"])
+	}
+
+	// A new comment: GitHub bumps the issue's updated_at and count.
+	s.gh.mu.Lock()
+	s.gh.issues[4] = fakeIssue(s.repo, 5, "Issue 5", 3, "2026-09-03T00:00:00Z")
+	s.gh.comments[5] = `[{"id":1,"body":"a"},{"id":2,"body":"b"},{"id":3,"body":"a third"}]`
+	s.gh.mu.Unlock()
+	if c := sync(); c["list comments"] != 1 {
+		t.Errorf("sync after one new comment made %d comment calls, want 1", c["list comments"])
+	}
+	if got := storedCommentBodies(t, s.d, s.project, 5); !strings.Contains(got, "a third") {
+		t.Errorf("issue 5 comments not refreshed: %s", got)
+	}
+
+	// An edit need not move updated_at; the issue_comment webhook marks it.
+	s.gh.mu.Lock()
+	s.gh.comments[9] = `[{"id":1,"body":"edited"},{"id":2,"body":"b"}]`
+	s.gh.mu.Unlock()
+	ing := &ingest.GitHubWebhookIngestor{Pool: s.d.Pool}
+	if err := ing.Ingest(ctx, events.GitHubWebhookReceived{
+		DeliveryID: "comment-edit-" + uuid.NewString(), Event: "issue_comment", Action: "edited", RepoFullName: s.repo,
+		Payload: []byte(`{"action":"edited","issue":{"id":500009,"number":9},"comment":{"id":1,"body":"edited"}}`),
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if c := sync(); c["list comments"] != 1 {
+		t.Errorf("sync after an issue_comment webhook made %d comment calls, want 1", c["list comments"])
+	}
+	if got := storedCommentBodies(t, s.d, s.project, 9); !strings.Contains(got, "edited") {
+		t.Errorf("issue 9 comments not refreshed after the webhook: %s", got)
+	}
+
+	// A failed fetch keeps what is stored (it used to write "[]") and is
+	// retried by the next sync.
+	before := storedCommentBodies(t, s.d, s.project, 12)
+	s.gh.mu.Lock()
+	s.gh.issues[11] = fakeIssue(s.repo, 12, "Issue 12", 3, "2026-09-04T00:00:00Z")
+	s.gh.commentFailure, s.gh.commentFailBody = &http.Response{StatusCode: 502, Header: http.Header{}}, `{"message":"Server Error"}`
+	s.gh.mu.Unlock()
+	if c := sync(); c["list comments"] != 1 {
+		t.Errorf("sync with a failing comment fetch made %d comment calls, want 1", c["list comments"])
+	}
+	if got := storedCommentBodies(t, s.d, s.project, 12); got != before {
+		t.Errorf("a failed comment fetch replaced the stored comments: %s -> %s", before, got)
+	}
+	s.gh.mu.Lock()
+	s.gh.commentFailure = nil
+	s.gh.mu.Unlock()
+	if c := sync(); c["list comments"] != 1 {
+		t.Errorf("sync after the failure made %d comment calls, want 1 (the retry)", c["list comments"])
+	}
+	if c := sync(); c["list comments"] != 0 {
+		t.Errorf("settled re-sync made %d comment calls, want 0", c["list comments"])
+	}
+
+	// Rate limited mid-sync: stop, and let the job be retried at the reset.
+	s.gh.mu.Lock()
+	s.gh.issues[19] = fakeIssue(s.repo, 20, "Issue 20", 3, "2026-09-05T00:00:00Z")
+	s.gh.commentFailure = &http.Response{StatusCode: 403, Header: http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {"1786990000"}}}
+	s.gh.commentFailBody = `{"message":"API rate limit exceeded"}`
+	s.gh.mu.Unlock()
+	err := s.w.syncIssues(ctx, s.project, s.repo, "tok", "")
+	if _, limited := retryAt(err, time.Now()); !limited {
+		t.Errorf("rate-limited comment fetch: syncIssues returned %v, want a rate-limit error", err)
+	}
 }
