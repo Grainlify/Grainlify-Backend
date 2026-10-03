@@ -18,6 +18,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
 // GitHub App IDs are numeric; slugs are alphanumeric-with-hyphens. Validating
@@ -446,12 +447,10 @@ WHERE id = $1
 				"old_status", existingStatus,
 			)
 
-			// Always enqueue sync jobs (they will be deduplicated by the worker if already running)
-			_, _ = h.db.Pool.Exec(ctx, `
-INSERT INTO sync_jobs (project_id, job_type, status, run_at)
-VALUES ($1, 'sync_issues', 'pending', now()),
-       ($1, 'sync_prs', 'pending', now())
-`, projectID)
+			// Coalesced into any sync already pending for this project.
+			if _, err := syncqueue.Enqueue(ctx, h.db.Pool, projectID, 0, syncqueue.AllTypes...); err != nil {
+				slog.Warn("enqueue sync jobs failed", "project_id", projectID, "error", err)
+			}
 
 			slog.Info("enqueued sync jobs for existing project",
 				"project_id", projectID,
@@ -543,12 +542,10 @@ SET github_repo_id = $2,
 WHERE id = $1
 `, projectID, repo.ID, installationID, repo.Fork)
 
-		// Enqueue sync jobs for issues and PRs
-		_, _ = h.db.Pool.Exec(ctx, `
-INSERT INTO sync_jobs (project_id, job_type, status, run_at)
-VALUES ($1, 'sync_issues', 'pending', now()),
-       ($1, 'sync_prs', 'pending', now())
-`, projectID)
+		// Enqueue sync jobs for issues and PRs (coalesced into any pending).
+		if _, err := syncqueue.Enqueue(ctx, h.db.Pool, projectID, 0, syncqueue.AllTypes...); err != nil {
+			slog.Warn("enqueue sync jobs failed", "project_id", projectID, "error", err)
+		}
 
 		slog.Info("verified project and enqueued sync jobs",
 			"project_id", projectID,

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
 type SyncHandler struct {
@@ -55,11 +56,12 @@ func (h *SyncHandler) EnqueueFullSync() fiber.Handler {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "forbidden"})
 		}
 
-		_, _ = h.db.Pool.Exec(c.Context(), `
-INSERT INTO sync_jobs (project_id, job_type, status, run_at)
-VALUES ($1, 'sync_issues', 'pending', now()),
-       ($1, 'sync_prs', 'pending', now())
-`, projectID)
+		// A press of "sync now" while a sync is already waiting is answered
+		// by that sync: queued stays true, nothing new is inserted.
+		if _, err := syncqueue.Enqueue(c.Context(), h.db.Pool, projectID, 0, syncqueue.AllTypes...); err != nil {
+			slog.Error("enqueue full sync", "project_id", projectID, "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "enqueue_failed"})
+		}
 
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"queued": true})
 	}

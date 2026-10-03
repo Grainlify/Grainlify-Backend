@@ -8,9 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/events"
 	"github.com/jagadeesh/grainlify/backend/internal/notifications"
+	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
 type GitHubWebhookIngestor struct {
@@ -118,13 +121,17 @@ ON CONFLICT (project_id, github_pr_id) DO UPDATE SET
 
 	// Enqueue follow-up sync jobs (best-effort). issue_comment is included so
 	// a comment posted directly on GitHub (outside Grainlify) gets picked up
-	// by syncIssues()'s existing full comment refetch - see internal/syncjobs.
+	// by syncIssues()'s comment refetch - see internal/syncjobs.
+	//
+	// Coalesced: if this project already has a pending job of a type, that
+	// job covers this event too (see internal/syncqueue). This used to insert
+	// a fresh pair per delivery, which is how 38k jobs came to be waiting.
 	if projectID != nil && (e.Event == "issues" || e.Event == "pull_request" || e.Event == "push" || e.Event == "issue_comment") {
-		_, _ = i.Pool.Exec(ctx, `
-INSERT INTO sync_jobs (project_id, job_type, status, run_at)
-VALUES ($1::uuid, 'sync_issues', 'pending', now()),
-       ($1::uuid, 'sync_prs', 'pending', now())
-`, *projectID)
+		if pid, err := uuid.Parse(*projectID); err == nil {
+			if _, err := syncqueue.Enqueue(ctx, i.Pool, pid, syncqueue.WebhookDelay, syncqueue.AllTypes...); err != nil {
+				slog.Warn("enqueue sync jobs from webhook failed", "project_id", pid, "event", e.Event, "error", err)
+			}
+		}
 	}
 
 	// Handle GitHub App installation events

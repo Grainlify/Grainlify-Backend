@@ -219,6 +219,19 @@ func TestSyncEnqueueFullSync(t *testing.T) {
 		}
 	})
 
+	t.Run("pressing sync again while jobs are pending queues nothing new", func(t *testing.T) {
+		tok := syncSuiteToken(t, owner, "maintainer")
+		for i := 0; i < 3; i++ {
+			status, body := syncSuiteDo(t, app, "POST", "/projects/"+project.String()+"/sync", tok)
+			if status != fiber.StatusAccepted || body["queued"] != true {
+				t.Fatalf("repeat POST %d: status = %d queued = %v", i, status, body["queued"])
+			}
+		}
+		if jobs := syncSuiteReadJobs(t, d, project); len(jobs) != 2 {
+			t.Errorf("expected the 2 pending jobs to absorb repeat requests, got %d rows: %+v", len(jobs), jobs)
+		}
+	})
+
 	t.Run("admin non-owner can also enqueue", func(t *testing.T) {
 		project2 := syncSuiteInsertProject(t, d, owner)
 		admin := syncSuiteInsertUser(t, d, "admin")

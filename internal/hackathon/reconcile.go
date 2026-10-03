@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jagadeesh/grainlify/backend/internal/db"
+	"github.com/jagadeesh/grainlify/backend/internal/syncqueue"
 )
 
 // reconcileInterval is how often Reconciler re-enqueues sync_jobs for
@@ -49,12 +50,13 @@ func (r *Reconciler) Run(ctx context.Context) error {
 }
 
 func (r *Reconciler) tick(ctx context.Context) error {
-	// NOT EXISTS guards against unbounded duplicate enqueueing between
-	// ticks - a rare race between two reconciler instances both passing
-	// this check is harmless (worst case, one extra cheap resync), matching
-	// how sync_jobs' own FOR UPDATE SKIP LOCKED claim already tolerates
-	// concurrent workers.
-	_, err := r.pool.Exec(ctx, `
+	// A crawl only needs to happen if nothing is already about to look: the
+	// NOT EXISTS skips projects with a sync_issues job pending or running.
+	// ON CONFLICT covers the race the NOT EXISTS cannot - a webhook queueing
+	// one between the check and the insert - which would otherwise make the
+	// unique index on pending jobs (uq_sync_jobs_one_pending) fail this
+	// whole statement, for every project, until the next tick.
+	tag, err := r.pool.Exec(ctx, `
 INSERT INTO sync_jobs (project_id, job_type, status, run_at)
 SELECT DISTINCT hpa.project_id, 'sync_issues', 'pending', now()
 FROM hackathon_project_applications hpa
@@ -64,6 +66,10 @@ WHERE hpa.status = 'accepted' AND h.phase IN ('issue_prep', 'live')
     SELECT 1 FROM sync_jobs sj
     WHERE sj.project_id = hpa.project_id AND sj.job_type = 'sync_issues' AND sj.status IN ('pending', 'running')
   )
+ON CONFLICT (project_id, job_type) WHERE status = 'pending' DO NOTHING
 `)
+	if err == nil && tag.RowsAffected() > 0 {
+		syncqueue.Wake()
+	}
 	return err
 }
