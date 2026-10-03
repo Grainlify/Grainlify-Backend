@@ -14,9 +14,9 @@
 // delay and a chance of forgetting, and nothing they could check that the code
 // does not. The two judgements that do need care are made by code as well:
 // whether money is still on its way to the person (then the erasure waits,
-// "held", and proceeds by itself once it has arrived), and whether the other
-// services were reached (then it retries, and records anything it could not
-// do).
+// "held", and proceeds by itself once it has arrived, or after MaxHold at the
+// latest), and whether the other services were reached (then it retries, and
+// records anything it could not do).
 //
 // Why a grace period at all: the request is made from a signed-in browser
 // session, and a session can be somebody else's - a borrowed laptop, a stolen
@@ -31,12 +31,27 @@
 // the record cannot drift apart.
 package erasure
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // GracePeriod is how long a request waits before it is carried out. Seven
 // days: long enough to notice a request you did not make, short enough that
 // "delete my account" still means soon.
 const GracePeriod = 7 * 24 * time.Hour
+
+// MaxHold is the longest a due erasure waits for money still on its way to
+// the person, counted from when it became due (the end of GracePeriod).
+//
+// Without a limit a hold could last for ever: a claim made directly on chain
+// is invisible to us, so it holds until somebody notices, and a GrainHack
+// assignment can sit active for weeks. "Delete my account" cannot mean
+// "unless a payment is open". After MaxHold the erasure goes ahead, and the
+// records of the money still in flight are kept, attached to the empty account
+// record, so it can still be paid or resolved; the person is told when the
+// hold begins, with the date it ends.
+const MaxHold = 30 * 24 * time.Hour
 
 // ErasedPlaceholder replaces a GitHub login in records that are kept, such as
 // a GrainHack verdict: the row still says a verdict was given, and no longer
@@ -126,4 +141,16 @@ var Retained = []Item{
 		What: "Support messages already delivered to our team's Telegram and Discord, and the billing profile your browser keeps on your device",
 		Why:  "Messages already delivered to those services cannot be withdrawn by us; the browser copy is on your device. We clear it from this browser when you request deletion",
 	},
+}
+
+// InFlightItem is added to the request's retained list when the erasure went
+// ahead after MaxHold with money still in flight. The records it names are
+// already kept (keptTables); this says why, in the list the request records.
+func InFlightItem(reasons []string) Item {
+	return Item{
+		What: "Records of the money that was still on its way to you when your deletion went ahead (" + strings.Join(reasons, "; ") + ")",
+		Why: "So it can still be paid to you or otherwise resolved. They are attached to the empty account record; " +
+			"contact support to collect it",
+		Until: "until it is resolved, then as for other payout records",
+	}
 }

@@ -327,9 +327,20 @@ func main() {
 	// whether NATS is configured has nothing to do with whether somebody's
 	// erasure is due, and a deletion that silently never runs is the defect
 	// this exists to remove.
+	//
+	// Its notifications service is built the same way as the reconciler's
+	// above, nil-interface care included: the person is told when their
+	// erasure starts waiting for a payment, through the same channels as the
+	// request and cancel messages.
 	erasureServices := erasure.NewServices(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret,
 		cfg.DiditAPIKey, cfg.BountyAgentURL, cfg.BountyLinkSigningKey)
-	go erasure.NewExecutor(database.Pool, erasureServices, cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
+	var erasureMailer email.Mailer
+	if m := email.NewMailerCloudMailer(cfg.MailerCloudAPIKey, cfg.EmailFromAddress, cfg.EmailFromName); m != nil {
+		erasureMailer = m
+	}
+	go erasure.NewExecutor(database.Pool, erasureServices,
+		notifications.New(database, erasureMailer, cfg.FrontendBaseURL),
+		cfg.TokenEncKeyB64, 15*time.Minute).Run(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {

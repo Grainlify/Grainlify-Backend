@@ -149,7 +149,7 @@ func TestDeletion_GetDescribesWhatHappens(t *testing.T) {
 	pol, _ := out["policy"].(map[string]any)
 	erased, _ := pol["erased"].([]any)
 	retained, _ := pol["retained"].([]any)
-	if pol["grace_days"] != float64(7) || len(erased) == 0 || len(retained) == 0 {
+	if pol["grace_days"] != float64(7) || pol["max_hold_days"] != float64(30) || len(erased) == 0 || len(retained) == 0 {
 		t.Errorf("policy = %v", pol)
 	}
 	if mif, ok := out["money_in_flight"].([]any); !ok || len(mif) != 0 {

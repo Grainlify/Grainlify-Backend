@@ -37,7 +37,7 @@ func TestAgentErasure_SignedUnderItsOwnDomain(t *testing.T) {
 
 	s := NewServices("", "", "", srv.URL, base64.StdEncoding.EncodeToString(seed))
 	s.Now = func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }
-	if err := s.EraseAtAgent(context.Background(), 42, "ada"); err != nil {
+	if err := s.EraseAtAgent(context.Background(), 42, "ada", false); err != nil {
 		t.Fatalf("EraseAtAgent: %v", err)
 	}
 	m := agentGrammar.FindStringSubmatch(got.Message)
@@ -61,19 +61,27 @@ func TestAgentErasure_SignedUnderItsOwnDomain(t *testing.T) {
 		}
 	}
 
+	// Past the hold limit the action itself changes, so it is signed too.
+	if err := s.EraseAtAgent(context.Background(), 42, "ada", true); err != nil {
+		t.Fatalf("EraseAtAgent retaining: %v", err)
+	}
+	if m := agentGrammar.FindStringSubmatch(got.Message); m == nil || m[2] != AgentActionEraseRetaining {
+		t.Errorf("retaining erasure sent action %q, want %q", m, AgentActionEraseRetaining)
+	}
+
 	status = http.StatusConflict
-	if err := s.EraseAtAgent(context.Background(), 42, "ada"); !errors.Is(err, ErrAgentInFlight) {
+	if err := s.EraseAtAgent(context.Background(), 42, "ada", false); !errors.Is(err, ErrAgentInFlight) {
 		t.Errorf("409 = %v, want ErrAgentInFlight", err)
 	}
 	status = http.StatusInternalServerError
-	if err := s.EraseAtAgent(context.Background(), 42, "ada"); err == nil || errors.Is(err, ErrAgentInFlight) {
+	if err := s.EraseAtAgent(context.Background(), 42, "ada", false); err == nil || errors.Is(err, ErrAgentInFlight) {
 		t.Errorf("500 = %v, want a plain failure", err)
 	}
 }
 
 func TestServices_UnconfiguredStepsSaySo(t *testing.T) {
 	s := NewServices("", "", "", "", "")
-	if err := s.EraseAtAgent(context.Background(), 1, "a"); !errors.Is(err, ErrNotConfigured) {
+	if err := s.EraseAtAgent(context.Background(), 1, "a", false); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("agent: %v", err)
 	}
 	if err := s.DeleteDiditSession(context.Background(), "x"); !errors.Is(err, ErrNotConfigured) {

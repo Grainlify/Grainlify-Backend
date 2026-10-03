@@ -142,7 +142,10 @@ RETURNING `+requestColumns,
 	return req, nil
 }
 
-// recordEvent appends to the request's history.
+// recordEvent appends to the request's history. clock_timestamp(), not the
+// column's now() default: two events written in one transaction (the hold
+// limit, then completion) would otherwise share a timestamp and read back in
+// either order.
 func recordEvent(ctx context.Context, pool Pool, requestID uuid.UUID, kind string, detail any) error {
 	if detail == nil {
 		detail = map[string]any{}
@@ -152,7 +155,7 @@ func recordEvent(ctx context.Context, pool Pool, requestID uuid.UUID, kind strin
 		return fmt.Errorf("erasure: encode event: %w", err)
 	}
 	if _, err := pool.Exec(ctx, `
-INSERT INTO account_deletion_events (request_id, kind, detail) VALUES ($1, $2, $3)
+INSERT INTO account_deletion_events (request_id, kind, detail, at) VALUES ($1, $2, $3, clock_timestamp())
 `, requestID, kind, b); err != nil {
 		return fmt.Errorf("erasure: record %s event: %w", kind, err)
 	}

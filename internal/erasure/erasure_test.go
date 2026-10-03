@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/cryptox"
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/dbtest"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 // fakeExternal records what the executor asked of the other services and
@@ -26,9 +28,11 @@ type fakeExternal struct {
 	revoked    []string
 	diditDel   []string
 	agentErase []int64
-	diditErr   error
-	agentErr   error
-	githubErr  error
+	// agentRetain records the retainInFlight flag of each agent call.
+	agentRetain []bool
+	diditErr    error
+	agentErr    error
+	githubErr   error
 }
 
 func (f *fakeExternal) RevokeGitHub(_ context.Context, token string) error {
@@ -45,11 +49,28 @@ func (f *fakeExternal) DeleteDiditSession(_ context.Context, id string) error {
 	return f.diditErr
 }
 
-func (f *fakeExternal) EraseAtAgent(_ context.Context, ghID int64, _ string) error {
+func (f *fakeExternal) EraseAtAgent(_ context.Context, ghID int64, _ string, retainInFlight bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agentErase = append(f.agentErase, ghID)
+	f.agentRetain = append(f.agentRetain, retainInFlight)
+	// The real agent never refuses an erasure told to retain what is in flight.
+	if retainInFlight && errors.Is(f.agentErr, ErrAgentInFlight) {
+		return nil
+	}
 	return f.agentErr
+}
+
+// fakeNotifier records what the person was told.
+type fakeNotifier struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (n *fakeNotifier) Notify(_ context.Context, _ uuid.UUID, _ notifications.Type, title, body string, _ notifications.Link) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sent = append(n.sent, title+": "+body)
 }
 
 var testEncKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
@@ -171,7 +192,7 @@ func cleanupPerson(d *db.DB, p person) {
 // newExecutor returns an executor whose clock is moved forward by after, and
 // which only sees the given accounts.
 func newExecutor(d *db.DB, ext External, after time.Duration, scope ...uuid.UUID) *Executor {
-	e := NewExecutor(d.Pool, ext, testEncKey, time.Minute)
+	e := NewExecutor(d.Pool, ext, nil, testEncKey, time.Minute)
 	e.now = func() time.Time { return time.Now().Add(after) }
 	e.scope = scope
 	return e
@@ -527,6 +548,125 @@ func TestExecutor_AgentWorkInProgressHolds(t *testing.T) {
 	// irreversible elsewhere.
 	if len(ext.revoked) != 0 || len(ext.diditDel) != 0 {
 		t.Errorf("GitHub or Didit called before the agent's refusal: %+v", ext)
+	}
+}
+
+// A hold lasts MaxHold at most, counted from when the erasure became due. Until
+// then nothing is touched and the person is told once, with the date; at the
+// limit the erasure goes ahead and the record of the money in flight is kept,
+// on the empty account record, so it can still be paid or resolved.
+func TestExecutor_HoldLastsAtMostMaxHold(t *testing.T) {
+	d := dbtest.DB(t)
+	p := seedPerson(t, d)
+	ext := &fakeExternal{}
+	told := &fakeNotifier{}
+	ctx := context.Background()
+	exec(t, d, `INSERT INTO settlement_holds (user_id, origin_settlement_id, amount_minor, reason) VALUES ($1, $2, 5, 'no_address')`, p.id, p.settleID)
+	req, _, err := Schedule(ctx, d.Pool, p.id, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := req.ExecuteAfter.Add(MaxHold)
+
+	e := newExecutor(d, ext, GracePeriod+time.Minute, p.id)
+	e.notif = told
+	// Passes through the month: the first holds, the rest re-check.
+	for _, at := range []time.Duration{GracePeriod + time.Minute, GracePeriod + 10*24*time.Hour, GracePeriod + MaxHold - time.Hour} {
+		e.now = func() time.Time { return req.ExecuteAfter.Add(at - GracePeriod) }
+		if _, err := e.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		st, hold, _, _, _, _ := requestRow(t, d, p.id)
+		if st != "held" {
+			t.Fatalf("at due+%s: status = %s, want held", at-GracePeriod, st)
+		}
+		if hold == nil || !strings.Contains(*hold, readableDate(until)) {
+			t.Errorf("hold reason does not give the date the hold ends (%s): %v", readableDate(until), hold)
+		}
+	}
+	if n := count(t, d, `SELECT count(*) FROM users WHERE id = $1 AND erased_at IS NULL AND first_name = 'Ada'`, p.id); n != 1 {
+		t.Fatal("account touched while held inside the limit")
+	}
+	if len(told.sent) != 1 {
+		t.Fatalf("notifications while held = %d, want exactly 1: %v", len(told.sent), told.sent)
+	}
+	if !strings.Contains(told.sent[0], readableDate(until)) || !strings.Contains(told.sent[0], "keep only the record of the payment") {
+		t.Errorf("the notification must give the date and say the payment record is kept: %s", told.sent[0])
+	}
+	if len(ext.agentErase) != 0 {
+		t.Errorf("other services called while held: %+v", ext)
+	}
+
+	// The limit: it goes ahead with the money still in flight.
+	e.now = func() time.Time { return until.Add(time.Minute) }
+	if _, err := e.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _, _, retainedJSON, _ := requestRow(t, d, p.id)
+	if st != "completed" {
+		t.Fatalf("status at the limit = %s, want completed", st)
+	}
+	if n := count(t, d, `SELECT count(*) FROM users WHERE id = $1 AND erased_at IS NOT NULL AND first_name IS NULL`, p.id); n != 1 {
+		t.Error("account not erased at the limit")
+	}
+	if n := count(t, d, `SELECT count(*) FROM settlement_holds WHERE user_id = $1 AND amount_minor = 5 AND released_at IS NULL`, p.id); n != 1 {
+		t.Error("the record of the money still in flight was not kept on the tombstone")
+	}
+	if len(ext.agentRetain) != 1 || !ext.agentRetain[0] {
+		t.Errorf("agent asked with retainInFlight = %v, want [true] at the limit", ext.agentRetain)
+	}
+	var retained []Item
+	_ = json.Unmarshal(retainedJSON, &retained)
+	last := retained[len(retained)-1]
+	if len(retained) != len(Retained)+1 || !strings.Contains(last.What, "held back") {
+		t.Errorf("retained list should end with the money in flight: %+v", last)
+	}
+	if k := eventKinds(t, d, p.id); strings.Join(k, ",") != "requested,held,hold_limit_reached,completed" {
+		t.Errorf("events = %v", k)
+	}
+	if len(told.sent) != 1 {
+		t.Errorf("notifications = %d after completion, want still 1", len(told.sent))
+	}
+}
+
+// The agent's refusal is a hold like ours, with the same limit: past it the
+// agent is asked to erase while retaining what its own money in flight needs.
+func TestExecutor_AgentHoldEndsAtTheLimitToo(t *testing.T) {
+	d := dbtest.DB(t)
+	p := seedPerson(t, d)
+	ext := &fakeExternal{agentErr: ErrAgentInFlight}
+	ctx := context.Background()
+	req, _, err := Schedule(ctx, d.Pool, p.id, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newExecutor(d, ext, GracePeriod+time.Minute, p.id)
+	if _, err := e.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _, _, _, _ := requestRow(t, d, p.id); st != "held" {
+		t.Fatalf("status = %s, want held by the agent", st)
+	}
+	e.now = func() time.Time { return req.ExecuteAfter.Add(MaxHold + time.Minute) }
+	if _, err := e.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _, _, retainedJSON, externalJSON := requestRow(t, d, p.id)
+	if st != "completed" {
+		t.Fatalf("status = %s, want completed at the limit", st)
+	}
+	if fmt.Sprint(ext.agentRetain) != "[false true]" {
+		t.Errorf("agent retainInFlight per call = %v, want [false true]", ext.agentRetain)
+	}
+	var external map[string]StepResult
+	_ = json.Unmarshal(externalJSON, &external)
+	if external["agent"].Outcome != "done" {
+		t.Errorf("agent step = %+v, want done", external["agent"])
+	}
+	var retained []Item
+	_ = json.Unmarshal(retainedJSON, &retained)
+	if last := retained[len(retained)-1]; !strings.Contains(last.What, "bounty") {
+		t.Errorf("retained list should name the agent's money in flight: %+v", last)
 	}
 }
 

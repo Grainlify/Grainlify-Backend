@@ -39,16 +39,20 @@ func NewAccountDeletionHandler(d *db.DB, notif *notifications.Service) *AccountD
 const DeletionConfirmPhrase = "delete my account"
 
 type deletionPolicy struct {
-	GraceDays int            `json:"grace_days"`
-	Erased    []erasure.Item `json:"erased"`
-	Retained  []erasure.Item `json:"retained"`
+	GraceDays int `json:"grace_days"`
+	// MaxHoldDays is the longest a due deletion waits for money still on its
+	// way (erasure.MaxHold), so the screen can say so before anybody confirms.
+	MaxHoldDays int            `json:"max_hold_days"`
+	Erased      []erasure.Item `json:"erased"`
+	Retained    []erasure.Item `json:"retained"`
 }
 
 func policy() deletionPolicy {
 	return deletionPolicy{
-		GraceDays: int(erasure.GracePeriod / (24 * time.Hour)),
-		Erased:    erasure.Erased,
-		Retained:  erasure.Retained,
+		GraceDays:   int(erasure.GracePeriod / (24 * time.Hour)),
+		MaxHoldDays: int(erasure.MaxHold / (24 * time.Hour)),
+		Erased:      erasure.Erased,
+		Retained:    erasure.Retained,
 	}
 }
 

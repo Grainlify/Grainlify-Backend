@@ -29,8 +29,10 @@ type External interface {
 	DeleteDiditSession(ctx context.Context, sessionID string) error
 	// EraseAtAgent asks the bounty agent to erase what it holds for this
 	// GitHub account. ErrAgentInFlight means it refused because a bounty
-	// assignment or payout is in progress.
-	EraseAtAgent(ctx context.Context, githubUserID int64, login string) error
+	// assignment or payout is in progress. retainInFlight is set once the
+	// erasure has waited MaxHold: the agent then goes ahead without refusing,
+	// and keeps what it needs to finish or resolve the money still in flight.
+	EraseAtAgent(ctx context.Context, githubUserID int64, login string, retainInFlight bool) error
 }
 
 var (
@@ -98,12 +100,23 @@ const AgentErasureDomain = "grainlify-account-erasure:v1\n"
 
 const agentErasureTTL = 10 * time.Minute
 
+// The two erasure actions the agent accepts. AgentActionErase is refused (409)
+// while a bounty assignment, payout or funded escrow is in flight.
+// AgentActionEraseRetaining is sent only once the erasure has waited MaxHold
+// for that to clear: the agent erases anyway and keeps what the money in
+// flight still needs (apps/agent/src/erasure-service.ts). It is a different
+// action, not a flag beside it, so it is covered by the signature.
+const (
+	AgentActionErase          = "erase"
+	AgentActionEraseRetaining = "erase_retaining_in_flight"
+)
+
 // AgentErasureMessage is the exact text signed. Same seven-line shape as
 // handlers.BountyActionMessage, with the erasure headline.
-func AgentErasureMessage(login string, githubUserID int64, nonce string, issued, expires time.Time) string {
+func AgentErasureMessage(action, login string, githubUserID int64, nonce string, issued, expires time.Time) string {
 	return strings.Join([]string{
 		"Grainlify: erase account",
-		"Action: erase",
+		"Action: " + action,
 		fmt.Sprintf("GitHub: %s (id %d)", login, githubUserID),
 		"Subject: ",
 		"Nonce: " + nonce,
@@ -112,7 +125,7 @@ func AgentErasureMessage(login string, githubUserID int64, nonce string, issued,
 	}, "\n")
 }
 
-func (s *Services) EraseAtAgent(ctx context.Context, githubUserID int64, login string) error {
+func (s *Services) EraseAtAgent(ctx context.Context, githubUserID int64, login string, retainInFlight bool) error {
 	if s.AgentKey == nil || s.AgentURL == "" {
 		return ErrNotConfigured
 	}
@@ -121,7 +134,11 @@ func (s *Services) EraseAtAgent(ctx context.Context, githubUserID int64, login s
 		return fmt.Errorf("erasure: nonce: %w", err)
 	}
 	issued := s.Now().UTC().Truncate(time.Second)
-	msg := AgentErasureMessage(login, githubUserID, hex.EncodeToString(raw), issued, issued.Add(agentErasureTTL))
+	action := AgentActionErase
+	if retainInFlight {
+		action = AgentActionEraseRetaining
+	}
+	msg := AgentErasureMessage(action, login, githubUserID, hex.EncodeToString(raw), issued, issued.Add(agentErasureTTL))
 	sig := ed25519.Sign(s.AgentKey, []byte(AgentErasureDomain+msg))
 	body, _ := json.Marshal(map[string]string{"message": msg, "countersignature": base64.StdEncoding.EncodeToString(sig)})
 

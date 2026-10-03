@@ -15,6 +15,7 @@ import (
 	"github.com/jagadeesh/grainlify/backend/internal/db"
 	"github.com/jagadeesh/grainlify/backend/internal/didit"
 	"github.com/jagadeesh/grainlify/backend/internal/github"
+	"github.com/jagadeesh/grainlify/backend/internal/notifications"
 )
 
 // MaxExternalAttempts is how many passes may fail to reach another service
@@ -45,10 +46,18 @@ type StepResult struct {
 
 func (r StepResult) failed() bool { return r.Outcome == "failed" }
 
+// Notifier tells the person something. notifications.Service satisfies it; the
+// same call the request and cancel messages use, so it reaches them the same
+// ways (in-app, and email where they have one).
+type Notifier interface {
+	Notify(ctx context.Context, userID uuid.UUID, t notifications.Type, title, body string, link notifications.Link)
+}
+
 // Executor carries out due requests.
 type Executor struct {
 	pool     db.DBPool
 	ext      External
+	notif    Notifier
 	encKey   string
 	interval time.Duration
 	now      func() time.Time
@@ -60,12 +69,12 @@ type Executor struct {
 }
 
 // NewExecutor builds an executor. encKeyB64 is TOKEN_ENC_KEY_B64, needed to
-// read the GitHub token that RevokeGitHub presents.
-func NewExecutor(pool db.DBPool, ext External, encKeyB64 string, interval time.Duration) *Executor {
+// read the GitHub token that RevokeGitHub presents. notif may be nil (tests).
+func NewExecutor(pool db.DBPool, ext External, notif Notifier, encKeyB64 string, interval time.Duration) *Executor {
 	if interval <= 0 {
 		interval = 15 * time.Minute
 	}
-	return &Executor{pool: pool, ext: ext, encKey: encKeyB64, interval: interval, now: time.Now}
+	return &Executor{pool: pool, ext: ext, notif: notif, encKey: encKeyB64, interval: interval, now: time.Now}
 }
 
 // Run executes due requests on the interval until the context ends. It runs
@@ -141,11 +150,12 @@ func (e *Executor) executeOne(ctx context.Context, id uuid.UUID) error {
 	var status string
 	var attempts int
 	var holdReason *string
+	var executeAfter time.Time
 	err = tx.QueryRow(ctx, `
-SELECT user_id, status, attempts, hold_reason FROM account_deletion_requests
+SELECT user_id, status, attempts, hold_reason, execute_after FROM account_deletion_requests
 WHERE id = $1 AND status IN ('scheduled', 'held') AND execute_after <= $2
 FOR UPDATE SKIP LOCKED
-`, id, e.now()).Scan(&userID, &status, &attempts, &holdReason)
+`, id, e.now()).Scan(&userID, &status, &attempts, &holdReason, &executeAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // cancelled, completed, or another instance has it
 	}
@@ -155,17 +165,22 @@ FOR UPDATE SKIP LOCKED
 	if userID == nil {
 		// The users row was removed by something other than this path. There
 		// is nothing left here to erase; say so rather than spin on it.
-		return e.complete(ctx, tx, id, attempts+1, nil, map[string]StepResult{}, "the account row was already gone")
+		return e.complete(ctx, tx, id, attempts+1, nil, map[string]StepResult{}, "the account row was already gone", nil)
 	}
 	uid := *userID
 
-	// 1. Money still on its way holds the erasure.
+	// 1. Money still on its way holds the erasure - for MaxHold at most,
+	// counted from when it became due. Past that it goes ahead and the
+	// records of the money in flight are kept (they are all in keptTables,
+	// attached to the tombstone), so it can still be paid or resolved.
+	holdUntil := executeAfter.Add(MaxHold)
+	limitReached := !e.now().Before(holdUntil)
 	reasons, err := MoneyInFlight(ctx, tx, uid)
 	if err != nil {
 		return err
 	}
-	if len(reasons) > 0 {
-		return e.hold(ctx, tx, id, status, holdReason, holdMessage(reasons))
+	if len(reasons) > 0 && !limitReached {
+		return e.hold(ctx, tx, id, uid, status, holdReason, holdMessage(reasons, holdUntil), holdUntil)
 	}
 
 	// 2. What the other services know the person by.
@@ -191,9 +206,11 @@ FOR UPDATE SKIP LOCKED
 		if ghLogin != nil {
 			login = *ghLogin
 		}
-		err := e.ext.EraseAtAgent(ctx, *ghID, login)
-		if errors.Is(err, ErrAgentInFlight) {
-			return e.hold(ctx, tx, id, status, holdReason, holdMessage([]string{"a bounty you are assigned to, or a bounty payout, in progress"}))
+		// Past the limit the agent is told so, and goes ahead keeping what
+		// its own money in flight needs, instead of refusing.
+		err := e.ext.EraseAtAgent(ctx, *ghID, login, limitReached)
+		if errors.Is(err, ErrAgentInFlight) && !limitReached {
+			return e.hold(ctx, tx, id, uid, status, holdReason, holdMessage([]string{agentInFlightReason}, holdUntil), holdUntil)
 		}
 		results["agent"] = outcome(err, fmt.Sprintf("github:%d", *ghID))
 	} else {
@@ -238,8 +255,20 @@ FOR UPDATE SKIP LOCKED
 	if err != nil {
 		return err
 	}
-	return e.complete(ctx, tx, id, attempts, counts, results, "")
+	// What was still in flight when the limit let the erasure go ahead. A
+	// request held only by the agent has no reason of ours to name.
+	var inFlight []string
+	if limitReached && (len(reasons) > 0 || status == "held") {
+		inFlight = reasons
+		if len(inFlight) == 0 {
+			inFlight = []string{agentInFlightReason}
+		}
+	}
+	return e.complete(ctx, tx, id, attempts, counts, results, "", inFlight)
 }
+
+// agentInFlightReason is the hold reason when it is the agent that refused.
+const agentInFlightReason = "a bounty you are assigned to, or a bounty payout, in progress"
 
 // outcome turns an external step's error into its stored result. pending is
 // the identifier to keep if the step failed.
@@ -319,22 +348,49 @@ func (e *Executor) decryptToken(blob []byte) (string, error) {
 	return string(b), nil
 }
 
-func (e *Executor) hold(ctx context.Context, tx pgx.Tx, id uuid.UUID, status string, prev *string, reason string) error {
+func (e *Executor) hold(ctx context.Context, tx pgx.Tx, id, uid uuid.UUID, status string, prev *string, reason string, until time.Time) error {
+	// Re-checked every HoldRecheck, and once more exactly when the limit is
+	// reached, so the erasure goes ahead on the day the person was given.
+	next := e.now().Add(HoldRecheck)
+	if until.Before(next) {
+		next = until
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE account_deletion_requests
 SET status = 'held', hold_reason = $2, next_attempt_at = $3
 WHERE id = $1
-`, id, reason, e.now().Add(HoldRecheck)); err != nil {
+`, id, reason, next); err != nil {
 		return err
 	}
 	// One event per change of reason, not one per pass: a hold re-checked
 	// four times a day for a month is one fact, not a hundred and twenty.
+	firstHold := false
 	if status != "held" || prev == nil || *prev != reason {
-		if err := recordEvent(ctx, tx, id, "held", map[string]any{"reason": reason}); err != nil {
+		if err := tx.QueryRow(ctx, `
+SELECT NOT EXISTS (SELECT 1 FROM account_deletion_events WHERE request_id = $1 AND kind = 'held')
+`, id).Scan(&firstHold); err != nil {
+			return err
+		}
+		if err := recordEvent(ctx, tx, id, "held", map[string]any{"reason": reason, "until": until}); err != nil {
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	// Told once, when the hold begins: that is when there is still time to
+	// act on it. After the erasure the person can no longer sign in to read
+	// anything we send to the account.
+	if firstHold && e.notif != nil {
+		e.notif.Notify(ctx, uid, notifications.TypeAccountDeletion,
+			"Your account deletion is waiting for a payment",
+			"Money may still be on its way to you, so your account has not been deleted yet. We will wait for it until "+
+				readableDate(until)+" at the latest. If it has not been paid by then, we will delete your account anyway "+
+				"and keep only the record of the payment, so it can still be paid or resolved: contact support to collect it. "+
+				"Until then you can still cancel the deletion in Settings.",
+			notifications.SettingsLink(notifications.SubtabAccount))
+	}
+	return nil
 }
 
 func (e *Executor) postpone(ctx context.Context, tx pgx.Tx, id uuid.UUID, attempts int, results map[string]StepResult, failed []string) error {
@@ -354,8 +410,14 @@ WHERE id = $1
 	return tx.Commit(ctx)
 }
 
-func (e *Executor) complete(ctx context.Context, tx pgx.Tx, id uuid.UUID, attempts int, counts map[string]int64, results map[string]StepResult, note string) error {
+func (e *Executor) complete(ctx context.Context, tx pgx.Tx, id uuid.UUID, attempts int, counts map[string]int64, results map[string]StepResult, note string, inFlight []string) error {
 	retained := append([]Item(nil), Retained...)
+	if len(inFlight) > 0 {
+		retained = append(retained, InFlightItem(inFlight))
+		if err := recordEvent(ctx, tx, id, "hold_limit_reached", map[string]any{"in_flight": inFlight}); err != nil {
+			return err
+		}
+	}
 	// Anything an external step could not do is kept on the record, and said
 	// so in the list the person sees.
 	for name, r := range results {

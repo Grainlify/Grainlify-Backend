@@ -3,6 +3,8 @@ package erasure
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -14,7 +16,8 @@ import (
 // with to collect a claim. Doing that while a payout is still owed would turn
 // "delete my data" into "forfeit my money", which nobody asked for. So the
 // erasure waits ("held") and re-checks on every pass, and proceeds by itself
-// once each of these has cleared.
+// once each of these has cleared - or once it has waited MaxHold, keeping the
+// records of whatever is still in flight.
 //
 // Each check errs towards holding. A hold costs a delay the person can see
 // and ask about; an erasure that strands a payout cannot be undone.
@@ -85,14 +88,14 @@ func MoneyInFlight(ctx context.Context, pool Pool, userID uuid.UUID) ([]string, 
 	return reasons, nil
 }
 
-// holdMessage is the sentence stored in hold_reason.
-func holdMessage(reasons []string) string {
-	msg := "Money may still be on its way to you ("
-	for i, r := range reasons {
-		if i > 0 {
-			msg += "; "
-		}
-		msg += r
-	}
-	return msg + "). We will erase your account by ourselves as soon as it has been paid. If you would rather give it up, contact support."
+// holdMessage is the sentence stored in hold_reason, shown as-is on the
+// settings screen. until is when the hold ends whatever happens.
+func holdMessage(reasons []string, until time.Time) string {
+	return "Money may still be on its way to you (" + strings.Join(reasons, "; ") + "). " +
+		"We will erase your account as soon as it has been paid, and on " + readableDate(until) +
+		" at the latest: if it has not been paid by then, we erase your account anyway and keep the record of " +
+		"the payment, so it can still be paid or resolved through support. If you would rather give it up now, contact support."
 }
+
+// readableDate is how dates are written in what the person reads.
+func readableDate(t time.Time) string { return t.UTC().Format("2 January 2006") }
