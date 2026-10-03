@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jagadeesh/grainlify/backend/internal/auth"
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -316,5 +317,56 @@ func TestGrainHackBaseSepoliaNotice_AdminOnlyAndConfirmed(t *testing.T) {
 	d.Pool.QueryRow(context.Background(), `SELECT count(*) FROM grainhack_broadcast_notices`).Scan(&n)
 	if n != 0 {
 		t.Fatal("an unconfirmed send was recorded")
+	}
+}
+
+// A statement the payout-record retention period has redacted has no signed
+// document left: the agent routes answer 410 statement_redacted, never the
+// redacted text with an empty signature.
+func TestGrainHackStatement_RedactedIsGoneForTheAgent(t *testing.T) {
+	d := dbtest.DB(t)
+	e := ghEventFixture(t, d)
+	svc := ghService(d, true)
+	app := grainhackApp(t, d, handlers.NewGrainHackPayoutHandlerWith(svc, ghAgentToken))
+	ctx := context.Background()
+	admin := adminSuiteInsertUser(t, d, "admin")
+	is, err := svc.Issue(ctx, grainhack.IssueRequest{HackathonID: e.hid, Pool: grainhack.PoolContributor, ActorID: admin, Confirm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the retention pass does five years after an erased winner's
+	// payment, in its own transaction (internal/erasure/retention.go).
+	if _, err := d.Pool.Exec(ctx, `UPDATE users SET erased_at = now() WHERE id = $1`, e.winners[0]); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, q := range []string{
+		`SELECT set_config('grainlify.grainhack_results_retention', txid_current()::text, true)`,
+		`DELETE FROM grainhack_results_statement_lines WHERE user_id = '` + e.winners[0].String() + `'`,
+		`UPDATE grainhack_results_statements SET canonical_json = '{"redacted":"test"}', signature = '', redacted_at = now() WHERE id = '` + is.StatementID.String() + `'`,
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"/grainhack/results-statements/" + is.StatementID.String(),
+		"/grainhack/hackathons/" + e.hid.String() + "/results-statement",
+	} {
+		code, body := agentDo(t, app, "GET", path, ghAgentToken, nil)
+		if code != fiber.StatusGone || body["error"] != "statement_redacted" || body["statement"] != nil {
+			t.Errorf("%s: %d %v, want 410 statement_redacted", path, code, body)
+		}
+	}
+	code, body := adminSuiteDo(t, app, "GET", "/admin/hackathons/"+e.hid.String()+"/results-statement", adminSuiteToken(t, admin, "admin"), nil)
+	if code != fiber.StatusOK || body["redacted_at"] == nil {
+		t.Errorf("admin view of a redacted statement: %d %v", code, body)
 	}
 }

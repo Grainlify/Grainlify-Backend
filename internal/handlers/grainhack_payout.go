@@ -263,7 +263,7 @@ func (h *GrainHackPayoutHandler) AgentGetStatement(c *fiber.Ctx) error {
 	if err != nil {
 		return grainhackError(c, err)
 	}
-	return c.JSON(fiber.Map{"statement": is.Statement, "signature": is.Signature})
+	return agentStatement(c, is)
 }
 
 // AgentLatestStatement handles GET /grainhack/hackathons/:hackathon_id/results-statement
@@ -283,6 +283,16 @@ func (h *GrainHackPayoutHandler) AgentLatestStatement(c *fiber.Ctx) error {
 	is, err := h.svc.Latest(c.Context(), hid, grainhack.PoolContributor)
 	if err != nil {
 		return grainhackError(c, err)
+	}
+	return agentStatement(c, is)
+}
+
+// agentStatement answers the agent with {statement, signature}, or 410
+// statement_redacted for a statement the payout-record retention period has
+// redacted: there is no signed document left to give.
+func agentStatement(c *fiber.Ctx, is *grainhack.Issued) error {
+	if is.RedactedAt != nil {
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "statement_redacted", "redacted_at": is.RedactedAt})
 	}
 	return c.JSON(fiber.Map{"statement": is.Statement, "signature": is.Signature})
 }

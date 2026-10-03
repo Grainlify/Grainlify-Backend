@@ -164,6 +164,10 @@ type Issued struct {
 	IssuedBy        uuid.UUID    `json:"issued_by"`
 	IssuedAt        time.Time    `json:"issued_at"`
 	Lines           []IssuedLine `json:"lines"`
+	// RedactedAt is set once the payout-record retention period removed an
+	// erased account's lines (internal/erasure/retention.go): Statement is
+	// then the redacted document and Signature is empty.
+	RedactedAt *time.Time `json:"redacted_at,omitempty"`
 }
 
 // IssuedLine is one stored line.
@@ -629,10 +633,10 @@ func (s *Service) Get(ctx context.Context, statementID uuid.UUID) (*Issued, erro
 	var is Issued
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, supersedes, hackathon_id, pool, computation_id, currency, network, pool_minor::text,
-		       canonical_json, signature, signing_public_key, issued_by, issued_at
+		       canonical_json, signature, signing_public_key, issued_by, issued_at, redacted_at
 		FROM grainhack_results_statements WHERE id = $1`, statementID).Scan(
 		&is.StatementID, &is.Supersedes, &is.HackathonID, &is.Pool, &is.ComputationID, &is.Currency, &is.Network,
-		&is.PoolMinor, &is.Statement, &is.Signature, &is.PublicKey, &is.IssuedBy, &is.IssuedAt)
+		&is.PoolMinor, &is.Statement, &is.Signature, &is.PublicKey, &is.IssuedBy, &is.IssuedAt, &is.RedactedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
