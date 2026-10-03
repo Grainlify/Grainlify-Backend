@@ -186,14 +186,26 @@ func main() {
 	app := api.New(cfg, api.Deps{DB: database, Bus: eventBus})
 	slog.Info("api initialized", "step", "7", "action", "api_initialized")
 
+	stopSyncWorker := func() {}
+
 	// Background workers (dev convenience). In production we run `cmd/worker` instead.
 	// If NATS is configured, prefer the external worker process.
 	if cfg.NATSURL == "" && database != nil && database.Pool != nil {
 		slog.Info("starting background worker", "step", "8", "action", "starting_background_worker")
 		worker := syncjobs.New(cfg, database.Pool)
+		workerCtx, cancelWorker := context.WithCancel(context.Background())
+		workerDone := make(chan struct{})
+		stopSyncWorker = func() {
+			cancelWorker()
+			select {
+			case <-workerDone:
+			case <-time.After(5 * time.Second):
+			}
+		}
 		go func() {
+			defer close(workerDone)
 			slog.Info("background worker started")
-			_ = worker.Run(context.Background())
+			_ = worker.Run(workerCtx)
 		}()
 
 		// GrainHack's periodic reconciliation crawl (AI-specs.md §2.2) -
@@ -397,6 +409,11 @@ func main() {
 	}
 
 	slog.Info("initiating graceful shutdown", "step", "10", "action", "initiating_graceful_shutdown")
+	// The sync worker hands its in-flight job back to the queue before the
+	// process exits. Exiting under it is what left 111 jobs 'running' with no
+	// worker; the lease reaper would recover them, but only after the lease
+	// times out.
+	stopSyncWorker()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

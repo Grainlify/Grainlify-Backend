@@ -3,7 +3,6 @@ package syncjobs
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"golang.org/x/time/rate"
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
@@ -29,6 +27,12 @@ type Worker struct {
 	gh       *github.Client
 	notify   *notifications.Service
 	workerID string
+
+	// Queue timing; zero values mean the defaults in queue.go. Fields rather
+	// than constants only so tests can run the loop in milliseconds.
+	timing queueTiming
+	// exec runs one claimed job. nil means runJob; tests substitute it.
+	exec func(ctx context.Context, j claimedJob) error
 }
 
 func New(cfg config.Config, pool db.DBPool) *Worker {
@@ -54,80 +58,8 @@ func New(cfg config.Config, pool db.DBPool) *Worker {
 	}
 }
 
-func (w *Worker) Run(ctx context.Context) error {
-	if w.pool == nil {
-		return fmt.Errorf("db not configured")
-	}
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-			if err := w.processOne(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				slog.Error("sync worker error", "error", err)
-			}
-		}
-	}
-}
-
-func (w *Worker) processOne(ctx context.Context) error {
-	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var jobID uuid.UUID
-	var projectID uuid.UUID
-	var jobType string
-	err = tx.QueryRow(ctx, `
-SELECT id, project_id, job_type
-FROM sync_jobs
-WHERE status = 'pending'
-  AND run_at <= now()
-ORDER BY run_at ASC
-FOR UPDATE SKIP LOCKED
-LIMIT 1
-`).Scan(&jobID, &projectID, &jobType)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(ctx, `
-UPDATE sync_jobs
-SET status = 'running', locked_at = now(), locked_by = $2, updated_at = now()
-WHERE id = $1
-`, jobID, w.workerID)
-	if err != nil {
-		return err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-
-	runErr := w.runJob(ctx, jobID, projectID, jobType)
-
-	status := "completed"
-	lastErr := ""
-	if runErr != nil {
-		status = "failed"
-		lastErr = runErr.Error()
-	}
-
-	_, _ = w.pool.Exec(ctx, `
-UPDATE sync_jobs
-SET status = $2, attempts = attempts + 1, last_error = NULLIF($3, ''), updated_at = now()
-WHERE id = $1
-`, jobID, status, lastErr)
-
-	return nil
-}
-
-func (w *Worker) runJob(ctx context.Context, jobID uuid.UUID, projectID uuid.UUID, jobType string) error {
+func (w *Worker) runJob(ctx context.Context, j claimedJob) error {
+	jobID, projectID, jobType := j.ID, j.ProjectID, j.JobType
 	// Load project + owner to get GitHub token.
 	var fullName string
 	var ownerUserID uuid.UUID
