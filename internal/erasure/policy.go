@@ -77,11 +77,6 @@ var Erased = []Item{
 	{What: "Your record of accepting these Terms"},
 }
 
-// RetentionPeriodPlaceholder marks the period nobody has decided yet. It is
-// shown as-is, rather than a number invented here, so the gap is visible
-// instead of looking settled.
-const RetentionPeriodPlaceholder = "[retention period to be decided]"
-
 // Retained is what deletion keeps, why, and until when.
 var Retained = []Item{
 	{
@@ -105,6 +100,11 @@ var Retained = []Item{
 		Until: "5 years after the payment, then erased",
 	},
 	{
+		What:  "For payouts collected by claim, the published claim list: each address and amount, whose fingerprint was published on the blockchain",
+		Why:   "Every claim is checked against it, so it cannot change once published. It holds no account, GitHub login or name, and once the payout records above are erased nothing we hold connects an address in it to you",
+		Until: "permanently",
+	},
+	{
 		What:  "A record of identity-verification resets an administrator made: the date, the status before and the reason code, without your verification data",
 		Why:   "Fraud prevention: it is the record of what was decided and by whom",
 		Until: "90 days after the reset, then erased",
@@ -116,8 +116,8 @@ var Retained = []Item{
 	},
 	{
 		What:  "This deletion request: when it was made, what was erased and what was kept",
-		Why:   "So we can show that the deletion was carried out",
-		Until: RetentionPeriodPlaceholder,
+		Why:   "So we can show that the deletion was carried out. It records counts and reasons, never your data",
+		Until: "permanently",
 	},
 	{
 		What: "Your public GitHub activity on repositories listed on Grainlify, which we mirror from GitHub, and comments posted on GitHub on your behalf",
