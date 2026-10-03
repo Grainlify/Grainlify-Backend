@@ -346,7 +346,17 @@ func main() {
 	// is up (internal/erasure/retention.go). Daily: every period is counted in
 	// days or years. Outside the worker branch for the same reason as the
 	// executor above.
-	go erasure.NewRetention(database.Pool, erasureServices, 24*time.Hour).Run(context.Background())
+	//
+	// Off unless RETENTION_JOB_ENABLED is exactly "true": it deletes, and asks
+	// Didit to delete, so it is switched on only after its dry run
+	// (go run ./cmd/retention -dry-run) has been read against this database.
+	// The executor above does not depend on it.
+	if cfg.RetentionJobEnabled {
+		slog.Info("retention job: on (RETENTION_JOB_ENABLED=true)")
+		go erasure.NewRetention(database.Pool, erasureServices, 24*time.Hour).Run(context.Background())
+	} else {
+		slog.Info("retention job: off (RETENTION_JOB_ENABLED is not \"true\"); nothing past its retention period is erased")
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

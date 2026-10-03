@@ -182,6 +182,18 @@ type Config struct {
 	// missing secret must not become an open endpoint that anybody can use to
 	// send notifications to our users.
 	BountyEventsSecret string
+
+	// RetentionJobEnabled starts the daily retention pass
+	// (internal/erasure/retention.go), which deletes records whose retention
+	// period is over and asks Didit to delete the sessions they name. It
+	// ships off: it is on only when RETENTION_JOB_ENABLED is exactly "true",
+	// after somebody has read `go run ./cmd/retention -dry-run` against the
+	// database it would run on. Not getEnvBool: "1", "yes" or "on" left over
+	// in some environment must not switch on something that deletes.
+	//
+	// Account deletion on request (erasure.Executor) does not read this; a
+	// person's own deletion request is carried out either way.
+	RetentionJobEnabled bool
 }
 
 func Load() Config {
@@ -260,6 +272,8 @@ func Load() Config {
 		BountyLinkSigningKey: getEnv("BOUNTY_LINK_SIGNING_KEY", ""),
 		BountyAgentURL:       getEnv("BOUNTY_AGENT_URL", "https://agent.grainlify.com"),
 		BountyEventsSecret:   getEnv("BOUNTY_EVENTS_SECRET", ""),
+
+		RetentionJobEnabled: os.Getenv("RETENTION_JOB_ENABLED") == "true",
 	}
 }
 
