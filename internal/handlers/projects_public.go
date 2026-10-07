@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/jagadeesh/grainlify/backend/internal/ranking"
 	"log/slog"
@@ -198,9 +199,7 @@ WHERE p.id = $1 AND p.status = 'verified' AND p.deleted_at IS NULL
 		repoOK := false
 		r, repoErr := gh.GetRepo(ctx, token, fullName)
 		if repoErr != nil {
-			// If GitHub fetch fails (404/403), it's likely a private repo
-			errStr := repoErr.Error()
-			if strings.Contains(errStr, "404") || strings.Contains(errStr, "403") || strings.Contains(errStr, "Not Found") {
+			if repoRefusedAsPrivate(repoErr) {
 				slog.Info("project is private or inaccessible",
 					"project_id", projectID,
 					"github_full_name", fullName,
@@ -868,4 +867,39 @@ ORDER BY tag
 			"tags":       tags,
 		})
 	}
+}
+
+// repoRefusedAsPrivate reports whether a GetRepo failure means the repo must
+// not be shown - GitHub answers 404 for a private repo the caller cannot see.
+//
+// A rate-limit 403 is not that. This used to match any error containing "403",
+// so once the shared unauthenticated quota for the API's egress IP ran out,
+// every project fetched without an installation token answered 404
+// project_not_accessible - a public, listed repo reported as private, to every
+// caller, for as long as the quota stayed exhausted. That was
+// Jagadeeshftw/grainhack-sandbox during the first GrainHack event, with its
+// issues live and its project page a permanent skeleton. A rate limit now falls
+// through to the best-effort path below it, which serves the stored metadata.
+//
+// Any other 403 is still refused. It is rarer, and the cost of guessing wrong
+// is showing a repo that should be hidden.
+func repoRefusedAsPrivate(err error) bool {
+	var apiErr *github.GitHubAPIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case 404:
+			return true
+		case 403:
+			return !isGitHubRateLimit(apiErr)
+		}
+		return false
+	}
+	return strings.Contains(err.Error(), "Not Found")
+}
+
+func isGitHubRateLimit(e *github.GitHubAPIError) bool {
+	if e.RateLimitRemaining != nil && *e.RateLimitRemaining == 0 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(e.Message), "rate limit")
 }
