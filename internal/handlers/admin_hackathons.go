@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -144,6 +146,7 @@ type updateHackathonRequest struct {
 // Update handles PUT /admin/hackathons/:id. Every field is optional - only
 // provided fields are changed (COALESCE against the existing row), matching
 // how a form saves one field at a time as an admin fills in requirements.
+// Writes a config_audit row for every changed field to maintain auditability.
 func (h *AdminHackathonsHandler) Update() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if h.db == nil || h.db.Pool == nil {
@@ -202,7 +205,49 @@ func (h *AdminHackathonsHandler) Update() fiber.Handler {
 			maintainer = &split.MaintainerPool
 		}
 
-		tag, err := h.db.Pool.Exec(c.Context(), `
+		tx, err := h.db.Pool.Begin(c.Context())
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "db_tx_start_failed"})
+		}
+		defer func() { _ = tx.Rollback(c.Context()) }()
+
+		var (
+			oldName            string
+			oldAnnouncedAt     *time.Time
+			oldAppPeriodStart  *time.Time
+			oldAppPeriodEnd    *time.Time
+			oldIssuePrepStart  *time.Time
+			oldStartsAt        *time.Time
+			oldEndsAt          *time.Time
+			oldGraceHours      int
+			oldSponsorTotal    *string
+			oldPlatformFee     *string
+			oldPlatformFeeRate *string
+			oldMaintainerShare *string
+			oldContributorPool *string
+			oldMaintainerPool  *string
+		)
+
+		err = tx.QueryRow(c.Context(), `
+SELECT name, announced_at, application_period_start, application_period_end, issue_prep_start,
+       starts_at, ends_at, merge_grace_period_hours,
+       sponsor_total_usdc::text, platform_fee_usdc::text, platform_fee_rate_pct::text,
+       maintainer_share_pct::text, contributor_prize_pool::text, maintainer_prize_pool::text
+FROM hackathons WHERE id = $1 FOR UPDATE
+`, id).Scan(
+			&oldName, &oldAnnouncedAt, &oldAppPeriodStart, &oldAppPeriodEnd, &oldIssuePrepStart,
+			&oldStartsAt, &oldEndsAt, &oldGraceHours,
+			&oldSponsorTotal, &oldPlatformFee, &oldPlatformFeeRate,
+			&oldMaintainerShare, &oldContributorPool, &oldMaintainerPool,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "hackathon_not_found"})
+		}
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "hackathon_fetch_failed"})
+		}
+
+		_, err = tx.Exec(c.Context(), `
 UPDATE hackathons SET
   name = COALESCE($2, name),
   announced_at = COALESCE($3, announced_at),
@@ -228,9 +273,109 @@ WHERE id = $1
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "hackathon_update_failed"})
 		}
-		if tag.RowsAffected() == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "hackathon_not_found"})
+
+		auditDiff := func(key string, oldVal *string, newVal *string) error {
+			if newVal == nil {
+				return nil
+			}
+			if oldVal != nil && *oldVal == *newVal {
+				return nil
+			}
+			_, err := tx.Exec(c.Context(), `
+INSERT INTO config_audit (hackathon_id, key, old_value, new_value, actor_user_id)
+VALUES ($1, $2, $3, $4, $5)
+`, id, key, oldVal, newVal, actorID)
+			return err
 		}
+
+		auditTimeDiff := func(key string, oldTime *time.Time, newTime *time.Time) error {
+			if newTime == nil {
+				return nil
+			}
+			var oldStr *string
+			if oldTime != nil {
+				s := oldTime.UTC().Format(time.RFC3339)
+				oldStr = &s
+			}
+			newStr := newTime.UTC().Format(time.RFC3339)
+			return auditDiff(key, oldStr, &newStr)
+		}
+
+		if req.Name != nil {
+			if err := auditDiff("name", &oldName, req.Name); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.AnnouncedAt != nil {
+			if err := auditTimeDiff("announced_at", oldAnnouncedAt, req.AnnouncedAt); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.ApplicationPeriodStart != nil {
+			if err := auditTimeDiff("application_period_start", oldAppPeriodStart, req.ApplicationPeriodStart); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.ApplicationPeriodEnd != nil {
+			if err := auditTimeDiff("application_period_end", oldAppPeriodEnd, req.ApplicationPeriodEnd); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.IssuePrepStart != nil {
+			if err := auditTimeDiff("issue_prep_start", oldIssuePrepStart, req.IssuePrepStart); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.StartsAt != nil {
+			if err := auditTimeDiff("starts_at", oldStartsAt, req.StartsAt); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.EndsAt != nil {
+			if err := auditTimeDiff("ends_at", oldEndsAt, req.EndsAt); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.MergeGracePeriodHours != nil {
+			oldGraceStr := fmt.Sprintf("%d", oldGraceHours)
+			newGraceStr := fmt.Sprintf("%d", *req.MergeGracePeriodHours)
+			if err := auditDiff("merge_grace_period_hours", &oldGraceStr, &newGraceStr); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+		if req.SponsorTotalUSDC != nil {
+			formatFloat := func(f *float64) *string {
+				if f == nil {
+					return nil
+				}
+				s := fmt.Sprintf("%.6f", *f)
+				s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+				return &s
+			}
+			if err := auditDiff("sponsor_total_usdc", oldSponsorTotal, formatFloat(sponsorTotal)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+			if err := auditDiff("platform_fee_usdc", oldPlatformFee, formatFloat(feeUSDC)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+			if err := auditDiff("platform_fee_rate_pct", oldPlatformFeeRate, formatFloat(feeRatePct)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+			if err := auditDiff("maintainer_share_pct", oldMaintainerShare, formatFloat(maintPct)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+			if err := auditDiff("contributor_prize_pool", oldContributorPool, formatFloat(contributor)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+			if err := auditDiff("maintainer_prize_pool", oldMaintainerPool, formatFloat(maintainer)); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "audit_write_failed"})
+			}
+		}
+
+		if err := tx.Commit(c.Context()); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "tx_commit_failed"})
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 	}
 }
