@@ -113,6 +113,66 @@ func SyncVerdicts(
 	return nil
 }
 
+// candidateSubmittedPR is a submitted PR that names a GrainHack issue, before
+// merge.
+type candidateSubmittedPR struct {
+	PRNumber    int
+	AuthorLogin string
+	IssueNumber int
+	HackathonID uuid.UUID
+}
+
+// SyncQualifyingPRs applies AI-specs.md §4.6's "Qualifying PR submitted ->
+// slot freed immediately, timer stops" for every PR linking a GrainHack issue
+// submitted by its assigned contributor.
+//
+// Called from syncjobs' PR sync, before SyncVerdicts.
+func SyncQualifyingPRs(
+	ctx context.Context,
+	pool db.DBPool,
+	projectID uuid.UUID,
+) error {
+	rows, err := pool.Query(ctx, `
+SELECT pr.number, COALESCE(pr.author_login, ''),
+       hi.issue_number, hi.hackathon_id
+FROM github_pull_requests pr
+JOIN hackathon_issues hi ON hi.project_id = pr.project_id
+JOIN hackathons h ON h.id = hi.hackathon_id
+JOIN hackathon_assignments a
+       ON a.hackathon_issue_id = hi.id AND a.status = 'active'
+WHERE pr.project_id = $1
+  AND EXISTS (
+    SELECT 1 FROM hackathon_project_applications hpa
+    WHERE hpa.hackathon_id = hi.hackathon_id AND hpa.project_id = pr.project_id
+      AND hpa.status = 'accepted'
+  )
+  AND lower(pr.author_login) = lower(a.github_login)
+  AND `+closingKeywordSQL)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var toRecord []candidateSubmittedPR
+	for rows.Next() {
+		var c candidateSubmittedPR
+		if err := rows.Scan(&c.PRNumber, &c.AuthorLogin, &c.IssueNumber, &c.HackathonID); err != nil {
+			return err
+		}
+		toRecord = append(toRecord, c)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, c := range toRecord {
+		if err := RecordQualifyingPR(ctx, pool, c.HackathonID, projectID, c.IssueNumber, c.PRNumber, c.AuthorLogin); err != nil && !errors.Is(err, ErrNoActiveAssignment) {
+			return fmt.Errorf("record qualifying PR #%d: %w", c.PRNumber, err)
+		}
+	}
+	return nil
+}
+
 func loadCandidatePRs(ctx context.Context, pool db.DBPool, projectID uuid.UUID) ([]candidatePR, error) {
 	rows, err := pool.Query(ctx, `
 SELECT pr.number, COALESCE(pr.author_login, ''), pr.merged_at_github,

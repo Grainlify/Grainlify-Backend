@@ -316,3 +316,53 @@ func TestSyncOneVerdict_RepoAdminCondition(t *testing.T) {
 		}
 	})
 }
+
+// TestSyncQualifyingPRs_RecordsPRSubmission verifies that SyncQualifyingPRs transitions
+// active assignments to pr_submitted and sets qualifying_pr_number when an assigned contributor
+// submits an open PR referencing the issue (§4.6). Closes #572.
+func TestSyncQualifyingPRs_RecordsPRSubmission(t *testing.T) {
+	d := dbtest.DB(t)
+	pool := d.Pool
+	ctx := context.Background()
+
+	projectID := jxFxProject(t, pool, "test-org/test-repo")
+	hackathonID := jxFxHackathon(t, pool, "Test GrainHack", time.Now().Add(-24*time.Hour), time.Now().Add(24*time.Hour))
+	jxFxAcceptedApplication(t, pool, hackathonID, projectID)
+
+	issueID := jxFxIssue(t, pool, hackathonID, projectID, 42, "docs")
+	jxFxAssignment(t, pool, issueID, "hack-contributor", "active")
+
+	// Insert unmerged PR from assigned contributor
+	if _, err := pool.Exec(ctx, `
+INSERT INTO github_pull_requests
+  (project_id, github_pr_id, number, state, title, body, author_login, url, merged)
+VALUES ($1, 99901, 101, 'open', 'PR', 'Closes #42', 'hack-contributor', 'https://example.test', false)
+`, projectID); err != nil {
+		t.Fatalf("insert open PR: %v", err)
+	}
+
+	if err := SyncQualifyingPRs(ctx, pool, projectID); err != nil {
+		t.Fatalf("SyncQualifyingPRs: %v", err)
+	}
+
+	var status string
+	var prNumber *int
+	var staleAt *time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT status, qualifying_pr_number, stale_at
+FROM hackathon_assignments
+WHERE hackathon_issue_id = $1`, issueID).Scan(&status, &prNumber, &staleAt); err != nil {
+		t.Fatalf("query assignment: %v", err)
+	}
+
+	if status != "pr_submitted" {
+		t.Errorf("status = %q, want pr_submitted", status)
+	}
+	if prNumber == nil || *prNumber != 101 {
+		t.Errorf("qualifying_pr_number = %v, want 101", prNumber)
+	}
+	if staleAt != nil {
+		t.Errorf("stale_at = %v, want nil (stale timer must stop upon PR submission)", staleAt)
+	}
+}
+
