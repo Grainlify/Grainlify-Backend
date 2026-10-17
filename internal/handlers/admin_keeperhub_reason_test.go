@@ -12,6 +12,7 @@ import (
 
 	"github.com/jagadeesh/grainlify/backend/internal/config"
 	"github.com/jagadeesh/grainlify/backend/internal/hackathon"
+	"github.com/jagadeesh/grainlify/backend/internal/keeperhub"
 	"github.com/jagadeesh/grainlify/backend/internal/keeperhubrail"
 )
 
@@ -29,6 +30,7 @@ func TestResumeReasonMatchesTheReleaseRefusalName(t *testing.T) {
 		keeperhubrail.ErrRunFailed,
 		&keeperhubrail.UnreconciledLegsError{LegIDs: []uuid.UUID{uuid.New()}},
 		keeperhubrail.ErrNothingUnpaid,
+		keeperhub.ErrWorkflowDisabled,
 	} {
 		app := fiber.New()
 		app.Get("/", func(c *fiber.Ctx) error { return keeperhubError(c, err, uuid.New()) })
