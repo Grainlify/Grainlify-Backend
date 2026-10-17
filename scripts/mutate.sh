@@ -18,6 +18,11 @@
 #      the intent was to clear x - and was recorded as a survivor. It proved
 #      nothing about the tests at all.
 #
+#   4. A pattern matched TWO places and perl took the first. The mutation landed
+#      in a constructor the filtered test never runs, nothing broke, and the run
+#      reported "survived" - which reads as "this property is untested" and
+#      points the reader at innocent code. Applied and compiled were both true.
+#
 # All three are the same failure: the harness reported on something other than
 # what it claimed to measure. A no-op patch reporting a survivor and a build error
 # reporting a kill are one bug wearing different clothes.
@@ -29,6 +34,9 @@
 #   * a CONTROL mutation, known to be lethal, is actually killed - and if it is
 #     not, every other result in the run is void
 #   * each patch measurably changed the file
+#   * each pattern matches exactly ONE place, because a hash check proves a patch
+#     applied and cannot say where. Applied, compiled, and in the right place are
+#     three conditions, and only the first two are visible in a diff-free check.
 #   * a survivor is reported as UNVERIFIED, because a survivor is the one outcome
 #     that is indistinguishable from a broken patch
 #
@@ -103,8 +111,46 @@ apply() {
   [ "$before" != "$after" ]
 }
 
+# How many places the pattern matches, without touching the file.
+#
+# Appends /g and reads perl's own substitution count, so nothing here has to
+# parse a regex out of the expression - the delimiters, escapes and existing
+# flags are perl's problem, which is the only way this stays correct for
+# patterns containing slashes.
+#
+# Prints nothing when the expression is not a countable s/// form. That is not
+# treated as "one": a count that cannot be taken is reported and the mutation is
+# skipped, because the whole point of the check is not to report a number
+# nobody established.
+match_count() {
+  local expr="$1"
+  perl -0ne 'my $n = ('"${expr}"'g); print 0 + $n' "$TARGET" 2>/dev/null
+}
+
+# Refuses rather than guessing. Picking the first match produces a result
+# indistinguishable from a real one, which is worse than no result: the run
+# prints "survived" for a property the tests may cover perfectly well.
+unique_or_refuse() {
+  local label="$1" expr="$2" n
+  n="$(match_count "$expr")"
+  if [ -z "$n" ]; then
+    printf '  %-52s SKIPPED (match count could not be taken)\n' "$label"
+    return 1
+  fi
+  if [ "$n" -gt 1 ]; then
+    printf '  %-52s AMBIGUOUS (%s matches) - refusing to guess which\n' "$label" "$n"
+    return 1
+  fi
+  return 0
+}
+
 echo ""
 echo "=== control (must be killed, or the run is void) ==="
+if ! unique_or_refuse "control" "$CONTROL"; then
+  echo "  ABORT: the control pattern is not anchored to exactly one place, so a"
+  echo "  killed control would not establish that the harness works."
+  exit 1
+fi
 if ! apply "$CONTROL"; then
   echo "  ABORT: the control expression did not change the file. The pattern is wrong."
   exit 1
@@ -122,10 +168,16 @@ echo "  control killed - the harness can detect a broken build and a failing tes
 echo ""
 echo "=== mutations ==="
 survivors=0
+ambiguous=0
 for spec in "$@"; do
   label="${spec%%::*}"
   expr="${spec#*::}"
   if [ "$label" = "$spec" ]; then label="$expr"; fi
+
+  if ! unique_or_refuse "$label" "$expr"; then
+    ambiguous=$((ambiguous + 1))
+    continue
+  fi
 
   if ! apply "$expr"; then
     printf '  %-52s NOT APPLIED (pattern matched nothing)\n' "$label"
@@ -154,6 +206,14 @@ if [ "$(outcome)" != "pass" ]; then
 fi
 echo "  baseline still passes - restores were clean"
 
+if [ "$ambiguous" -gt 0 ]; then
+  echo ""
+  echo "$ambiguous mutation(s) were NOT RUN: their pattern matched more than one"
+  echo "place, or the count could not be taken. Anchor each to exactly one line -"
+  echo "include the surrounding statement if the text repeats - and run again."
+  echo "This run is incomplete, not clean."
+fi
+
 if [ "$survivors" -gt 0 ]; then
   echo ""
   echo "$survivors survivor(s) marked UNVERIFIED. Before recording any of them as a"
@@ -162,4 +222,10 @@ if [ "$survivors" -gt 0 ]; then
   echo "  * if you cannot, the patch is a no-op and proves nothing"
   echo "A no-op patch reporting a survivor is the third failure mode in this file's"
   echo "header, and it is the one that looks most like a finding."
+fi
+
+# Incomplete is not clean. A run that skipped mutations must not exit 0, or it
+# reads in CI exactly like one that had nothing to report.
+if [ "$ambiguous" -gt 0 ]; then
+  exit 1
 fi
