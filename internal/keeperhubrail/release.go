@@ -346,6 +346,12 @@ func (s *Service) markRejected(ctx context.Context, attemptID uuid.UUID, ack kee
 		"dispatch rejected, nothing sent: "+cause.Error()); err != nil {
 		return
 	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE keeperhub_payout_runs
+		SET state = 'planned', updated_at = now()
+		WHERE id = (SELECT run_id FROM keeperhub_dispatch_attempts WHERE id = $1)`, attemptID); err != nil {
+		return
+	}
 	_ = tx.Commit(ctx)
 }
 
@@ -375,6 +381,10 @@ func (s *Service) markUnacknowledged(ctx context.Context, attemptID uuid.UUID, k
 		SET status = 'unknown', last_error = $2, updated_at = now()
 		WHERE last_attempt_id = $1 AND status = 'dispatched'`, attemptID,
 		"dispatch outcome unknown: "+cause.Error())
+	_, _ = tx.Exec(ctx, `
+		UPDATE keeperhub_payout_runs
+		SET state = 'planned', updated_at = now()
+		WHERE id = (SELECT run_id FROM keeperhub_dispatch_attempts WHERE id = $1)`, attemptID)
 	_ = tx.Commit(ctx)
 }
 
